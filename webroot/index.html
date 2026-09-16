@@ -1,0 +1,2714 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="light dark">
+<title>玄戒O3 · Abel 调度工具箱</title>
+<style>
+/* ============================================================
+   玄戒O3 · Abel 调度工具箱 —— WebUI 样式
+   风格：iOS / Miuix 混合 —— 大圆角卡片、分组列表、胶囊按钮
+   主题：跟随系统深浅色（MIUI/Miuix 的 prefers-color-scheme）
+   ============================================================ */
+
+:root {
+  --bg:        #f2f3f7;
+  --bg-elev:   #ffffff;
+  --card:      #ffffff;
+  --line:      rgba(0, 0, 0, .075);
+  --line-soft: rgba(0, 0, 0, .045);
+  --text:      #101114;
+  --sub:       #8a8f99;
+  --sub2:      #a9aeb8;
+  --accent:    #0a84ff;
+  --accent-2:  #3f9bff;
+  --ok:        #24c07a;
+  --warn:      #f2a33c;
+  --bad:       #ff4d4f;
+  --chip-bg:   rgba(120, 120, 128, .12);
+  --shadow:    0 1px 2px rgba(16, 18, 24, .05), 0 8px 24px -12px rgba(16, 18, 24, .14);
+  --radius:    16px;
+  --radius-s:  11px;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg:        #0b0c0f;
+    --bg-elev:   #14161a;
+    --card:      #17191e;
+    --line:      rgba(255, 255, 255, .09);
+    --line-soft: rgba(255, 255, 255, .05);
+    --text:      #f2f3f5;
+    --sub:       #9aa0ab;
+    --sub2:      #767c87;
+    --accent:    #3f9bff;
+    --accent-2:  #62b0ff;
+    --ok:        #35d18b;
+    --warn:      #ffb454;
+    --bad:       #ff5c5e;
+    --chip-bg:   rgba(120, 120, 128, .22);
+    --shadow:    0 1px 2px rgba(0, 0, 0, .4);
+  }
+}
+
+* { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.5 -apple-system, BlinkMacSystemFont, "MiSans", "HarmonyOS Sans SC",
+        "Source Han Sans SC", "Noto Sans CJK SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior-y: contain;
+}
+
+body { padding-bottom: 28px; }
+
+.mono {
+  font-family: ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+  font-size: .92em;
+}
+
+/* ---------- 顶栏 ---------- */
+header {
+  position: sticky; top: 0; z-index: 30;
+  /* 关键：不做全屏时状态栏是可见的，顶栏要避开状态栏高度 */
+  padding: calc(env(safe-area-inset-top, 0px) + 12px) 16px 0;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  backdrop-filter: saturate(180%) blur(20px);
+  -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-bottom: 1px solid transparent;
+  transition: border-color .2s;
+}
+header.scrolled { border-bottom-color: var(--line); }
+
+.h-top { display: flex; align-items: center; gap: 9px; }
+.h-top h1 { margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -.2px; }
+.h-ver {
+  font-size: 11px; color: var(--sub);
+  background: var(--chip-bg); padding: 2px 8px; border-radius: 99px;
+}
+.h-chips { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+
+.h-sub {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--sub); margin-top: 3px; min-height: 17px;
+}
+.h-sub #saved { margin-left: auto; }
+
+.tabs {
+  display: flex; gap: 4px; margin: 10px -16px 0; padding: 0 16px 9px;
+  overflow-x: auto; scrollbar-width: none;
+}
+.tabs::-webkit-scrollbar { display: none; }
+.tabs button {
+  flex: none; border: 0; background: transparent; color: var(--sub);
+  font: inherit; font-size: 14px; font-weight: 500;
+  padding: 7px 13px; border-radius: 99px; cursor: pointer;
+  transition: background .16s, color .16s;
+}
+.tabs button.on { background: var(--card); color: var(--text); font-weight: 600; box-shadow: var(--shadow); }
+
+main { padding: 14px 16px 0; }
+
+/* ---------- 分组 ---------- */
+.group { margin-bottom: 20px; }
+.g-title {
+  font-size: 12.5px; font-weight: 600; color: var(--sub);
+  padding: 0 4px 7px; letter-spacing: .2px;
+}
+/* 标题行 = 标题 + 右侧小按钮（同一行，按钮居右）。
+   .rh-t 用 inline-flex 是为了让 ⓘ 紧贴标题文字，而不是被 flex:1 推到中间。 */
+.g-title.rowhead { display: flex; align-items: center; gap: 10px; }
+.g-title.rowhead .rh-t { display: inline-flex; align-items: center; gap: 5px; min-width: 0; }
+.g-title.rowhead .btn { flex: none; margin-left: auto; }
+
+/* ⓘ 说明符号：点它展开该模板卡的详情浮层（与点模板名等效） */
+.tpl-i {
+  flex: none; width: 15px; height: 15px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10.5px; font-weight: 700; font-style: italic; line-height: 1;
+  font-family: Georgia, "Times New Roman", serif;
+  background: color-mix(in srgb, var(--fg) 11%, transparent);
+  color: var(--sub); cursor: pointer; user-select: none;
+}
+.tpl-i:active { background: color-mix(in srgb, var(--accent) 22%, transparent); color: var(--accent); }
+.g-foot { font-size: 12px; color: var(--sub); line-height: 1.6; padding: 8px 4px 0; }
+.g-foot b { color: var(--text); font-weight: 600; }
+
+.card {
+  background: var(--card); border-radius: var(--radius);
+  box-shadow: var(--shadow); overflow: hidden;
+}
+.card > .row + .row { border-top: 1px solid var(--line-soft); }
+
+.row { display: flex; align-items: center; gap: 12px; padding: 13px 15px; }
+.row.tappable { cursor: pointer; }
+.row.tappable:active { background: var(--line-soft); }
+.r-main { flex: 1; min-width: 0; }
+.r-t { font-size: 14.5px; font-weight: 500; display: flex; align-items: center; gap: 7px; }
+.r-s { font-size: 12.5px; color: var(--sub); margin-top: 2px; line-height: 1.45; word-break: break-all; }
+.r-s .mono { color: var(--sub); }
+
+.kv-row { display: flex; align-items: baseline; gap: 12px; padding: 11px 15px; }
+.kv-row + .kv-row { border-top: 1px solid var(--line-soft); }
+.kv-row .k { font-size: 13.5px; color: var(--text); flex: none; }
+.kv-row .k.mono { color: var(--sub); }
+.kv-row .v { margin-left: auto; font-size: 13.5px; color: var(--sub); text-align: right; word-break: break-all; }
+
+.empty { padding: 26px 16px; text-align: center; color: var(--sub); font-size: 13.5px; }
+
+/* ---------- 圆点 / 胶囊 ---------- */
+.dot { width: 7px; height: 7px; border-radius: 50%; flex: none; display: inline-block; }
+.d-ok { background: var(--ok); } .d-warn { background: var(--warn); } .d-bad { background: var(--bad); }
+
+.pill {
+  font-size: 11.5px; font-weight: 500; padding: 2.5px 8px; border-radius: 99px;
+  background: var(--chip-bg); color: var(--sub); white-space: nowrap;
+}
+.pill.ok     { background: color-mix(in srgb, var(--ok) 16%, transparent);   color: var(--ok); }
+.pill.warn   { background: color-mix(in srgb, var(--warn) 18%, transparent); color: var(--warn); }
+.pill.bad    { background: color-mix(in srgb, var(--bad) 16%, transparent);  color: var(--bad); }
+.pill.accent { background: color-mix(in srgb, var(--accent) 15%, transparent); color: var(--accent); }
+
+/* ---------- 按钮 ---------- */
+.btn {
+  appearance: none; border: 0; cursor: pointer;
+  font: inherit; font-size: 14px; font-weight: 500;
+  padding: 10px 16px; border-radius: 12px;
+  background: var(--chip-bg); color: var(--text);
+  transition: opacity .15s, transform .1s;
+}
+.btn:active { transform: scale(.975); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.danger  { background: color-mix(in srgb, var(--bad) 15%, transparent); color: var(--bad); }
+.btn.ghost   { background: transparent; color: var(--accent); }
+.btn[disabled] { opacity: .38; pointer-events: none; }
+.btn-row { display: flex; gap: 9px; padding: 12px 15px; flex-wrap: wrap; }
+.btn-row .btn { flex: 1; min-width: 108px; }
+/* 小尺寸按钮（模板卡「套用」/ 标题行「套用到所选」）：
+   刻意**不**用 .btn-row，避免被 .btn-row .btn { flex:1; min-width:108px } 撑开。 */
+.btn-xs { font-size: 12px; font-weight: 500; padding: 5px 11px; border-radius: 9px; }
+.btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 9px; padding: 12px 15px; }
+
+.seg { display: flex; background: var(--chip-bg); border-radius: 10px; padding: 3px; gap: 3px; flex: none; }
+.seg button {
+  border: 0; background: transparent; color: var(--sub); font: inherit; font-size: 12.5px;
+  font-weight: 500; padding: 5px 11px; border-radius: 8px; cursor: pointer;
+}
+.seg button.on { background: var(--card); color: var(--text); box-shadow: var(--shadow); }
+
+/* ---------- 表单 ---------- */
+input.f, select.f, textarea.f {
+  font: inherit; font-size: 14px; color: var(--text);
+  background: var(--chip-bg); border: 0; border-radius: 10px;
+  padding: 9px 12px; outline: none; min-width: 0; width: 100%;
+}
+select.f { appearance: none; padding-right: 30px;
+  background-image: linear-gradient(45deg, transparent 50%, var(--sub) 50%),
+                    linear-gradient(135deg, var(--sub) 50%, transparent 50%);
+  background-position: calc(100% - 15px) 50%, calc(100% - 10px) 50%;
+  background-size: 5px 5px, 5px 5px; background-repeat: no-repeat;
+}
+textarea.f { resize: vertical; line-height: 1.5; }
+
+.sw { position: relative; display: inline-block; width: 47px; height: 29px; flex: none; }
+.sw input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; }
+.sw i {
+  position: absolute; inset: 0; border-radius: 99px;
+  background: var(--chip-bg); transition: background .2s;
+}
+.sw i::after {
+  content: ''; position: absolute; top: 2.5px; left: 2.5px;
+  width: 24px; height: 24px; border-radius: 50%; background: #fff;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .28); transition: transform .2s;
+}
+.sw input:checked + i { background: var(--ok); }
+.sw input:checked + i::after { transform: translateX(18px); }
+
+/* ---------- 提示条 ---------- */
+.warnbox {
+  margin: 0 15px 12px; padding: 11px 13px; border-radius: 12px;
+  font-size: 12.5px; line-height: 1.6;
+  background: color-mix(in srgb, var(--warn) 11%, transparent);
+  color: var(--text);
+}
+.warnbox.bad { background: color-mix(in srgb, var(--bad) 11%, transparent); }
+.warnbox.ok  { background: color-mix(in srgb, var(--ok) 11%, transparent); }
+.warnbox b { font-weight: 600; }
+
+/* ---------- 搜索 ---------- */
+.search { position: relative; display: flex; align-items: center; gap: 8px;
+  background: var(--card); border-radius: 12px; padding: 9px 13px; box-shadow: var(--shadow); }
+.search svg { color: var(--sub2); flex: none; }
+.search input {
+  flex: 1; border: 0; background: transparent; outline: none;
+  font: inherit; font-size: 14.5px; color: var(--text); min-width: 0;
+}
+.search input::placeholder { color: var(--sub2); }
+
+.filters { display: flex; gap: 6px; margin-top: 9px; overflow-x: auto; scrollbar-width: none; }
+.filters::-webkit-scrollbar { display: none; }
+.filters button {
+  flex: none; border: 0; background: var(--card); color: var(--sub);
+  font: inherit; font-size: 12.5px; padding: 6px 12px; border-radius: 99px;
+  cursor: pointer; box-shadow: var(--shadow);
+}
+.filters button.on { background: var(--accent); color: #fff; }
+
+/* ---------- 应用列表 ---------- */
+.listbox { max-height: 62vh; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+.app-row { display: flex; align-items: center; gap: 11px; padding: 10px 14px; cursor: pointer; }
+.app-row + .app-row { border-top: 1px solid var(--line-soft); }
+.app-row:active { background: var(--line-soft); }
+.app-row.sel { background: color-mix(in srgb, var(--accent) 9%, transparent); }
+
+.app-ico {
+  width: 38px; height: 38px; border-radius: 10px; flex: none;
+  object-fit: cover; background: var(--chip-bg);
+}
+.app-ico.ph {
+  display: flex; align-items: center; justify-content: center;
+  color: #fff; font-size: 16px; font-weight: 600;
+}
+.app-info { flex: 1; min-width: 0; }
+.app-name { font-size: 14px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-pkg  { font-size: 11.5px; color: var(--sub2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-tier {
+  font-size: 11px; padding: 3px 8px; border-radius: 99px; flex: none;
+  background: var(--chip-bg); color: var(--sub); max-width: 96px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+/* 右上角刷新小按钮（连接状态旁边） */
+.h-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 26px; height: 26px; margin-left: 6px; padding: 0;
+  border-radius: 50%; cursor: pointer;
+  background: color-mix(in srgb, var(--fg) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  color: var(--sub); transition: transform .25s ease, color .2s ease;
+}
+.h-btn:active { transform: rotate(180deg); color: var(--accent); }
+
+/* 开关行（模式同步线程） */
+.swrow { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; }
+.swrow input { display: none; }
+.sw {
+  flex: 0 0 auto; width: 40px; height: 23px; margin-top: 2px; border-radius: 12px;
+  background: color-mix(in srgb, var(--fg) 16%, transparent); position: relative;
+  transition: background .18s ease;
+}
+.sw::after {
+  content: ''; position: absolute; top: 2.5px; left: 2.5px; width: 18px; height: 18px;
+  border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(0,0,0,.3);
+  transition: transform .18s ease;
+}
+.swrow input:checked + .sw { background: var(--accent); }
+.swrow input:checked + .sw::after { transform: translateX(17px); }
+.swtxt { font-size: 13.5px; line-height: 1.55; }
+.sws { display: block; margin-top: 3px; font-size: 11.5px; color: var(--sub2); line-height: 1.6; }
+
+.app-tier.none { color: var(--sub2); }
+.app-tier.set  { background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent); }
+
+/* ---------- 紧凑选择行（模板页 / 游戏页：一屏显示更多应用） ---------- */
+.app-row .app-sel { width: 18px; height: 18px; flex: none; margin: 0; accent-color: var(--accent); }
+.app-row.pick, .app-row.ro { padding: 6px 12px; gap: 9px; }
+.app-row.ro { cursor: default; }
+.app-row.pick .app-ico, .app-row.ro .app-ico { width: 26px; height: 26px; border-radius: 7px; font-size: 13px; }
+.app-row.pick .app-info, .app-row.ro .app-info { display: flex; align-items: baseline; gap: 7px; }
+.app-row.pick .app-name, .app-row.ro .app-name { font-size: 13px; flex: 0 1 auto; max-width: 46%; }
+.app-row.pick .app-pkg, .app-row.ro .app-pkg { flex: 1 1 auto; }
+.app-row.pick .app-tier, .app-row.ro .app-tier { max-width: 88px; }
+
+.ck {
+  width: 21px; height: 21px; border-radius: 50%; flex: none;
+  border: 1.5px solid var(--line); position: relative;
+}
+.ck.on { background: var(--accent); border-color: var(--accent); }
+.ck.on::after {
+  content: ''; position: absolute; left: 6.6px; top: 3.2px;
+  width: 5px; height: 10px; border: solid #fff; border-width: 0 2px 2px 0; transform: rotate(43deg);
+}
+.virtual-hint { padding: 13px; text-align: center; color: var(--sub2); font-size: 12.5px; }
+
+/* ---------- 底部操作条 ---------- */
+.actionbar {
+  position: fixed; left: 0; right: 0; z-index: 40;
+  bottom: 0;
+  padding: 11px 16px calc(11px + env(safe-area-inset-bottom, 0px));
+  background: color-mix(in srgb, var(--bg-elev) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(20px); -webkit-backdrop-filter: saturate(180%) blur(20px);
+  border-top: 1px solid var(--line);
+  display: flex; align-items: center; gap: 11px;
+  transform: translateY(130%); transition: transform .24s cubic-bezier(.32, .72, 0, 1);
+}
+.actionbar.on { transform: none; }
+.ab-t { flex: 1; font-size: 13px; color: var(--sub); }
+
+/* ---------- 模板卡 ---------- */
+.tpl {
+  border-radius: var(--radius-s); background: var(--card);
+  box-shadow: var(--shadow); padding: 13px 14px; margin-bottom: 10px;
+  position: relative;
+}
+.tpl:last-child { margin-bottom: 0; }
+.tpl-h { display: flex; align-items: center; gap: 8px; margin-bottom: 0; }
+/* .tpl-n = 名称 + ⓘ 的紧贴组合。ⓘ 必须跟名称在同一个 inline-flex 里，
+   否则会被 .tpl-h 的 gap 均分，视觉上「飘」在名称与徽标之间。 */
+.tpl-h .tpl-n { display: inline-flex; align-items: center; gap: 5px; min-width: 0; flex: 1; }
+.tpl-h .n { font-size: 14.5px; font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tpl-h .n[data-act] { cursor: pointer; }
+/* 卡内「套用」：与标题同一行、居右、小尺寸（margin-left:auto 把它推到底） */
+.tpl-apply { flex: none; margin-left: auto; }
+/* 模板详情（其余 / 最重 / 次重 / comm）：
+   默认隐藏；展开时**内联**在卡片里（普通文档流），由卡片自己撑高。
+   ⚠ 曾经是 position:absolute + top:41px —— 内容一多就超出卡片下边界，
+     被 .card 的 overflow:hidden 裁掉，用户报「超出部分看不见」。
+     改成流式块根治；顺便加 max-height + 滚动兜底极端情况。 */
+.tpl-b {
+  display: none;
+  flex-wrap: wrap; gap: 6px; margin-top: 9px; padding: 10px 11px;
+  background: var(--chip-bg);
+  border-radius: var(--radius-s);
+  max-height: 40vh; overflow-y: auto;
+}
+.tpl.tips .tpl-b { display: flex; }
+.tpl-p {
+  font-size: 11.5px; color: var(--sub); background: var(--chip-bg);
+  padding: 3px 8px; border-radius: 7px;
+}
+
+/* ---------- 核心格子 ---------- */
+.cpu-map { display: flex; flex-direction: column; gap: 9px; padding: 13px 15px; }
+.cluster { display: flex; align-items: center; gap: 10px; }
+.cl-name { font-size: 12px; color: var(--sub); width: 46px; flex: none; }
+.cores { display: flex; gap: 6px; flex-wrap: wrap; }
+.core {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12.5px; font-weight: 500; cursor: pointer; user-select: none;
+  background: var(--chip-bg); color: var(--sub2);
+  border: 1.5px solid transparent; transition: background .13s, color .13s;
+}
+.core.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ---------- 弹层 ---------- */
+.sheet-bg {
+  position: fixed; inset: 0; z-index: 50; background: rgba(0, 0, 0, .38);
+  opacity: 0; transition: opacity .22s;
+}
+.sheet-bg.on { opacity: 1; }
+.sheet {
+  position: fixed; left: 0; right: 0; bottom: 0; z-index: 51;
+  background: var(--bg-elev);
+  border-radius: 22px 22px 0 0;
+  max-height: 88vh; display: flex; flex-direction: column;
+  transform: translateY(102%); transition: transform .26s cubic-bezier(.32, .72, 0, 1);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+.sheet.on { transform: none; }
+.sheet-h {
+  display: flex; align-items: center; gap: 10px;
+  padding: 15px 16px 11px; border-bottom: 1px solid var(--line-soft); flex: none;
+}
+.sheet-h .t { font-size: 16px; font-weight: 600; flex: 1; }
+.sheet-b { overflow-y: auto; padding: 14px 16px 4px; -webkit-overflow-scrolling: touch; }
+.sheet > .btn-row { flex: none; }
+.sheet-b .group { margin-bottom: 18px; }
+.sheet-b .card { box-shadow: none; background: var(--bg); }
+.sheet-b .sheet-b .card { background: var(--card); }
+
+/* ---------- 代码块 ---------- */
+pre {
+  margin: 0; padding: 13px 15px; overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11.5px; line-height: 1.55; color: var(--sub);
+  white-space: pre-wrap; word-break: break-all;
+  max-height: 40vh; -webkit-overflow-scrolling: touch;
+}
+pre.tall { max-height: 62vh; }
+
+/* ---------- Toast ---------- */
+#toast {
+  position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  transform: translate(-50%, 14px); z-index: 90;
+  max-width: 84vw; padding: 11px 18px; border-radius: 13px;
+  background: rgba(20, 21, 26, .94); color: #fff;
+  font-size: 13.5px; line-height: 1.45; text-align: center;
+  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+}
+@media (prefers-color-scheme: dark) { #toast { background: rgba(240, 241, 245, .96); color: #101114; } }
+#toast.on { opacity: 1; transform: translate(-50%, 0); }
+
+/* ---------- 加载指示 ---------- */
+.spin {
+  display: inline-block; width: 13px; height: 13px; vertical-align: -2px;
+  border: 2px solid var(--chip-bg); border-top-color: var(--accent);
+  border-radius: 50%; animation: sp .7s linear infinite;
+}
+@keyframes sp { to { transform: rotate(360deg); } }
+
+.hidden { display: none !important; }
+
+/* ---------- 模式阶梯：精简表格 ---------- */
+.modetbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.modetbl th, .modetbl td {
+  padding: 7px 7px; text-align: left; border-bottom: 1px solid var(--line);
+  white-space: nowrap; vertical-align: middle;
+}
+.modetbl th { color: var(--sub2); font-weight: 600; font-size: 11px; }
+.modetbl td.mn { white-space: nowrap; }
+.modetbl td.mn b { font-size: 13px; }
+.modetbl td.mn .mono { font-size: 10.5px; color: var(--sub2); }
+.modetbl tr.cur { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.modetbl .f { width: auto !important; padding: 3px 4px; font-size: 11px; }
+.modetbl i.tild { color: var(--sub2); font-style: normal; margin: 0 1px; }
+
+
+/* 待生效提示条 */
+.dirtybar {
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 14px; padding: 11px 14px; border-radius: 13px;
+  background: color-mix(in srgb, var(--accent) 13%, var(--bg-elev));
+  color: var(--text); font-size: 13px;
+}
+.dirtybar .spin { border-top-color: var(--accent); }
+
+/* ---------- 全局模式卡片（概览页的一键切换）---------- */
+.modegrid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.modecard {
+  background: var(--card); border-radius: var(--radius);
+  box-shadow: var(--shadow); padding: 13px 14px; cursor: pointer;
+  border: 1.5px solid transparent;
+  transition: border-color .15s, background .15s, transform .1s;
+}
+.modecard:active { transform: scale(.985); }
+.modecard.on {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--card));
+}
+.mc-h { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.mc-n { font-size: 16px; font-weight: 700; flex: 1; }
+.mc-b { font-size: 12px; color: var(--sub); line-height: 1.7; }
+.mc-b b { color: var(--text); font-weight: 600; }
+
+/* 底部选择器（应用行的标签点开用） */
+.pickmask{position:fixed;inset:0;background:rgba(0,0,0,.45);display:none;align-items:flex-end;z-index:90}
+.pickmask.on{display:flex}
+.pickbox{width:100%;background:var(--bg-elev);border-radius:16px 16px 0 0;
+  padding:14px 14px calc(16px + env(safe-area-inset-bottom,0px));
+  box-shadow:0 -8px 30px rgba(0,0,0,.3);max-height:76vh;overflow:auto}
+.pickt{font-size:12.5px;color:var(--sub);padding:2px 6px 10px;word-break:break-all}
+.picki{display:block;width:100%;text-align:left;background:transparent;border:0;
+  color:var(--text);font:inherit;font-size:15px;padding:13px 10px;border-radius:10px;cursor:pointer}
+.picki:active{background:var(--chip-bg)}
+.picki.on{color:var(--accent);font-weight:600}
+.picki.cancel{text-align:center;color:var(--sub);margin-top:6px;
+  border-top:1px solid var(--line-soft);border-radius:0}
+.pickh{display:block;font-size:11.5px;color:var(--sub2);margin-top:3px;font-weight:400}
+.app-tier[data-act]{cursor:pointer}
+
+</style>
+</head>
+<body>
+
+<header>
+  <div class="h-top">
+    <h1>调度工具箱</h1>
+    <span class="h-ver" id="ver">6.2 (2026-09-16)</span>
+    <div class="h-chips">
+      <span class="pill" id="conn-chip">连接中…</span>
+      <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
+      </button>
+    </div>
+  </div>
+  <div class="h-sub">
+    <span>玄戒O3 · 4+4+2</span>
+    <span>·</span>
+    <span id="saved"></span>
+  </div>
+  <nav class="tabs">
+    <button data-tab="overview" class="on">概览</button>
+    <button data-tab="modes">模式</button>
+    <button data-tab="apps">应用</button>
+    <button data-tab="games">游戏</button>
+    <button data-tab="log">日志</button>
+  </nav>
+</header>
+
+<main>
+  <div id="demo-banner" class="group hidden">
+    <div class="card"><div class="warnbox" style="margin:12px 15px">
+      <b>演示模式</b>：没有连上 KernelSU 的 WebUI 桥，当前是内置样例数据，
+      <b>任何「保存」都不会真正写入</b>。<br>
+      请从 <b>KernelSU / SukiSU 管理器 → 模块 → 玄戒O3 · Abel 调度工具箱 → 打开</b> 进入本页。
+    </div></div>
+  </div>
+  <div id="view"></div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+/* ==== app.js ==== */
+/* ============================================================
+   玄戒O3 · Abel 调度工具箱 —— WebUI 前端 (1/3)
+     Bridge  —— KernelSU 原生桥适配（形状按官方 kernelsu 包实测校正）
+     Api     —— 调 webui.sh 后端（唯一写入口，含备份/自检/同步进模块）
+     Model   —— 4 级模式阶梯（频率 + 线程分配）⇄ profile.json / threads.json
+     Views   —— 概览 / 模式 / 应用
+   ============================================================ */
+'use strict';
+
+const MOD_ID = 'SceneO3Tuner';
+const STATE_DIR = '/data/adb/SceneO3Tuner';
+const WEB_DIR = STATE_DIR + '/webui';
+const MODDIR = '/data/adb/modules/' + MOD_ID;
+const SCRIPT = MODDIR + '/Scripts/4+4+2/O3/webui.sh';
+const SCENE_DIR = '/data/data/com.omarea.vtools/files';
+
+/* ============================================================
+   1) Bridge —— KernelSU 原生桥
+   ------------------------------------------------------------
+   ★ 关键（曾因此整站失效）：原生桥的真实形状与「Promise 风格」完全不同。
+     官方 kernelsu npm 包的实现是：
+
+       ksu.exec(command, JSON.stringify(options), callbackFuncName)
+       window[callbackFuncName] = (errno, stdout, stderr) => {...}
+
+     · exec 是 **3 个参数**，第三个是「挂在 window 上的回调函数名」字符串，
+       不是函数本身，也不返回 Promise。
+     · listPackages(type) / getPackagesInfo(pkgs) 返回 **JSON 字符串**，必须 parse。
+     · 本构建里**没有** ksu:// 图标协议，图标只能运行时探测。
+   ============================================================ */
+const Bridge = {
+  K: null,
+  execMode: '',
+  isRoot: true,
+  iconOk: false,
+  probes: [],
+  _n: 0,
+
+  detect() { this.K = window.ksu || window.kernelsu || null; return !!this.K; },
+  keys() { if (!this.K) return []; try { return Object.keys(this.K); } catch (e) { return []; } },
+  has(fn) { return !!(this.K && typeof this.K[fn] === 'function'); },
+
+  _official(cmd, timeout) {
+    return new Promise(res => {
+      const name = '__ksucb_' + (++this._n) + '_' + Date.now();
+      let done = false;
+      const fin = r => { if (!done) { done = true; try { delete window[name]; } catch (e) { } res(r); } };
+      window[name] = (errno, stdout, stderr) => fin({
+        code: parseInt(errno, 10) || 0,
+        out: String(stdout == null ? '' : stdout) + String(stderr == null ? '' : stderr)
+      });
+      try { this.K.exec(cmd, JSON.stringify({}), name); }
+      catch (e) { fin({ code: 1, out: 'ERR ' + e }); }
+      setTimeout(() => fin({ code: 1, out: 'ERR^no-callback' }), timeout);
+    });
+  },
+  _cbFn(cmd, timeout) {
+    return new Promise(res => {
+      let done = false;
+      const fin = r => { if (!done) { done = true; res(r); } };
+      try {
+        this.K.exec(cmd, (a, b, c) => fin({
+          code: typeof a === 'number' ? a : 0,
+          out: (typeof a === 'string' ? a : '') + String(b == null ? '' : b) + String(c == null ? '' : c)
+        }));
+      } catch (e) { fin({ code: 1, out: 'ERR ' + e }); }
+      setTimeout(() => fin({ code: 1, out: 'ERR^no-callback' }), timeout);
+    });
+  },
+  async _promise(cmd, timeout) {
+    try {
+      const p = this.K.exec(cmd);
+      if (!p || typeof p.then !== 'function') return { code: 1, out: 'ERR^not-promise' };
+      const r = await Promise.race([p, new Promise(x => setTimeout(() => x('ERR^timeout'), timeout))]);
+      if (r === 'ERR^timeout') return { code: 1, out: 'ERR^timeout' };
+      if (typeof r === 'string') return { code: 0, out: r };
+      if (r && typeof r === 'object') {
+        return {
+          code: (r.errno | 0) || (r.code | 0) || 0,
+          out: String(r.stdout || '') + String(r.stderr || '') + String(r.output || '')
+        };
+      }
+      return { code: 0, out: String(r == null ? '' : r) };
+    } catch (e) { return { code: 1, out: 'ERR ' + e }; }
+  },
+
+  async probe() {
+    this.probes = [];
+    if (!this.detect()) {
+      this.execMode = 'demo';
+      this.probes.push({ k: '桥对象', v: '未找到 window.ksu / window.kernelsu', ok: false });
+      return 'demo';
+    }
+    this.probes.push({ k: '桥对象', v: 'window.' + (window.ksu ? 'ksu' : 'kernelsu'), ok: true });
+    this.probes.push({ k: '桥方法', v: this.keys().join(' ') || '(枚举不出)', ok: true });
+
+    const cands = [
+      ['official', (c, t) => this._official(c, t)],
+      ['cb', (c, t) => this._cbFn(c, t)],
+      ['promise', (c, t) => this._promise(c, t)]
+    ];
+    for (const [name, fn] of cands) {
+      const r = await fn('echo __ksu_probe', 3000);
+      const ok = /__ksu_probe/.test(r.out || '');
+      this.probes.push({ k: 'exec 形状 · ' + name, v: ok ? '可用' : (r.out || '').slice(0, 60), ok });
+      if (ok) { this.execMode = name; break; }
+    }
+    if (!this.execMode) {
+      this.execMode = 'demo';
+      this.probes.push({ k: 'exec', v: '三种形状都不可用', ok: false });
+      return 'demo';
+    }
+    try { const r = await this.exec('id -u'); this.isRoot = String(r.out || '').trim() === '0'; } catch (e) { }
+    this.probes.push({ k: '权限', v: this.isRoot ? 'root' : '非 root（将尝试 su 包装）', ok: this.isRoot });
+
+    this.iconOk = await new Promise(res => {
+      try {
+        const im = new Image();
+        const t = setTimeout(() => res(false), 900);
+        im.onload = () => { clearTimeout(t); res(true); };
+        im.onerror = () => { clearTimeout(t); res(false); };
+        im.src = 'ksu://icon/com.android.settings';
+      } catch (e) { res(false); }
+    });
+    this.probes.push({ k: '应用图标', v: this.iconOk ? '可用' : '不支持，用首字头像', ok: true });
+    return this.execMode;
+  },
+
+  async exec(cmd) {
+    switch (this.execMode) {
+      case 'official': return this._official(cmd, 60000);
+      case 'cb': return this._cbFn(cmd, 60000);
+      case 'promise': return this._promise(cmd, 60000);
+      default: return Demo.exec(cmd);
+    }
+  },
+
+  _parse(v, fallback) {
+    if (v == null) return fallback;
+    if (typeof v === 'string') {
+      const s = v.trim(); if (!s) return fallback;
+      try { return JSON.parse(s); } catch (e) { return fallback; }
+    }
+    return v;
+  },
+  listPackages(type) {
+    if (!this.has('listPackages')) return null;
+    try { const v = this._parse(this.K.listPackages(type || 'all'), null); return Array.isArray(v) ? v : null; }
+    catch (e) { return null; }
+  },
+  async packagesInfo(pkgs) {
+    const out = {};
+    if (!this.has('getPackagesInfo') || !pkgs.length) return out;
+    const STEP = 60;
+    for (let i = 0; i < pkgs.length; i += STEP) {
+      const slice = pkgs.slice(i, i + STEP);
+      let arr = null;
+      try { arr = this._parse(this.K.getPackagesInfo(JSON.stringify(slice)), null); } catch (e) { }
+      if (!Array.isArray(arr)) { try { arr = this._parse(await this.K.getPackagesInfo(slice), null); } catch (e) { arr = null; } }
+      if (Array.isArray(arr)) arr.forEach(o => { if (o && o.packageName) out[o.packageName] = o; });
+      await new Promise(r => setTimeout(r, 0));
+    }
+    return out;
+  },
+  iconUrl(pkg) { return this.iconOk ? 'ksu://icon/' + pkg : ''; },
+  toast(m) { try { if (this.has('toast')) { this.K.toast(String(m)); return true; } } catch (e) { } return false; }
+};
+
+/* ============================================================
+   2) Api
+   ============================================================ */
+const Api = {
+  shq(s) { return /[^\w@%+=:,./-]/.test(s) ? "'" + String(s).replace(/'/g, "'\\''") + "'" : s; },
+  build(cmd) {
+    const c = 'sh ' + SCRIPT + ' ' + cmd;
+    return Bridge.isRoot ? c : 'su -c ' + this.shq(c);
+  },
+  async raw(cmd) { return await Bridge.exec(this.build(cmd)); },
+  async run(cmd) { const r = await this.raw(cmd); return r.out == null ? '' : r.out; },
+  async execRaw(cmd) {
+    const c = Bridge.isRoot ? cmd : 'su -c ' + this.shq(cmd);
+    const r = await Bridge.exec(c);
+    return r.out == null ? '' : r.out;
+  },
+  _kv(text) {
+    const m = {};
+    String(text || '').split('\n').forEach(line => {
+      const i = line.indexOf('=');
+      if (i > 0) m[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+    });
+    return m;
+  },
+  async status() { return this._kv(await this.run('status')); },
+  async modes() { return this._kv(await this.run('mode')); },
+  async appmodes() { return this._kv(await this.run('appmodes')); },
+  async setAppMode(pkg, mode) { return await this.run('setappmode ' + this.shq(pkg) + ' ' + this.shq(mode)); },
+  async applyModes() { return await this.run('applymodes'); },
+  async syncmode() { return await this.run('syncmode'); },
+  async freqs() { return this._kv(await this.run('freqs')); },
+  async readText(id) {
+    const len = parseInt(String(await this.run('b64len ' + this.shq(id))).trim(), 10) || 0;
+    if (!len) return '';
+    if (len <= 60000) return b64dec(await this.run('b64 ' + this.shq(id) + ' 1 ' + len));
+    const STEP = 40000;
+    let acc = '';
+    for (let off = 1; off <= len; off += STEP) acc += await this.run('b64 ' + this.shq(id) + ' ' + off + ' ' + STEP);
+    return b64dec(acc);
+  },
+  async writeText(id, text) {
+    const b64 = b64enc(text);
+    // 分块越大，桥调用次数越少（批量套用几百个应用时这是主要延迟来源）
+    const STEP = 24000;
+    let r = await this.run('wbegin ' + this.shq(id));
+    if (!/^OK/m.test(r)) return 'ERR wbegin: ' + r;
+    for (let i = 0; i < b64.length; i += STEP) {
+      r = await this.run('wappend ' + this.shq(id) + ' ' + b64.slice(i, i + STEP));
+      if (!/^OK/m.test(r)) return 'ERR wappend: ' + r;
+    }
+    return await this.run('wcommit ' + this.shq(id));
+  },
+  async live() { return await this.run('live'); },
+  async games() { return await this.run('games'); },
+  async apps_tpl() { return await this.run('apps_tpl'); },
+  /* 只落核指定包：批量套用后立刻生效，比全量快得多 */
+  async enforce(pkgs) {
+    const a = (pkgs || []).map(p => this.shq(String(p))).join(' ');
+    return await this.run('enforcep' + (a ? ' ' + a : ''));
+  },
+  /* 配置完整性审计 / 一键还原数据 */
+  async audit() { return String(await this.run('audit') || ''); },
+  async fixall(scheme) {
+    return await this.run('fixall' + (scheme ? ' ' + this.shq(String(scheme)) : ''));
+  },
+  /* 调度配置：传递 / 备份 / 恢复 / 列表 */
+  async profilepush() { return await this.run('profilepush'); },
+  async profilebackup() { return await this.run('profilebackup'); },
+  async profilerestore(name) {
+    return await this.run('profilerestore' + (name ? ' ' + this.shq(String(name)) : ''));
+  },
+  async profilelist() {
+    return String(await this.run('profilelist'))
+      .split('\n')
+      .filter(l => l.indexOf('BK=') === 0)
+      .map(l => {
+        const p = l.slice(3).split('|');
+        const raw = p[0] || '';
+        // 20260916_001528 → 2026-09-16 00:15:28
+        const lbl = raw.length === 15
+          ? raw.slice(0, 4) + '-' + raw.slice(4, 6) + '-' + raw.slice(6, 8) + ' ' +
+            raw.slice(9, 11) + ':' + raw.slice(11, 13) + ':' + raw.slice(13, 15)
+          : raw;
+        return { name: raw, files: parseInt(p[1] || '0', 10) || 0, label: lbl };
+      })
+      .sort((a, b) => (a.name < b.name ? 1 : -1));   // 最新在前
+  },
+  async saveSettings(kv) { return await this.writeText('settings', kv); },
+  async action(sub, args) {
+    const a = (args || []).map(x => this.shq(String(x))).join(' ');
+    return await this.run(sub + (a ? ' ' + a : ''));
+  }
+};
+
+function b64enc(str) {
+  const bytes = new TextEncoder().encode(str);
+  let bin = '';
+  bytes.forEach(b => { bin += String.fromCharCode(b); });
+  return btoa(bin);
+}
+function b64dec(b64) {
+  const clean = (b64 || '').replace(/\s+/g, '');
+  if (!clean) return '';
+  const bin = atob(clean);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/* ============================================================
+   3) 全局状态
+   ============================================================ */
+const S = {
+  tab: 'overview',
+  status: {}, freqs: {}, mode: {},
+  model: null,
+  apps: [],
+  appMode: {},        // pkg → Scene 里指定的模式（'A_<pkg>' 去掉前缀）
+  sceneDefault: '',   // Scene 的全局默认模式（powercfg.xml 里的 "*"）
+  sceneCount: {},     // 各模式命中多少应用
+  // 游戏（Scene 标记）：频率跟随 Scene 对单应用的设置，线程由模板定义
+  games: [],          // [{pkg, mode}]
+  templates: [],      // [{id, friendly, other}]
+  gameAssign: {},     // pkg → template id
+  // 应用（非游戏）：线程模板驱动
+  appTplLib: [],      // [{id, friendly, other, ...}]
+  appTplAssign: {},   // pkg → template id
+  mode2tpl: {},       // 模式 → 线程模板 id（后端下发；mode_sync 开启时生效）
+  ownMode: {},        // pkg → 模式：**只在 Scene 里单独设过**的（powercfg 有显式条目）
+  modeSync: 0,        // 「跟随 Scene 模式自动切线程模板」开关
+  debug: 1,           // 「记录模块日志」开关（关掉可省掉守护的写盘开销）
+  semCores: {},       // 语义占位符 → 实际核号
+  sel: new Set(),
+  query: '', filter: 'all',
+  showCount: 100,
+  backups: [],        // [{name, files, label}] —— 调度配置备份列表
+  auditBad: [],       // [{file, cn, why, detail}] —— 配置完整性异常项（注错文件清单）
+  auditAt: '',        // 上次审计时间
+  ops: [],
+  savedAt: '',
+  busy: false, demo: false,
+  dirty: false, autoApply: true, applying: false,
+  bridgeMode: ''
+};
+
+const MODE_ORDER = ['powersave', 'balance', 'performance', 'fast'];
+const MODE_CN = { powersave: '省电', balance: '均衡', performance: '性能', fast: '极速' };
+
+/* Scene 的「配置来源」（shared_prefs/global.xml → scene_profile_source）。
+   它决定 Scene 当前启用的是哪一套配置 —— 也就是「在 Scene 里启用配置」那一步。
+   实测：只有 SOURCE_SCENE_ONLINE 既能让调节页显示我们的身份（Scene / 🌍 Version: LP），
+   又能通过 Scene 的校验（性能调节可开启）。SOURCE_OUTSIDE 会被判无效，不要用。 */
+const SCENE_SRC_CN = {
+  SOURCE_SCENE_ONLINE: 'Scene 方案（显示我们的身份、按我们的 profile 下发）✅',
+  SOURCE_SCENE_CUSTOM: '自定义通道（能下发，但显示成「自定义」）',
+  SOURCE_OUTSIDE:      '外部配置通道（Scene 判为无效，性能调节打不开）',
+  SOURCE_NONE:         '未启用任何配置',
+};
+
+/* ============================================================
+   4) 小工具
+   ============================================================ */
+const $ = id => document.getElementById(id);
+function esc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+function h(html) { const d = document.createElement('div'); d.innerHTML = html.trim(); return d.firstElementChild; }
+function debounce(fn, ms) { let t; return function () { clearTimeout(t); const a = arguments; t = setTimeout(() => fn.apply(null, a), ms); }; }
+function fmtMHz(v) { const n = parseInt(v, 10); return n ? (n / 1000).toFixed(n % 1000 ? 1 : 0) + 'M' : '—'; }
+function stamp() { return new Date().toTimeString().slice(0, 8); }
+function logOp(msg) { S.ops.unshift('[' + stamp() + '] ' + msg); if (S.ops.length > 300) S.ops.length = 300; }
+function markSaved() { S.savedAt = stamp(); const e = $('saved'); if (e) e.textContent = '已保存 ' + S.savedAt; }
+function toast(msg) {
+  Bridge.toast(msg);
+  const el = $('toast'); if (!el) return;
+  el.textContent = msg; el.classList.add('on');
+  clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove('on'), 2600);
+}
+function avatarColor(pkg) {
+  let n = 0;
+  for (let i = 0; i < pkg.length; i++) n = (n * 31 + pkg.charCodeAt(i)) >>> 0;
+  const hues = [210, 340, 20, 160, 268, 45, 300, 190];
+  return 'hsl(' + hues[n % hues.length] + ',58%,52%)';
+}
+function shortName(s, n) { s = String(s || ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+async function busy(label, fn) {
+  if (S.busy) { toast('上一个操作还没结束'); return null; }
+  S.busy = true;
+  const box = h('<div class="empty"><span class="spin"></span> ' + esc(label) + '</div>');
+  const host = $('view'); if (host) host.prepend(box);
+  try { return await fn(); }
+  catch (e) { toast('失败：' + ((e && e.message) || e)); return null; }
+  finally { S.busy = false; box.remove(); }
+}
+
+/* ============================================================
+   5) 模型：4 级模式阶梯
+   ------------------------------------------------------------
+   model = {
+     version, globalMode,
+     modes: { powersave: { cn, active:{L:[min,max],M,P}, inactive:{...},
+                           cpuset:{main_thread,other} }, ... },
+     pins:  { pkg: mode },     // 例外表：固定到某模式；其余全部跟随全局
+     games: [ 线程级规则 ],
+     deny:  [ 不接管 ],
+     allPkgs: [ 设备上全部应用 ]
+   }
+   ============================================================ */
+function loadModeTable() {
+  // 后端 `mode` 输出：MODE_<name>=<中文>|<active 6值>|<inactive 6值>|<main>|<other>
+  const t = {};
+  MODE_ORDER.forEach(m => {
+    const raw = S.mode['MODE_' + m];
+    if (!raw) return;
+    const p = String(raw).split('|');
+    const af = (p[1] || '').trim().split(/\s+/).map(Number);
+    const inf = (p[2] || '').trim().split(/\s+/).map(Number);
+    t[m] = {
+      cn: p[0] || MODE_CN[m],
+      active: { L: [af[0], af[1]], M: [af[2], af[3]], P: [af[4], af[5]] },
+      inactive: { L: [inf[0], inf[1]], M: [inf[2], inf[3]], P: [inf[4], inf[5]] }
+    };
+  });
+  return t;
+}
+
+function defaultModes() {
+  const t = {};
+  MODE_ORDER.forEach(m => {
+    t[m] = {
+      cn: MODE_CN[m],
+      active: { L: [417792, 1353600], M: [556800, 1468800], P: [1113600, 2044800] },
+      inactive: { L: [417792, 1065600], M: [556800, 1142400], P: [1113600, 2044800] }
+    };
+  });
+  return t;
+}
+
+async function loadModel() {
+  const raw = await Api.readText('model');
+  if (raw && raw.trim()) {
+    try {
+      const m = JSON.parse(raw);
+      if (m && m.modes && m.pins !== undefined) {
+        if (!m.games) m.games = [];
+        if (!m.deny) m.deny = [];
+        S.model = m;
+        return m;
+      }
+    } catch (e) { logOp('model.json 解析失败，按设备状态重建'); }
+  }
+  const table = loadModeTable();
+  S.model = {
+    version: 3,
+    globalMode: S.mode.MODE || 'balance',
+    modes: Object.keys(table).length ? table : defaultModes(),
+    pins: {}, games: [], deny: [], allPkgs: []
+  };
+  await saveModelNow();
+  return S.model;
+}
+
+function globalMode() { return (S.model && S.model.globalMode) || 'balance'; }
+
+/* 配置完整性审计结果解析（后端 integrity.sh audit 的 K=V 输出）
+   BAD=<文件>|<用途>|<问题类型>|<详细说明>   一行一项
+   其余 SCHEME / CHECKED / BAD_N / PRESET_N 等是汇总信息。 */
+function parseAudit(raw) {
+  const out = { bad: [], scheme: '', checked: 0, presetN: 0 };
+  String(raw || '').split('\n').forEach(line => {
+    line = line.trim(); if (!line) return;
+    const i = line.indexOf('='); if (i < 0) return;
+    const k = line.slice(0, i), v = line.slice(i + 1);
+    if (k === 'BAD') {
+      const p = v.split('|');
+      out.bad.push({ file: p[0] || '', cn: p[1] || '', why: p[2] || '异常', detail: p[3] || '' });
+    } else if (k === 'SCHEME') out.scheme = v;
+    else if (k === 'CHECKED') out.checked = parseInt(v, 10) || 0;
+    else if (k === 'PRESET_N') out.presetN = parseInt(v, 10) || 0;
+  });
+  return out;
+}
+
+/* 模式页的频率必须**显示/编辑 Scene 真正会下发的那份** ——
+   profile.json 里 <mode>_active / <mode>_inactive 的 @cpu_freq（cpu0/cpu4/cpu8）。
+   设备端 mode_freq() 只是内置兜底表；若拿它渲染，用户改了看不见、看到的也不是实际生效值。
+   → 用户在 Scene 里把某应用切成省电/均衡/性能/极速时，用的就是这里显示/编辑的频率。 */
+async function loadModeFreqFromScene() {
+  if (!S.model || !S.model.modes) return 0;
+  let raw = '';
+  try { raw = await Api.readText('profile'); } catch (e) { return 0; }
+  if (!raw || !raw.trim()) return 0;
+  let d; try { d = JSON.parse(raw); } catch (e) { logOp('profile.json 解析失败，频率沿用内置兜底表'); return 0; }
+  const pr = (d && d.presets) || {};
+  const CL = { cpu0: 'L', cpu4: 'M', cpu8: 'P' };
+  let n = 0;
+  MODE_ORDER.forEach(md => {
+    const t = S.model.modes[md]; if (!t) return;
+    ['active', 'inactive'].forEach(st => {
+      const body = pr[md + '_' + st];
+      if (!Array.isArray(body) || !t[st]) return;
+      body.forEach(it => {
+        if (!Array.isArray(it) || it[0] !== '@cpu_freq') return;
+        const cl = CL[it[1]];
+        const mn = parseInt(it[2], 10), mx = parseInt(it[it.length - 1], 10);
+        if (!cl || !mn || !mx) return;
+        t[st][cl] = [mn, mx];
+        n++;
+      });
+    });
+  });
+  if (n) logOp('模式频率已读自 Scene 的 profile.json（' + n + ' 条 @cpu_freq）');
+  return n;
+}
+
+/* ---------- 保存 ---------- */
+const markDirty = () => { S.dirty = true; if (S.autoApply) scheduleApply(); renderDirtyBar(); };
+const scheduleApply = debounce(async function () { if (!S.dirty || S.applying) return; await doApply(true); }, 2500);
+
+const saveModelNow = async function () {
+  if (!S.model) return true;
+  if (S.apps.length) S.model.allPkgs = S.apps.map(a => a.pkg);
+  const r = await Api.writeText('model', JSON.stringify(S.model, null, 2));
+  if (!/^OK/m.test(r)) { toast('保存失败：' + r); logOp('❌ model.json 保存失败 ' + r); return false; }
+  markSaved();
+  return true;
+};
+
+/** 把模式阶梯同步进 Scene 的 profile.json（8 组 <mode>_active/inactive 的 @cpu_freq） */
+async function pushPresetsToScene() {
+  const raw = await Api.readText('profile');
+  if (!raw || !raw.trim()) return 'ERR 读不到 profile.json';
+  let d; try { d = JSON.parse(raw); } catch (e) { return 'ERR profile.json 解析失败'; }
+  const presets = d.presets || (d.presets = {});
+  const MAP = { cpu0: 'L', cpu4: 'M', cpu8: 'P' };
+  let n = 0;
+  MODE_ORDER.forEach(md => {
+    const t = S.model.modes[md]; if (!t) return;
+    ['active', 'inactive'].forEach(st => {
+      const body = presets[md + '_' + st];
+      if (!Array.isArray(body)) return;
+      body.forEach(it => {
+        if (Array.isArray(it) && it[0] === '@cpu_freq' && MAP[it[1]] && t[st] && t[st][MAP[it[1]]]) {
+          const v = t[st][MAP[it[1]]];
+          it[2] = String(v[0]);
+          it[it.length - 1] = String(v[1]);
+          n++;
+        }
+      });
+    });
+  });
+  if (!n) return 'ERR 没找到任何 @cpu_freq 条目（profile.json 结构异常）';
+  const r = await Api.writeText('profile', JSON.stringify(d, null, 2));
+  return /^OK/m.test(r) ? 'OK 已更新 ' + n + ' 条 @cpu_freq' : 'ERR ' + r;
+}
+
+/* ============================================================
+   6) 生效
+   ============================================================ */
+function renderDirtyBar() {
+  let bar = $('dirtybar');
+  const host = $('view');
+  if (!S.dirty || !host) { if (bar) bar.remove(); return; }
+  if (!bar) { bar = h('<div class="dirtybar" id="dirtybar"></div>'); host.prepend(bar); }
+  bar.innerHTML = S.applying
+    ? '<span class="spin"></span><div style="flex:1">正在让配置生效…</div>'
+    : '<div style="flex:1">有改动已保存，尚未下发</div>' +
+    '<button class="btn primary" style="padding:6px 12px;font-size:13px" data-act="live">立即生效</button>';
+}
+
+async function doApply(auto) {
+  if (S.applying) return '';
+  S.applying = true; renderDirtyBar();
+  const o = await Api.live();
+  S.applying = false;
+  const ok = /^OK/m.test(String(o || ''));
+  if (ok) S.dirty = false;
+  logOp((ok ? '✅ ' : '⚠ ') + '让配置生效' + (auto ? '（自动）' : '') + '：' + String(o || '').trim().split('\n').slice(-1)[0]);
+  renderDirtyBar();
+  if (!auto) toast(ok ? '已生效' : String(o || '').trim().slice(0, 80));
+  return o;
+}
+
+/* ============================================================
+   底部选择器（轻量，无依赖）。opts = [{v, label, hint, on}]
+   点的位置：应用行的「Scene 模式」标签 / 「线程模板」标签。
+   ============================================================ */
+function pickSheet(title, opts, cb) {
+  let el = $('picksheet');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'picksheet'; el.className = 'pickmask';
+    document.body.appendChild(el);
+  }
+  const close = () => { el.classList.remove('on'); el.innerHTML = ''; el.onclick = null; };
+  el.innerHTML = '<div class="pickbox"><div class="pickt">' + esc(title) + '</div>' +
+    opts.map(o => '<button class="picki' + (o.on ? ' on' : '') + '" data-pv="' + esc(o.v) + '">' +
+      esc(o.label) + (o.hint ? '<span class="pickh">' + esc(o.hint) + '</span>' : '') +
+      '</button>').join('') +
+    '<button class="picki cancel" data-pv="\u0000cancel">取消</button></div>';
+  el.classList.add('on');
+  el.onclick = e => {
+    const b = e.target.closest ? e.target.closest('[data-pv]') : null;
+    if (!b) { if (e.target === el) close(); return; }
+    const v = b.getAttribute('data-pv');
+    close();
+    if (v !== '\u0000cancel') cb(v);
+  };
+}
+
+/* ⚠ 单应用的这两个动作都走「乐观更新 + 后台写盘」：
+   先改本地状态并 updateAppList()（增量刷列表 + 筛选项计数，毫秒级），
+   再在后台把改动写下去。这样点标签是**立刻**有反馈的，
+   不会像以前那样弹个阻塞遮罩、等写盘 + 重建 + 落核全跑完才能动。 */
+
+/* 只改一个应用的线程模板 */
+async function setAppTpl(pkg, tplId) {
+  const map = S.appTplAssign || (S.appTplAssign = {});
+  if (tplId) map[pkg] = tplId; else delete map[pkg];
+  updateAppList();                       // ★ 立刻反映
+  toast('已设为「' + tplName(tplId) + '」，正在后台生效…');
+  const tsv = Object.keys(map).map(p => p + '\t' + map[p]).join('\n') + '\n';
+  try {
+    const w = await Api.writeText('appassign', tsv);
+    if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
+    const r = await Api.syncmode();
+    const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
+    logOp('setAppTpl ' + pkg + ' → ' + (tplId || '不接管') + '｜' + line.slice(0, 140));
+    toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
+  } catch (e) { toast('设置失败：' + e); }
+}
+
+/* 只改单个游戏的线程模板（与 setAppTpl 同款：乐观更新 + 后台写盘） */
+async function setGameTpl(pkg, tplId) {
+  const map = S.gameAssign || (S.gameAssign = {});
+  if (tplId) map[pkg] = tplId; else delete map[pkg];
+  if (S.tab === 'games') render(); else updateAppList();
+  toast('已设为「' + tplName(tplId) + '」，正在后台生效…');
+  const tsv = Object.keys(map).map(p => p + '\t' + map[p]).join('\n') + '\n';
+  try {
+    const w = await Api.writeText('gameassign', tsv);
+    if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
+    const r = await Api.syncmode();
+    const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
+    logOp('setGameTpl ' + pkg + ' → ' + (tplId || '不接管') + '｜' + line.slice(0, 140));
+    toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
+  } catch (e) { toast('设置失败：' + e); }
+}
+
+/* 点模板名：展开/收起该卡详情（点空白处由 boot 里的全局监听收起） */
+function toggleTplTips(el) {
+  const card = el && el.closest ? el.closest('.tpl') : null;
+  const want = card && !card.classList.contains('tips');
+  document.querySelectorAll('.tpl.tips').forEach(x => x.classList.remove('tips'));
+  if (want) card.classList.add('tips');
+}
+
+/* 只改一个应用在 Scene 里的模式 */
+async function setSceneMode(pkg, mode) {
+  S.ownMode = S.ownMode || {};
+  S.ownMode[pkg] = mode;                 // ★ 乐观：标签与筛选立刻跟着变
+  updateAppList();
+  toast('Scene 模式已设为「' + (MODE_CN[mode] || mode) + '」，正在写入…');
+  try {
+    const r = await Api.setAppMode(pkg, mode);
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || lines[lines.length - 1] || '';
+    logOp('setappmode ' + pkg + ' ' + mode + ' → ' + lines.join(' | ').slice(0, 180));
+    toast(/^OK/.test(verdict) ? '已写入 Scene 并生效' : ('设置失败：' + verdict.slice(0, 90)));
+    // 后台静默复核（拉一次 Scene 真值；不阻塞、不整页重渲染）
+    loadSceneModes().then(() => { if (S.tab === 'apps') updateAppList(); }).catch(() => { });
+  } catch (e) { toast('设置失败：' + e); }
+}
+
+/* 进程级条目（Scene 的 powercfg.xml 里带 ":" 的键，如 com.tencent.mm:appbrand）
+   合并进应用清单，让它们能被勾选、套模板。
+   ⚠ 标签用「基包名 + 后缀」拼，并对已知后缀给中文名（appbrand = 小程序）。 */
+const SUFFIX_CN = {
+  appbrand: '小程序', push: '推送', remote: '远程', service: '服务',
+  tools: '工具', wxa: '小程序', sandbox: '沙箱', uimain: '界面'
+};
+function mergeAppExtras() {
+  const ex = S.appExtras || [];
+  if (!ex.length) return 0;
+  const have = {};
+  (S.apps || []).forEach(a => { have[a.pkg] = 1; });
+  const base = {};
+  (S.apps || []).forEach(a => { base[a.pkg] = a.label; });
+  let n = 0;
+  ex.forEach(e => {
+    if (!e.pkg || have[e.pkg]) return;
+    const i = e.pkg.indexOf(':');
+    const bp = e.pkg.slice(0, i), sfx = e.pkg.slice(i + 1);
+    const bt = base[bp] || bp;
+    const label = bt + ' · ' + (SUFFIX_CN[sfx] || sfx);
+    S.apps.push({ pkg: e.pkg, label: label, hasLabel: true, isSystem: false,
+      icon: Bridge.iconUrl(bp), isProc: true });
+    have[e.pkg] = 1; n++;
+  });
+  if (n) {
+    S.apps.sort((a, b) => {
+      if (a.hasLabel !== b.hasLabel) return a.hasLabel ? -1 : 1;
+      return String(a.label).localeCompare(String(b.label), 'zh');
+    });
+  }
+  return n;
+}
+
+/* ============================================================
+   7) 应用清单
+   ============================================================ */
+async function loadApps() {
+  // ⚠ 取「KSU 桥的包列表」∪「后端 cmd_apps 的包列表」：
+  //   桥的口径可能比后端窄（少系统应用），只用桥会让「全部」漏掉应用，
+  //   用户就没法给它们套线程模板了。
+  let pkgs = Bridge.listPackages('all') || [];
+  try {
+    const o = await Api.run('apps');
+    const back = String(o).split('\n').map(s => s.trim()).filter(Boolean);
+    if (back.length) pkgs = pkgs.concat(back);
+  } catch (e) { }
+  pkgs = [...new Set(pkgs)].filter(p =>
+    p && p !== 'android' && !/(overlay|\.rro|auto_generated|shared_library)/.test(p));
+  const info = await Bridge.packagesInfo(pkgs);
+  const FB = (typeof FALLBACK_LABELS === 'object' && FALLBACK_LABELS) || {};
+  S.apps = pkgs.map(p => {
+    const i = info[p];
+    const label = (i && (i.appLabel || i.label || i.name)) || FB[p] || '';
+    return { pkg: p, label: label || p, hasLabel: !!label, isSystem: i ? !!i.isSystem : false, icon: Bridge.iconUrl(p) };
+  });
+  S.apps.sort((a, b) => {
+    if (a.hasLabel !== b.hasLabel) return a.hasLabel ? -1 : 1;
+    return String(a.label).localeCompare(String(b.label), 'zh');
+  });
+  mergeAppExtras();
+  logOp('已载入 ' + S.apps.length + ' 个应用（带名称 ' + S.apps.filter(a => a.hasLabel).length + ' 个）');
+  return S.apps;
+}
+
+/* 游戏判断：Scene 标记为游戏的应用不进「应用」页 */
+function isGame(pkg) {
+  const gs = S.games || [];
+  for (let i = 0; i < gs.length; i++) if (gs[i].pkg === pkg) return true;
+  return false;
+}
+
+/* 游戏（Scene 标记）+ 模板：频率跟随 Scene 对单应用的模式，线程由模板决定。
+   解析后端 cmd_games 输出：GAME= / ASSIGN= / TPL= / SEM_= 四组行。 */
+async function loadSceneGames() {
+  const text = await Api.games();
+  const games = [], assign = {}, templates = [], sem = {};
+  String(text).split('\n').forEach(line => {
+    if (!line) return;
+    if (line.indexOf('GAME=') === 0) {
+      const t = line.slice(5).split('\t');
+      if (t[0]) games.push({ pkg: t[0], mode: t[1] || '' });
+    } else if (line.indexOf('ASSIGN=') === 0) {
+      const t = line.slice(7).split('\t');
+      if (t[0] && t[1]) assign[t[0]] = t[1];
+    } else if (line.indexOf('TPL=') === 0) {
+      const t = line.slice(4).split('|');
+      if (t[0]) templates.push({ id: t[0], friendly: t[1] || t[0], other: t[2] || '',
+        heaviest_thread: t[3] || '', heaviest_cores: t[4] || '',
+        heavy_thread: t[5] || '', heavy_cores: t[6] || '', comm: t[7] || '' });
+    } else if (line.indexOf('EXTRA=') === 0) {
+      // 进程级条目（如 com.tencent.mm:appbrand = 微信小程序）：
+      // 不是已安装包，但 enforce_threads.sh 按进程名匹配，能真正生效。
+      const t = line.slice(6).split('\t');
+      if (t[0]) extras.push({ pkg: t[0], mode: t[1] || '' });
+    } else if (line.indexOf('MODE2TPL_') === 0) {
+      const t = line.slice(9).split('=');
+      if (t[0]) S.mode2tpl[t[0]] = t[1] || '';
+    } else if (line.indexOf('CPU_ONLINE=') === 0) {
+      sem.__online = line.slice(11);
+    } else if (line.indexOf('SEM_') === 0) {
+      const t = line.slice(4).split('=');
+      if (t[0]) sem[t[0]] = (t[1] || '').split('|')[0];
+    }
+  });
+  S.games = games; S.gameAssign = assign; S.templates = templates; S.semCores = sem;
+  logOp('已载入 ' + games.length + ' 个 Scene 游戏，' + templates.length + ' 个线程模板');
+  return { games, assign, templates, sem };
+}
+
+/* 展开语义占位符 {p1_core} 等为本机实际核号（Aether_OptExt 同款思路） */
+function resolveSem(s) {
+  if (!s) return '';
+  return String(s).replace(/\{[a-z0-9_]+\}/g, m =>
+    (S.semCores && S.semCores[m.slice(1, -1)]) || m);
+}
+
+/* 应用（非游戏）线程模板：频率跟随 Scene 对单应用的模式，线程由模板决定。
+   解析后端 cmd_apps_tpl 输出：APP= / ASSIGN= / TPL= / SEM_= 四组行。 */
+async function loadAppsTpl() {
+  const text = await Api.apps_tpl();
+  const assign = {}, templates = [], sem = {}, extras = [];
+  String(text).split('\n').forEach(line => {
+    if (!line) return;
+    if (line.indexOf('APP=') === 0) {
+      const t = line.slice(4).split('\t');
+      if (t[0]) S.appMode[t[0]] = t[1] || '';   // 顺带刷新模式映射（覆盖 loadSceneModes）
+    } else if (line.indexOf('ASSIGN=') === 0) {
+      const t = line.slice(7).split('\t');
+      if (t[0] && t[1]) assign[t[0]] = t[1];
+    } else if (line.indexOf('TPL=') === 0) {
+      const t = line.slice(4).split('|');
+      if (t[0]) templates.push({ id: t[0], friendly: t[1] || t[0], other: t[2] || '',
+        heaviest_thread: t[3] || '', heaviest_cores: t[4] || '',
+        heavy_thread: t[5] || '', heavy_cores: t[6] || '', comm: t[7] || '' });
+    } else if (line.indexOf('CPU_ONLINE=') === 0) {
+      sem.__online = line.slice(11);
+    } else if (line.indexOf('SEM_') === 0) {
+      const t = line.slice(4).split('=');
+      if (t[0]) sem[t[0]] = (t[1] || '').split('|')[0];
+    }
+  });
+  S.appTplAssign = assign; S.appTplLib = templates; S.semCores = sem;
+  S.appExtras = extras;
+  mergeAppExtras();
+  logOp('已载入应用线程模板：' + templates.length + ' 个，已分配 ' + Object.keys(assign).length +
+    ' 个应用，进程级条目 ' + extras.length + ' 个');
+  return { assign, templates, sem };
+}
+
+/* 写 app_assign.tsv 并重建 threads.json（模板驱动） */
+async function saveAppAssign(tsv) {
+  const t0 = Date.now();
+  const r = await busy('正在保存并生效…', async () => {
+    const w = await Api.writeText('appassign', tsv);
+    if (!/^OK/m.test(String(w))) return 'ERR 写入失败：' + w;
+    return await Api.syncmode();
+  });
+  logOp('保存耗时 ' + (Date.now() - t0) + 'ms');
+  S.appTplAssign = {};
+  String(tsv).split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.appTplAssign[f[0]] = f[1]; });
+  logOp('✅ 应用线程模板已保存：' + String(r || '').slice(0, 80));
+  toast(/ERR/.test(String(r || '')) ? String(r).slice(0, 90) : '已保存并重建');
+  // ⚠ 不再 refreshAll()：那会重读 status / apps_tpl / appmodes（数秒）并整页重渲染，
+  //   是「套用模板很卡」的主因。分配状态已在本地，直接重渲染即可。
+  render();
+}
+/* 把「已选」套到某个模板（kind='app'|'game'）；tplId 为空 = 改为不接管。
+   应用页与游戏页共用这一条路径：勾选在列表里做，模板在模板卡上点。 */
+async function applySelected(kind, tplId) {
+  if (!S.sel.size) { toast('先在下面勾选应用'); return; }
+  const isGameKind = kind === 'game';
+  const map = isGameKind ? S.gameAssign : S.appTplAssign;
+  const n = S.sel.size;
+  for (const p of S.sel) { if (tplId) map[p] = tplId; else delete map[p]; }
+  S.sel.clear();
+  if (isGameKind) { await actGameAssignSave('mem'); return; }
+  await saveAppAssign(Object.keys(map).map(p => p + '\t' + map[p]).join('\n'));
+  toast('已' + (tplId ? '套用模板' : '改为不接管') + '：' + n + ' 个应用');
+}
+
+/* 标题行右侧的「套用到所选」：
+   和模板卡上的按钮不同 —— 这里不预设模板，改成**直接弹选择器**让用户选一档，
+   再一次性套给所有已勾选的包。这样按钮只需要在标题行放一个，
+   而不用给每张模板卡都留一颗（卡上那颗保留，用于「明确点某一档」）。 */
+function applyPickedBySheet() {
+  if (!S.sel.size) { toast('先在下面勾选 ' + (S.tab === 'games' ? '游戏' : '应用')); return; }
+  const isGame = S.tab === 'games';
+  const lib = isGame ? (S.templates || []) : (S.appTplLib || []);
+  pickSheet('套用到 ' + S.sel.size + ' 个已选',
+    lib.map(t => ({ v: t.id, label: t.friendly, hint: t.id }))
+      .concat([{ v: '', label: '不接管', hint: '清空这些包的模板' }]),
+    v => applySelected(isGame ? 'game' : 'app', v));
+}
+
+/* 标题行 ⓘ：一次展开全部模板卡的详情（再点一次全收起）。
+   和单卡 toggleTplTips 共用 .tpl.tips 状态 —— 点空白处仍会全部收起。 */
+function toggleAllTplTips() {
+  const cards = [...document.querySelectorAll('.tpl')];
+  if (!cards.length) return;
+  const want = cards.some(c => !c.classList.contains('tips'));
+  cards.forEach(c => c.classList.toggle('tips', want));
+}
+
+/* ============================================================
+   8) 通用片段
+   ============================================================ */
+function kvHtml(k, v, mono) {
+  return '<div class="kv-row"><div class="k' + (mono ? ' mono' : '') + '">' + k + '</div><div class="v">' + v + '</div></div>';
+}
+
+/* ============================================================
+   9) 视图：概览
+   ============================================================ */
+function viewOverview() {
+  const st = S.status;
+  const m = (S.model && S.model.modes) || {};
+  const def = S.sceneDefault || st.MODE || 'balance';
+
+  const modeCards = MODE_ORDER.map(k => {
+    const t = m[k]; if (!t) return '';
+    const on = k === def;
+    const n = S.sceneCount[k] || 0;
+    return '<div class="modecard' + (on ? ' on' : '') + '" data-act="go" data-arg="modes">' +
+      '<div class="mc-h"><span class="mc-n">' + esc(t.cn || MODE_CN[k]) + '</span>' +
+      (on ? '<span class="pill accent">Scene 当前</span>' : '') + '</div>' +
+      '<div class="mc-b">频率由 Scene 下发' +
+      '<br><span style="color:var(--sub2)">' + n + ' 个应用</span></div></div>';
+  }).join('');
+
+  const stRow = (k, v, tone) =>
+    '<div class="kv-row"><div class="k">' + esc(k) + '</div><div class="v">' +
+    (tone ? '<span class="pill ' + tone + '">' + v + '</span>' : v) + '</div></div>';
+
+  return `
+<div class="group">
+  <div class="g-title">模式阶梯</div>
+  <div class="modegrid">${modeCards}</div>
+</div>
+
+<div class="group">
+  <div class="g-title">运行状态</div>
+  <div class="card">
+    ${stRow('Scene 全局模式', esc(S.status.MODE_CN || MODE_CN[def] || def) + ' <span class="mono" style="font-size:11px;color:var(--sub)">' + esc(def) + '</span>')}
+    ${stRow('Scene 模式 preset', st.PRESET_OK === '1' ? '8 组齐全' : '不完整', st.PRESET_OK === '1' ? 'ok' : 'warn')}
+    ${stRow('模式命中应用', '省电 ' + (S.sceneCount.powersave || 0) + ' · 均衡 ' + (S.sceneCount.balance || 0) +
+      ' · 性能 ' + (S.sceneCount.performance || 0) + ' · 极速 ' + (S.sceneCount.fast || 0))}
+    ${stRow('线程分配规则', (st.THREADS_RULES || 0) + ' 条')}
+    ${stRow('线程分配服务', st.DAEMON === '1' ? '运行中' : '未运行', st.DAEMON === '1' ? 'ok' : 'bad')}
+    ${stRow('无障碍辅助服务', st.ACC === '1' ? '已绑定' : '未绑定', st.ACC === '1' ? 'ok' : 'bad')}
+    ${stRow('配置守护', st.GUARD === '1' ? '运行中' : '未运行', st.GUARD === '1' ? 'ok' : 'warn')}
+    ${stRow('自动切换线程', st.MODE_SYNC === '1' ? '已开启' : '已关闭', st.MODE_SYNC === '1' ? 'ok' : '')}
+    ${stRow('CPU 调频', 'Scene 接管', 'ok')}
+    ${stRow('模块日志', st.DEBUG === '1' ? '已开启' : '已关闭', st.DEBUG === '1' ? '' : 'ok')}
+  </div>
+</div>
+
+${st.PROFILE_OK === '1' ? '' : `
+<div class="group">
+  <div class="warnbox" style="margin:0">
+    <b>⚠ 调度文件缺失</b>（缺：${esc(st.PROFILE_MISS || '')}）—— 点下面「传递调度」灌回去。
+  </div>
+</div>`}
+
+${(st.SCENE_DYN === 'true' && st.SCENE_SOURCE === 'SOURCE_SCENE_ONLINE') ? '' : `
+<div class="group">
+  <div class="warnbox" style="margin:0">
+    <b>⚠ Scene 还没启用我们的配置</b> —— 点下面「传递调度」自动启用。<br>
+    <span style="color:var(--sub)">当前身份 <b>${esc((st.SCENE_AUTHOR || '空') + "'" + (st.SCENE_ID || '空'))}</b></span>
+  </div>
+</div>`}
+
+<div class="group">
+  <div class="g-title">调度配置</div>
+  <div class="card" style="padding:12px">
+    <div class="mono" style="font-size:11.5px;color:var(--sub);padding:0 0 10px;word-break:break-all">
+      Scene 已启用：<b style="color:var(--text)">${esc((st.SCENE_AUTHOR || '?') + "'" + (st.SCENE_ID || '?'))}</b>
+    </div>
+    <div class="btn-row" style="padding:0">
+      <button class="btn primary" data-act="profilepush">传递调度</button>
+      <button class="btn" data-act="profilebackup">备份调度</button>
+    </div>
+    <div class="btn-row" style="padding:12px 0 0">
+      <select class="f" id="bklist" style="flex:1 1 auto">
+        ${(S.backups || []).length
+          ? (S.backups || []).map(b =>
+              '<option value="' + esc(b.name) + '">' + esc(b.label) + '（' + b.files + ' 个文件）</option>').join('')
+          : '<option value="">（暂无备份）</option>'}
+      </select>
+      <button class="btn" data-act="profilerestore">恢复备份</button>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="g-title">配置完整性</div>
+  <div class="card" style="padding:12px">
+    ${(S.auditBad || []).length ? `
+      <div class="warnbox" style="margin:0 0 10px">
+        <b>⚠ 发现 ${S.auditBad.length} 个注错文件</b>
+        ${S.auditAt ? '<span style="color:var(--sub)">（' + esc(S.auditAt) + ' 检测）</span>' : ''}
+      </div>
+      <div style="overflow:auto">
+        <table class="modetbl">
+          <thead><tr><th>文件</th><th>用途</th><th>问题</th><th>说明</th></tr></thead>
+          <tbody>${(S.auditBad || []).map(b =>
+            '<tr><td class="mono" style="font-size:11px;white-space:nowrap">' + esc(b.file) + '</td>' +
+            '<td>' + esc(b.cn) + '</td>' +
+            '<td><span class="pill bad">' + esc(b.why) + '</span></td>' +
+            '<td style="color:var(--sub);font-size:11px">' + esc(b.detail) + '</td></tr>').join('')}</tbody>
+        </table>
+      </div>
+    ` : `
+      <div class="kv-row"><div class="k">状态</div><div class="v">
+        <span class="pill ok">${S.auditAt ? '全部正常' : '尚未检测'}</span>
+      </div></div>
+    `}
+    <div class="btn-row" style="padding:12px 0 0">
+      <button class="btn" data-act="audit">检测配置</button>
+      <button class="btn primary" data-act="fixall">一键还原数据</button>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="g-title">模块</div>
+  <div class="card">
+    ${kvHtml('版本', esc(st.VER || '—'))}
+    ${kvHtml('桥接', esc(S.bridgeMode || '—') + (Bridge.isRoot ? ' · root' : ''))}
+    ${kvHtml('温度', 'cpu0 ' + ((parseInt(st.TEMP_CPU0 || 0, 10) / 1000).toFixed(1)) + '°C · cpu8 ' + ((parseInt(st.TEMP_CPU8 || 0, 10) / 1000).toFixed(1)) + '°C')}
+  </div>
+</div>`;
+}
+
+/* ============================================================
+   10) 视图：模式
+   ============================================================ */
+function viewModes() {
+  const m = (S.model && S.model.modes) || {};
+  const fr = S.freqs;
+  const list = k => String(fr[k] || '').trim().split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
+  const L = list('FREQS_L'), M = list('FREQS_M'), P = list('FREQS_P');
+  const arrOf = c => (c === 'L' ? L : c === 'M' ? M : P);
+  const cur = globalMode();
+
+  const cell = (k, st, c) => {
+    const arr = arrOf(c), v = m[k][st][c];
+    // CPU 调频已交回 Scene 接管 → 只读展示 Scene 当前下发的值，不再提供编辑。
+    return '<span class="mono" style="font-size:12px;white-space:nowrap">' +
+      fmtMHz(v[0]) + ' <i class="tild">~</i> ' + fmtMHz(v[1]) + '</span>';
+  };
+
+  const head = '<tr><th>模式</th><th>L 前台</th><th>L 后台</th><th>M 前台</th><th>M 后台</th><th>P 前台</th><th>P 后台</th></tr>';
+  const rows = MODE_ORDER.map(k => {
+    const t = m[k]; if (!t) return '';
+    return '<tr class="' + (k === cur ? 'cur' : '') + '">' +
+      '<td class="mn"><b>' + esc(t.cn || MODE_CN[k]) + '</b><br><span class="mono">' + esc(k) + '</span></td>' +
+      '<td>' + cell(k, 'active', 'L') + '</td><td>' + cell(k, 'inactive', 'L') + '</td>' +
+      '<td>' + cell(k, 'active', 'M') + '</td><td>' + cell(k, 'inactive', 'M') + '</td>' +
+      '<td>' + cell(k, 'active', 'P') + '</td><td>' + cell(k, 'inactive', 'P') + '</td></tr>';
+  }).join('');
+
+  return `
+<div class="group">
+  <div class="g-title">模式 → 频率（Scene 接管）</div>
+  <div class="card" style="padding:0;overflow:auto">
+    <table class="modetbl">
+      <thead>${head}</thead>
+      <tbody>${rows}</tbody>
+    </table>
+  </div>
+  <div class="btn-row" style="padding:6px 0 0">
+    <button class="btn primary" data-act="savemodes">保存并下发</button>
+    <button class="btn" data-act="reload">丢弃改动</button>
+  </div>
+</div>`;
+}
+
+/* 「恢复模块默认频率」已删除：CPU 调频交回 Scene 接管后，模块不再持有频率默认值。
+   频率以 Scene 的 profile.json preset 为准：要么在 Scene 里改，要么点「传递调度」重灌。 */
+
+/* ============================================================
+   11) 视图：应用
+   ============================================================ */
+/* ---------- 应用只有一个列表 ----------
+   所有非游戏应用都在同一个列表里，都能被勾选、套模板。
+   「在 Scene 里单独设过模式」的应用**不再**单独成列表（用户要求：合并）——
+   它们只是多显示一个「Scene 模式」标记，套用模板时没有任何特殊待遇。
+   ⚠ hasOwnMode 用 ownMode（Scene 里**显式设过**的条目）而不是 appMode：
+     appMode 是「生效模式」，后端会给每个已安装应用都填上（没单独设的填全局默认）。
+   游戏单独在「游戏」页。 */
+function modeSyncOn() { return String(S.modeSync) === '1'; }
+function hasOwnMode(pkg) { return !!(S.ownMode && (pkg in S.ownMode)); }
+function manualApps() { return (S.apps || []).filter(a => !isGame(a.pkg)); }
+
+/* 模式 → 线程模板 id（映射由后端下发，前后端只有一份常量） */
+function tplOfMode(mode) { const t = (S.mode2tpl || {})[mode]; return t === undefined ? '' : t; }
+/* 模板显示名。空 id 在两种语境下含义不同：
+     · 模板卡 / 选择器  → 「不接管」（确实不生成任何线程规则）
+     · 模式映射那一行   → 「不覆盖」（极速档不覆盖你手动套的模板）
+   所以拆成两个函数，别混用。 */
+function tplName(id) {
+  if (!id) return '不接管';
+  const t = (S.appTplLib || []).find(x => x.id === id) ||
+            (S.templates || []).find(x => x.id === id);
+  return t ? t.friendly : id;
+}
+function tplLabel(id) { return id ? tplName(id) : '不覆盖'; }
+
+/* 某个包**实际生效**的线程模板。
+   「模式同步线程」开着时，Scene 里显式设过模式的包由模式决定模板，
+   优先级高于手动「套用」（与后端 build_app_assign_merged 的规则一致）。
+   手动表里那份仍在，关掉开关就恢复 —— 所以这里只是「显示/统计用哪一份」。 */
+function effTpl(pkg) {
+  // ⚠ 只有「Scene 模式确实映射到某个模板」时才覆盖手动值。
+  //   极速（fast）的映射是空串 = **不覆盖**（保守：让用户手动套的模板生效），
+  //   而不是「不接管」。后端 mode_sync_assign() 也是这么跳过的，两边必须一致。
+  if (modeSyncOn() && hasOwnMode(pkg)) {
+    const t = tplOfMode(S.ownMode[pkg]);
+    if (t) return t;
+  }
+  return (S.appTplAssign || {})[pkg] || '';
+}
+
+/* 非游戏应用「实际生效」的模板表 pkg → 模板id（模板卡统计要用它，
+   否则 Scene 里改成性能的应用不会计入「高性能」，看起来还留在旧模板里） */
+function effAssignMap() {
+  const m = {};
+  manualApps().forEach(a => { const t = effTpl(a.pkg); if (t) m[a.pkg] = t; });
+  return m;
+}
+
+/* 有多少个应用的模板是「由 Scene 模式决定」的（用于模板卡补充说明） */
+function byModeCount(tplId) {
+  let n = 0;
+  manualApps().forEach(a => { if (tplByMode(a.pkg) && effTpl(a.pkg) === tplId) n++; });
+  return n;
+}
+
+/* 该包是否正被 Scene 模式覆盖（用于行内标记） */
+function tplByMode(pkg) {
+  if (!modeSyncOn() || !hasOwnMode(pkg)) return false;
+  return !!tplOfMode(S.ownMode[pkg]);
+}
+
+/* 按模板筛选：S.filter = 'all' | 'tpl:<id>' | 'none' */
+function tplMatch(map, pkg) {
+  const cur = effTpl(pkg);
+  if (S.filter === 'none') return !cur;
+  if (S.filter.indexOf('tpl:') === 0) return cur === S.filter.slice(4);
+  return true;
+}
+function filterApps() {
+  const terms = S.query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  let list = manualApps().filter(a => tplMatch(S.appTplAssign || {}, a.pkg));
+  if (terms.length) list = list.filter(a => {
+    const hay = (a.label + ' ' + a.pkg).toLowerCase();
+    return terms.every(t => hay.indexOf(t) >= 0);
+  });
+  return list;
+}
+
+/* 手动列表总数 / 其中已配模板数 */
+function appTotalCount() { return manualApps().length; }
+function tplAssignedCount() {
+  let n = 0;
+  manualApps().forEach(a => { if (effTpl(a.pkg)) n++; });
+  return n;
+}
+/* 自定义列表里各模式的数量 */
+
+
+/* 紧凑单行：勾选 + 图标 + 名称/包名 + 当前模板（一屏显示更多应用）。
+   ⚠ 这里刻意不放任何下拉：模板在「模板卡」上选，应用只负责被勾选。 */
+function appRowHtml(a) {
+  const tpl = effTpl(a.pkg);
+  const byMode = tplByMode(a.pkg);
+  const sel = S.sel.has(a.pkg);
+  const ico = Bridge.iconOk
+    ? '<img class="app-ico" data-ico="' + esc(a.pkg) + '" alt="">'
+    : '<div class="app-ico ph" style="background:' + avatarColor(a.pkg) + '">' + esc((a.label || '?').slice(0, 1)) + '</div>';
+  // Scene 里单独设过模式的加一个只读标记，方便对照。
+  // ⚠ 这是「为什么我的应用没跟着 Scene 变」的答案就在这一格：
+  //   标了「· 不覆盖」说明该模式在映射表里是空的（目前只有极速），
+  //   此时**保留你手动套的模板**，不会移组。
+  const om = hasOwnMode(a.pkg) ? S.ownMode[a.pkg] : '';
+  const omCn = om ? (MODE_CN[om] || om) : '';
+  const noMap = !!om && !tplOfMode(om);
+  // ★ 可点：直接改这个应用在 Scene 里的模式（性能 / 均衡 / 省电 / 极速）
+  const sc = '<span class="app-tier' + (om ? ' set' : '') + '" data-act="pickmode" data-arg="' +
+    esc(a.pkg) + '" title="修改 Scene 模式">' +
+    (om ? 'Scene ' + esc(omCn) + (noMap ? ' · 不覆盖' : '') : 'Scene 跟随全局') + '</span>';
+  return '<label class="app-row pick' + (sel ? ' sel' : '') + '" data-pkg="' + esc(a.pkg) + '">' +
+    '<input type="checkbox" class="app-sel" data-sel="' + esc(a.pkg) + '"' + (sel ? ' checked' : '') + '>' +
+    ico +
+    '<div class="app-info"><span class="app-name">' + esc(shortName(a.label, 14)) + '</span>' +
+    '<span class="app-pkg">' + esc(shortName(a.pkg, 34)) + '</span></div>' +
+    sc +
+    '<span class="app-tier' + (tpl ? ' set' : ' none') + '" data-act="picktpl" data-arg="' +
+    esc(a.pkg) + '" title="修改线程模板">' +
+    esc(tplName(tpl)) + (byMode && tpl ? ' · 自动' : '') + '</span>' +
+    '</label>';
+}
+
+/* 游戏单行（同样的紧凑样式，只是数据源是 Scene 的游戏名单） */
+function gameRowHtml(g) {
+  const tpl = S.gameAssign[g.pkg] || '';
+  const sel = S.sel.has(g.pkg);
+  const label = appLabel(g.pkg);
+  // 游戏数量少（通常十几个），直接取图标，不必懒加载
+  const ico = Bridge.iconOk
+    ? '<img class="app-ico" src="ksu://icon/' + esc(g.pkg) + '" alt="">'
+    : '<div class="app-ico ph" style="background:' + avatarColor(g.pkg) + '">' + esc((label || '?').slice(0, 1)) + '</div>';
+  const mode = g.mode || S.sceneDefault || '';
+  return '<label class="app-row pick' + (sel ? ' sel' : '') + '" data-pkg="' + esc(g.pkg) + '">' +
+    '<input type="checkbox" class="app-sel" data-sel="' + esc(g.pkg) + '"' + (sel ? ' checked' : '') + '>' +
+    ico +
+    '<div class="app-info"><span class="app-name">' + esc(shortName(label, 14)) + '</span>' +
+    '<span class="app-pkg">' + esc(shortName(g.pkg, 30)) + '</span></div>' +
+    '<span class="app-tier' + (g.mode ? ' set' : '') + '" data-act="pickmode" data-arg="' +
+    esc(g.pkg) + '" title="修改 Scene 模式">Scene ' +
+    esc(MODE_CN[mode] || mode || '全局') + '</span>' +
+    '<span class="app-tier' + (tpl ? ' set' : ' none') + '" data-act="pickgtpl" data-arg="' +
+    esc(g.pkg) + '" title="修改线程模板">' + esc(tplName(tpl)) + '</span>' +
+    '</label>';
+}
+
+/* 当前页「可勾选」的包集合：游戏页 = Scene 的游戏；应用页 = 手动列表筛选后的应用 */
+function currentPkgs() {
+  return S.tab === 'games' ? (S.games || []).map(g => g.pkg) : filterApps().map(a => a.pkg);
+}
+
+/* 勾选工具条：搜索 + 全选 / 清除 + 已选计数 */
+function pickToolbar() {
+  return `
+  <div class="search">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+    <input id="q" placeholder="搜索名称或包名" value="${esc(S.query)}" autocomplete="off" autocorrect="off" spellcheck="false">
+    ${S.query ? '<button class="btn ghost" style="padding:4px 9px;font-size:12px" data-act="qclear">清除</button>' : ''}
+  </div>
+  <div class="filters" style="margin-top:8px">
+    <button data-act="selall">全选当前</button>
+    <button data-act="selclear">清除选择</button>
+    <span class="pill" style="margin-left:auto">已选 <b id="selcount">${S.sel.size}</b></span>
+  </div>`;
+}
+
+/* 模板卡：模板信息 + 「套用到所选 / 改为不接管」。
+   kind = app | game，决定动作名（appapply / gameapply）与「已配 N」的统计源。 */
+/* 模板卡。
+   · kind = app | game（决定动作名 appapply / gameapply 与统计源）
+   · 「不接管」也是一张**平行**的卡（id 为空），不再是按钮 —— 用户要求统一入口。
+   · 详情（其余/最重/次重/comm）默认**不显示**，点模板名才弹小窗，点空白处收起。 */
+function tplCardHtml(t, kind, map, countMap) {
+  const isNone = !t.id;
+  const oc = isNone ? '' : resolveSem(t.other);
+  const hc = isNone ? '' : resolveSem(t.heaviest_cores);
+  const ec = isNone ? '' : resolveSem(t.heavy_cores);
+  // countMap = 实际生效表（应用页传 effAssignMap()）；不传就退回手动表（游戏页）
+  const src = countMap || map;
+  // 「不接管」没法在生效表里数（表里只有非空值）→ 由调用方算好传进来
+  const n = (typeof t.count === 'number')
+    ? t.count
+    : Object.keys(src).filter(p => src[p] === t.id).length;
+  const bym = (!isNone && countMap) ? byModeCount(t.id) : 0;
+  const detail =
+    (oc ? '<span class="tpl-p">其余 → ' + esc(oc) + '</span>' : '') +
+    (hc ? '<span class="tpl-p">最重 ' + esc(t.heaviest_thread) + ' → ' + esc(hc) + '</span>' : '') +
+    (ec ? '<span class="tpl-p">次重 ' + esc(t.heavy_thread) + ' → ' + esc(ec) + '</span>' : '') +
+    (t.comm ? '<span class="tpl-p">comm → ' + esc(resolveSem(t.comm).replace(/;/g, '，')) + '</span>' : '') +
+    /* 「不接管」卡原本没有详情 → 它的 ⓘ 点了没反应。补上说明，
+       顺便把「Scene 极速不覆盖」这条容易误读的规则讲清楚。 */
+    (isNone
+      ? '<span class="tpl-p">不生成线程规则，进程线程全核自由调度</span>' +
+        '<span class="tpl-p">Scene 里单独设过模式的应用仍按模式档位接管</span>'
+      : '');
+
+  /* 标题行 = [模板名 ⓘ] + id 徽标 + 已配计数 +「套用」按钮，全部一行。
+     ⚠ 两个约束：
+       1)「套用」必须直接挂在 .tpl-h 下（不能包 .btn-row）：
+          .btn-row .btn { flex:1; min-width:108px } 会把它撑满整行，就回到两行了。
+       2) 名称与 ⓘ 必须包在同一个 .tpl-n 里：ⓘ 若作为 .tpl-h 的直接子元素，
+          会被 .tpl-h 的 gap 均分间距，看起来「飘在名称和徽标中间」；
+          包起来后 ⓘ 紧贴名称右缘跟随（用户要求「感叹号紧跟模式名称后面」）。 */
+  const head =
+    '<div class="tpl-h">' +
+    '<span class="tpl-n">' +
+    '<span class="n" data-act="tpltips">' + esc(t.friendly) + '</span>' +
+    '<span class="tpl-i" data-act="tpltips" title="查看模板说明">i</span>' +
+    '</span>' +
+    (isNone ? '' : '<span class="pill">' + esc(t.id) + '</span>') +
+    '<span class="pill' + (n ? ' accent' : '') + '"' +
+    (bym ? ' title="其中 ' + bym + ' 个由 Scene 模式自动决定"' : '') + '>已配 ' + n +
+    (bym ? ' <span style="color:var(--sub)">(模式 ' + bym + ')</span>' : '') + '</span>' +
+    '<button class="btn primary btn-xs tpl-apply" data-act="' + kind + 'apply" data-arg="' +
+    esc(t.id) + '">套用</button>' +
+    '</div>';
+
+  /* 详情面板**内联**在卡片里（不再绝对定位）：
+     原来是 position:absolute + top:41px，内容一多就超出卡片下边界被 .card 的
+     overflow:hidden 裁掉（用户报「超出部分看不见」）。
+     改成普通流式块后由卡片自己撑高，不再有裁切问题。 */
+  return '<div class="tpl' + (isNone ? ' plain' : '') + '" data-tpl="' + esc(t.id || '-') + '">' +
+    head +
+    (detail ? '<div class="tpl-b">' + detail + '</div>' : '') +
+    '</div>';
+}
+
+/* 列表主体。只有它会被「增量」重渲染：搜索时不再重建输入框、不重载全部图标，
+   这是修「应用界面卡顿 / 搜索框每打一个字就丢焦点」的关键。 */
+function appListHtml() {
+  const list = filterApps();
+  const shown = list.slice(0, S.showCount);
+  const rows = shown.map(appRowHtml).join('');
+  return (rows || '<div class="empty">没有匹配的应用</div>') +
+    (list.length > shown.length
+      ? '<div class="virtual-hint" id="more">滚动加载更多（还有 ' + (list.length - shown.length) + ' 个）</div>' : '');
+}
+
+/* 图标懒加载：ksu://icon/<pkg> 每个都要管理器解一次图标，一次性取几十上百个会卡死。
+   只给「快进入视口」的行取。 */
+let _icoIO = null;
+function loadIconsInList() {
+  const box = $('applist'); if (!box) return;
+  const imgs = box.querySelectorAll('img[data-ico]');
+  if (!imgs.length) return;
+  if (typeof IntersectionObserver !== 'function') {
+    imgs.forEach(im => { im.src = 'ksu://icon/' + im.getAttribute('data-ico'); im.removeAttribute('data-ico'); });
+    return;
+  }
+  if (_icoIO) _icoIO.disconnect();
+  _icoIO = new IntersectionObserver((es, ob) => {
+    es.forEach(e => {
+      if (!e.isIntersecting) return;
+      const im = e.target, p = im.getAttribute('data-ico');
+      if (p) { im.src = 'ksu://icon/' + p; im.removeAttribute('data-ico'); }
+      ob.unobserve(im);
+    });
+  }, { root: box, rootMargin: '280px' });
+  imgs.forEach(im => _icoIO.observe(im));
+}
+
+function updateFilterChips() {
+  document.querySelectorAll('[data-filter]').forEach(b => {
+    const k = b.getAttribute('data-filter');
+    b.classList.toggle('on', k === S.filter);
+    if (k === 'all') b.textContent = '全部 ' + appTotalCount();
+    else if (k === 'none') b.textContent = '不接管 ' + (appTotalCount() - tplAssignedCount());
+    else if (k.indexOf('tpl:') === 0) {
+      const id = k.slice(4), t = (S.appTplLib || []).find(x => x.id === id);
+      const n = manualApps().filter(a => (S.appTplAssign || {})[a.pkg] === id).length;
+      b.textContent = (t ? t.friendly : id) + ' ' + n;
+    }
+  });
+  const c = $('appcount');
+  if (c) c.textContent = filterApps().length + ' 个应用' + (S.query ? ' · 搜索「' + S.query + '」' : '');
+}
+
+/* 增量重渲染应用列表（不动搜索框/工具条 → 不丢焦点、不重载无关图标） */
+function updateAppList() {
+  const box = $('applist');
+  if (!box) { render(); return; }
+  box.innerHTML = appListHtml();
+  updateFilterChips();
+  loadIconsInList();
+  bindAppListScroll();
+}
+
+/* 整页渲染后的收尾（列表图标懒加载 + 计数 + 滚动加载哨兵） */
+function afterAppsRender() {
+  updateFilterChips();
+  loadIconsInList();
+  bindAppListScroll();
+}
+
+function viewApps() {
+  const appTotal = appTotalCount();
+  const assignedCount = tplAssignedCount();
+  const cards = (S.appTplLib || []).map(t =>
+      tplCardHtml(t, 'app', S.appTplAssign || {}, effAssignMap()))
+    .concat([tplCardHtml({ id: '', friendly: '不接管', count: appTotal - assignedCount },
+      'app', S.appTplAssign || {}, effAssignMap())]).join('');
+  const assignTsv = Object.keys(S.appTplAssign || {}).map(p => p + '\t' + S.appTplAssign[p]).join('\n');
+  const on = modeSyncOn();
+
+  return `
+<div class="group">
+  <div class="g-title">模式同步线程</div>
+  <div class="card" style="padding:12px">
+    <label class="swrow"><input type="checkbox" id="msync"${on ? ' checked' : ''}><span class="sw"></span>
+      <span class="swtxt"><b>自动切换</b></span>
+    </label>
+    <div class="btn-row" style="padding:12px 0 0">
+      <button class="btn primary" data-act="syncfromscene">立即按 Scene 模式同步</button>
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="g-title rowhead">
+    <span class="rh-t">线程模板<span class="tpl-i" data-act="tpltipsall" title="查看模板说明">i</span></span>
+    <button class="btn btn-xs" data-act="tplall">套用到所选</button>
+  </div>
+  <div class="card" style="padding:12px">${cards || '<div class="empty">未找到模板</div>'}</div>
+</div>
+
+<div class="group">
+  <div class="g-title"><span id="appcount"></span></div>
+  ${pickToolbar()}
+  <div class="filters" style="margin-top:8px">
+    <button class="${S.filter === 'all' ? 'on' : ''}" data-filter="all">全部 ${appTotal}</button>
+    ${(S.appTplLib || []).map(t => {
+      const n = manualApps().filter(a => effTpl(a.pkg) === t.id).length;
+      return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
+        esc(t.friendly) + ' ' + n + '</button>';
+    }).join('')}
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">不接管 ${appTotal - assignedCount}</button>
+  </div>
+  <div class="card" style="margin-top:8px"><div class="listbox" id="applist">${appListHtml()}</div></div>
+</div>
+
+<div class="group">
+  <div class="g-title">分配表</div>
+  <div class="card" style="padding:12px">
+    <textarea class="f mono" id="app-assign" rows="6" style="font-size:11.5px">${esc(assignTsv)}</textarea>
+    <div class="btn-row" style="padding:12px 0 0">
+      <button class="btn primary" data-act="appasssave">保存并重建</button>
+    </div>
+  </div>
+</div>`;
+}
+
+/* ==== app.views.js ==== */
+/* ============================================================
+   玄戒O3 · Abel 调度工具箱 —— WebUI 前端 (2/3)
+   游戏视图 / 日志视图 / 弹层 / 事件 / 动作
+   ============================================================ */
+'use strict';
+
+/* ============================================================
+   12) 视图：游戏（频率跟随 Scene，线程由模板决定）
+   ============================================================ */
+function appLabel(pkg) {
+  const a = (S.apps || []).find(x => x.pkg === pkg);
+  return a ? (a.label || pkg) : pkg;
+}
+function viewGames() {
+  const games = S.games || [];
+  const q = S.query.trim().toLowerCase();
+  const list = games.filter(g => !q || (appLabel(g.pkg) + ' ' + g.pkg).toLowerCase().indexOf(q) >= 0);
+  const gmap = S.gameAssign || {};
+  const glist = list.filter(g => tplMatch(gmap, g.pkg));
+  const rows = glist.map(gameRowHtml).join('');
+  const cards = (S.templates || []).map(t => tplCardHtml(t, 'game', S.gameAssign || {}))
+    .concat([tplCardHtml({ id: '', friendly: '不接管', count: games.filter(g => !gmap[g.pkg]).length },
+      'game', S.gameAssign || {})]).join('');
+  const assignTsv = Object.keys(S.gameAssign || {}).map(p => p + '\t' + S.gameAssign[p]).join('\n');
+
+  return `
+<div class="group">
+  <div class="g-title rowhead">
+    <span class="rh-t">线程模板<span class="tpl-i" data-act="tpltipsall" title="查看模板说明">i</span></span>
+    <button class="btn btn-xs" data-act="tplall">套用到所选</button>
+  </div>
+  <div class="card" style="padding:12px">${cards || '<div class="empty">未找到模板</div>'}</div>
+</div>
+
+<div class="group">
+  <div class="g-title">游戏 ${glist.length} 个${q ? ' · 搜索「' + esc(S.query) + '」' : ''}</div>
+  ${pickToolbar()}
+  <div class="filters" style="margin-top:8px">
+    <button class="${S.filter === 'all' ? 'on' : ''}" data-filter="all">全部 ${games.length}</button>
+    ${(S.templates || []).map(t => {
+      const n = games.filter(g => gmap[g.pkg] === t.id).length;
+      return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
+        esc(t.friendly) + ' ' + n + '</button>';
+    }).join('')}
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">不接管 ${games.filter(g => !gmap[g.pkg]).length}</button>
+  </div>
+  <div class="card" style="margin-top:8px"><div class="listbox">${rows || '<div class="empty">没有匹配的游戏</div>'}</div></div>
+</div>
+
+<div class="group">
+  <div class="g-title">分配表</div>
+  <div class="card" style="padding:12px">
+    <textarea class="f mono" id="game-assign" rows="6" style="font-size:11.5px">${esc(assignTsv)}</textarea>
+    <div class="btn-row" style="padding:12px 0 0">
+      <button class="btn primary" data-act="gameasssave">保存并重建</button>
+    </div>
+  </div>
+</div>`;
+}
+
+/* ============================================================
+   13) 视图：日志
+   ============================================================ */
+function viewLog() {
+  const dbgOn = String(S.debug) === '1';
+  return `
+<div class="group">
+  <div class="g-title">开关</div>
+  <div class="card" style="padding:12px">
+    <label class="swrow"><input type="checkbox" id="dbg"${dbgOn ? ' checked' : ''}><span class="sw"></span>
+      <span class="swtxt"><b>记录模块日志</b></span>
+    </label>
+  </div>
+</div>
+<div class="group">
+  <div class="g-title">操作记录（本次会话）</div>
+  <div class="card"><pre class="tall">${S.ops.length ? esc(S.ops.join('\n')) : '（暂无）'}</pre></div>
+</div>
+<div class="group">
+  <div class="g-title">模块日志</div>
+  <div class="card"><pre id="modlog" class="tall">加载中…</pre>
+    <div class="btn-row"><button class="btn" data-act="reloadlog">刷新</button><button class="btn" data-act="clearlog">清空</button></div>
+  </div>
+</div>`;
+}
+
+/* ============================================================
+   14) 弹层
+   ============================================================ */
+/* ============================================================
+   15) 动作
+   ============================================================ */
+async function actSyncMode(silent) {
+  const r = await busy('正在重建线程分配…', () => Api.syncmode());
+  const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
+  logOp((/^OK/.test(line) ? '✅ ' : '❌ ') + line);
+  if (!silent) toast(line.slice(0, 90) || '已同步');
+  await refreshStatus();
+  render();
+  return line;
+}
+
+/** 保存模式阶梯：model + modes.conf + profile.json 的 preset，然后重建 threads */
+async function actSaveModes() {
+  const r = await busy('正在下发模式阶梯…', async () => {
+    if (!await saveModelNow()) return 'ERR 保存模型失败';
+    const p = await pushPresetsToScene();
+    const lv = await Api.live();
+    return [p, String(lv).trim()].join(' ／ ');
+  });
+  S.dirty = false;
+  logOp('▶ 模式阶梯已下发：' + String(r || '').slice(0, 120));
+  const bad = /ERR/.test(String(r || ''));
+  toast(bad ? String(r).slice(0, 90) : '模式已下发');
+  await refreshStatus(); render();
+}
+
+/* 游戏线程分配：下拉或 TSV 直编，写入 game_assign.tsv 后按 Scene 重建 threads.json */
+async function actGameAssignSave(src) {
+  let tsv;
+  if (src === 'tsv') {
+    const e = $('game-assign'); if (!e) return;
+    tsv = e.value.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    for (const line of tsv.split('\n')) {
+      const f = line.split('\t');
+      if (f.length < 2 || !f[0] || !f[1]) { toast('每行需 包名<TAB>模板id'); return; }
+    }
+    S.gameAssign = {};
+    tsv.split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.gameAssign[f[0]] = f[1]; });
+  } else {
+    tsv = Object.keys(S.gameAssign).map(p => p + '\t' + S.gameAssign[p]).join('\n');
+  }
+  const r = await busy('正在保存并重建…', async () => {
+    const w = await Api.writeText('gameassign', tsv);
+    if (!/^OK/m.test(String(w))) return 'ERR 写入失败：' + w;
+    return await Api.syncmode();
+  });
+  logOp('✅ 游戏线程分配已保存：' + String(r || '').slice(0, 80));
+  toast(/ERR/.test(String(r || '')) ? String(r).slice(0, 90) : '已保存并重建');
+  render();
+}
+
+/* ============================================================
+   16) 事件
+   ============================================================ */
+const ACTIONS = {
+  /* ---- 调度配置：传递 / 备份 / 恢复 ---- */
+  profilepush: async () => {
+    if (!confirm('把模块内置的调度配置传递给 Scene？\n\n' +
+      '会覆盖 Scene files/ 下的 profile.json、manifest.json、_Apps.json、_Games.json、' +
+      '_Camera.json、_ELP.json、powercfg.sh、features/*.conf 等。\n' +
+      '（执行前会自动先备份一份当前配置）\n\n' +
+      '如果你在 Scene 里手动调过频率预设，传递后会被内置默认值覆盖。')) return;
+    const r = await busy('正在传递调度…', () => Api.profilepush());
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    // ⚠ 不能只取最后一行：后端可能带审计/警告行，最后一行未必是结论。
+    //   统一取第一条以 OK/ERR 开头的行作为结论。
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || (lines[lines.length - 1] || '');
+    logOp(lines.join(' | ').slice(0, 200));
+    toast(/^OK/.test(verdict) ? verdict.slice(3, 100) : ('传递失败：' + verdict.slice(0, 90)));
+    await refreshAll();
+  },
+  /* ---- 配置完整性：检测 + 一键还原 ---- */
+  audit: async () => {
+    const raw = await busy('正在检测配置…', () => Api.audit());
+    const r = parseAudit(raw);
+    S.auditBad = r.bad;
+    S.auditAt = new Date().toTimeString().slice(0, 8);
+    logOp('🔍 配置检测：核对 ' + r.checked + ' 项，异常 ' + r.bad.length + ' 个' +
+      (r.bad.length ? '（' + r.bad.map(b => b.file).join(', ') + '）' : ''));
+    toast(r.bad.length ? ('发现 ' + r.bad.length + ' 个注错文件') : '配置全部正常');
+    render();
+  },
+  fixall: async () => {
+    if (!confirm('一键还原数据？\n\n' +
+      '会把模块内置的调度配置重新灌进 Scene（profile.json / manifest.json / _Apps.json / ' +
+      '_Games.json / _Camera.json / _ELP.json / powercfg.sh），并重建损坏的模块数据表。\n\n' +
+      '执行前会自动先备份一份当前配置。')) return;
+    const r = await busy('正在一键还原…', () => Api.fixall());
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || lines[lines.length - 1] || '';
+    logOp(lines.join(' | ').slice(0, 240));
+    toast(/^OK/.test(verdict) ? verdict.slice(3, 100) : ('还原失败：' + verdict.slice(0, 90)));
+    // 还原后立刻复检，让清单刷新成真实状态
+    try { const a = parseAudit(await Api.audit()); S.auditBad = a.bad; S.auditAt = new Date().toTimeString().slice(0, 8); } catch (e) {}
+    await refreshAll();
+  },
+  profilebackup: async () => {
+    const r = await busy('正在备份…', () => Api.profilebackup());
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || (lines[lines.length - 1] || '');
+    logOp(lines.join(' | ').slice(0, 200));
+    toast(/^OK/.test(verdict) ? verdict.slice(3, 90) : ('备份失败：' + verdict.slice(0, 90)));
+    await loadBackups();
+    render();
+  },
+  profilerestore: async () => {
+    const sel = $('bklist');
+    const name = sel ? sel.value : '';
+    if (!name) { toast('先选一个备份'); return; }
+    if (!confirm('从备份「' + name + '」恢复？\n\n会覆盖当前的调度与线程配置文件。')) return;
+    const r = await busy('正在恢复…', () => Api.profilerestore(name));
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || (lines[lines.length - 1] || '');
+    logOp(lines.join(' | ').slice(0, 200));
+    toast(/^OK/.test(verdict) ? '已恢复备份' : ('恢复失败：' + verdict.slice(0, 90)));
+    await refreshAll();
+  },
+  syncmode: () => actSyncMode(false),
+  // 「立即生效」按钮（dirty bar）用：把改动下发到 Scene
+  live: async () => { const o = await doApply(false); if (/^OK/m.test(String(o || ''))) { await refreshStatus(); render(); } },
+  savemodes: actSaveModes,
+  gameasssave: () => actGameAssignSave('tsv'),
+  // 右上角小按钮：重新读取（列表页只增量刷列表，不重建输入框）
+  reload: async () => {
+    toast('正在刷新…');
+    await refreshAll();
+    toast('已刷新');
+  },
+  qclear: () => {
+    S.query = ''; S.showCount = 60;
+    const e = $('q'); if (e) e.value = '';
+    updateAppList();
+  },
+  reloadlog: async () => { await loadLogs(); },
+  clearlog: async () => {
+    await Api.execRaw(': > ' + STATE_DIR + '/sceneo3.log');
+    logOp('已清空模块日志'); await loadLogs();
+  },
+  selall: () => { currentPkgs().forEach(p => S.sel.add(p)); render(); },
+  selclear: () => {
+    S.sel.clear();
+    document.querySelectorAll('.app-row.sel').forEach(r => r.classList.remove('sel'));
+    document.querySelectorAll('.app-sel').forEach(c => { c.checked = false; });
+    const sc = $('selcount'); if (sc) sc.textContent = '0';
+  },
+  appapply: t => applySelected('app', t),
+  // 立即按 Scene 模式把线程模板改成对应档（后端会落盘 app_assign.tsv + 重建 + 落核）
+  syncfromscene: async () => {
+    const r = await busy('正在按 Scene 模式同步…', () => Api.applyModes());
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || lines[lines.length - 1] || '';
+    logOp('applymodes → ' + lines.join(' | ').slice(0, 200));
+    toast(/^OK/.test(verdict) ? verdict.slice(3, 120) : verdict.slice(0, 120));
+    await loadSceneModes();
+    try { await loadAppsTpl(); } catch (e) { }
+    render();
+  },
+  // 点模板名 / ⓘ：展开-收起该卡详情
+  tpltips: (a, el) => toggleTplTips(el),
+  // 标题上的 ⓘ：把每一张模板卡的详情全部展开（再点收起）
+  tpltipsall: () => toggleAllTplTips(),
+  // 标题行右侧「套用到所选」：给已勾选的包逐个弹模板选择器
+  tplall: () => applyPickedBySheet(),
+  // 游戏行的模板标签
+  pickgtpl: pkg => {
+    const cur = (S.gameAssign || {})[pkg] || '';
+    pickSheet('线程模板 · ' + appLabel(pkg),
+      (S.templates || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur, hint: t.id }))
+        .concat([{ v: '', label: '不接管', on: !cur }]),
+      v => setGameTpl(pkg, v));
+  },
+  // 应用行的两个标签：点开底部选择器直接改
+  picktpl: pkg => {
+    const cur = effTpl(pkg);
+    const yes = !tplByMode(pkg);
+    pickSheet('线程模板 · ' + appLabel(pkg),
+      (S.appTplLib || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur && yes, hint: t.id }))
+        .concat([{ v: '', label: '不接管', on: !cur }]),
+      v => setAppTpl(pkg, v));
+  },
+  pickmode: pkg => {
+    const cur = hasOwnMode(pkg) ? S.ownMode[pkg] : '';
+    const opts = MODE_ORDER.map(m => ({ v: m, label: MODE_CN[m], on: m === cur,
+      hint: m + '  →  线程模板 ' + (tplLabel(tplOfMode(m)) || '不覆盖（保留手动）')
+        + (tplOfMode(m) ? '' : '') }));
+    opts.push({ v: '*', label: '跟随全局', on: !cur });
+    pickSheet('Scene 模式 · ' + appLabel(pkg), opts, v => {
+      if (v === '*') { toast('要清除单应用设置，请到 Scene 里操作'); return; }
+      setSceneMode(pkg, v);
+    });
+  },
+  gameapply: t => applySelected('game', t),
+  appasssave: async () => {
+    const e = $('app-assign'); if (!e) return;
+    const tsv = e.value.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    for (const line of tsv.split('\n')) {
+      const f = line.split('\t');
+      if (f.length < 2 || !f[0] || !f[1]) { toast('每行需 包名<TAB>模板id'); return; }
+    }
+    S.appTplAssign = {};
+    tsv.split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.appTplAssign[f[0]] = f[1]; });
+    await saveAppAssign(tsv);
+  },
+  go: a => { switchTab(a); }
+};
+
+/* 切页签：必须清空勾选集合。
+   ⚠ S.sel 是跨页共享的，曾经出现「应用页点全选 → 切到游戏页点套用」
+     把几百个普通应用写进 game_assign.tsv 的事故（脏数据会让模式同步整体失效）。 */
+function switchTab(a) {
+  if (a !== S.tab) S.sel.clear();
+  S.tab = a;
+  S.showCount = 100;
+  render();
+  window.scrollTo(0, 0);
+  // 兜底：应用页依赖 apps_tpl（模板卡 + 筛选项计数）。若还没到就补拉一次再重渲染，
+  // 否则会出现「模板卡空白、筛选项只有『全部 0 / 不接管 0』」。
+  if (a === 'apps' && !(S.appTplLib || []).length) {
+    loadAppsTpl().then(() => { if (S.tab === 'apps') render(); }).catch(() => { });
+  }
+  // ★ 每次进应用页都重读一次 Scene 的单应用模式：
+  //   ownMode 只在启动/手动刷新时加载过，用户在 Scene 里改了模式再回来就会是旧的 ——
+  //   表现就是「明明设成性能了，标签和筛选还留在流畅日常」。
+  if (a === 'apps') {
+    loadSceneModes().then(() => { if (S.tab === 'apps') render(); }).catch(() => { });
+  }
+}
+
+/* 三个开关共用 settings.conf：改写一个时必须带上另外两个的现值，否则会被清掉 */
+async function settingsText(key, val) {
+  const cur = await Api.readText('settings');
+  const kv = {};
+  String(cur || '').split('\n').forEach(l => {
+    const i = l.indexOf('='); if (i > 0) kv[l.slice(0, i).trim()] = l.slice(i + 1).trim();
+  });
+  // 缺省值：与 util.sh settings_load 的默认保持一致
+  if (!('mode_sync' in kv)) kv.mode_sync = '0';
+  if (!('debug' in kv)) kv.debug = '1';
+  kv[key] = String(val);
+  // freq_sync 开关已按用户要求删除：频率同步常开，不再写这个键。
+  return ['mode_sync', 'debug'].map(k => k + '=' + kv[k]).join('\n') + '\n';
+}
+
+function clickHandler(ev) {
+  const t = ev.target;
+  const actEl = t.closest ? t.closest('[data-act]') : null;
+  if (actEl) {
+    const fn = ACTIONS[actEl.getAttribute('data-act')];
+    if (fn) { ev.preventDefault(); ev.stopPropagation(); fn(actEl.getAttribute('data-arg'), actEl); return; }
+  }
+  const fEl = t.closest ? t.closest('[data-filter]') : null;
+  // 筛选只增量刷列表（整页 render 会重建搜索框并重载全部图标 → 卡）
+  if (fEl) {
+    S.filter = fEl.getAttribute('data-filter'); S.showCount = 100;
+    if (S.tab === 'games') render(); else updateAppList();
+    return;
+  }
+}
+
+const INPUT_HANDLER = async ev => {
+  const t = ev.target;
+  if (t.id === 'q') {
+    // ⚠ 不整页 render：应用页只增量刷列表（不丢焦点）；游戏页数量少，直接重渲染即可
+    S.query = t.value; S.showCount = 100;
+    clearTimeout(window._qt);
+    window._qt = setTimeout(() => { if (S.tab === 'games') render(); else updateAppList(); }, 140);
+    return;
+  }
+
+  // 模式页：频率
+  // 日志页：模块日志开关（控功耗）
+  if (t.id === 'dbg') {
+    const on = t.checked ? 1 : 0;
+    await busy(on ? '正在开启…' : '正在关闭…', async () => {
+      const w = await Api.saveSettings(await settingsText('debug', on));
+      if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 60)); return; }
+      S.debug = on;
+      await refreshStatus();
+    });
+    logOp(on ? '✅ 已开启模块日志' : '✅ 已关闭模块日志（省功耗）');
+    toast(on ? '已开启：守护会写日志' : '已关闭：守护不再写盘');
+    render();
+    return;
+  }
+  // 应用页：模式同步线程开关
+  if (t.id === 'msync') {
+    const on = t.checked ? 1 : 0;
+    const r = await busy(on ? '正在开启…' : '正在关闭…', async () => {
+      const w = await Api.saveSettings(await settingsText('mode_sync', on));
+      if (!/^OK/m.test(String(w))) return 'ERR 写入失败：' + w;
+      S.modeSync = on;
+      const e = await Api.run('enforce');   // 立刻按新规则重落一次
+      await refreshStatus();
+      return e;
+    });
+    logOp((on ? '✅ 已开启' : '✅ 已关闭') + '「自动切换」｜' + String(r || '').slice(0, 60));
+    toast(on ? '已开启：单独设过模式的应用改由模式自动绑定线程' : '已关闭：全部应用回到手动模板');
+    render();
+    return;
+  }
+  // 应用 / 游戏：勾选（只改这一行 + 计数，不重渲染）
+  if (t.hasAttribute && t.hasAttribute('data-sel')) {
+    const p = t.getAttribute('data-sel');
+    if (t.checked) S.sel.add(p); else S.sel.delete(p);
+    const sc = $('selcount'); if (sc) sc.textContent = S.sel.size;
+    const row = t.closest ? t.closest('.app-row') : null;
+    if (row) row.classList.toggle('sel', t.checked);
+    return;
+  }
+};
+
+/* ==== app.boot.js ==== */
+/* ============================================================
+   玄戒O3 · Abel 调度工具箱 —— WebUI 前端 (3/3)
+   演示数据 + 引导
+   ============================================================ */
+
+/* ---------- 示例数据（浏览器离线预览用；真机不会走到这里） ---------- */
+const DEMO_LABELS = {
+  'com.coolapk.market': '酷安', 'com.tencent.mm': '微信', 'com.xingin.xhs': '小红书',
+  'com.tencent.tmgp.sgame': '王者荣耀', 'com.tencent.jkchess': '金铲铲之战',
+  'com.android.camera': '相机', 'com.miui.home': '系统桌面', 'com.eg.android.AlipayGphone': '支付宝',
+  'com.ss.android.ugc.aweme': '抖音', 'com.taobao.taobao': '淘宝', 'com.miui.themestore': '主题商店',
+  'com.omarea.vtools': 'Scene', 'com.android.settings': '设置', 'com.miui.gallery': '相册',
+  'com.tencent.mobileqq': 'QQ', 'com.sina.weibo': '微博', 'com.jingdong.app.mall': '京东',
+  'com.achievo.vipshop': '唯品会', 'com.ximalaya.ting.android': '喜马拉雅',
+  'com.netease.cloudmusic': '网易云音乐', 'com.tencent.qqmusic': 'QQ音乐',
+  'com.autonavi.minimap': '高德地图', 'com.baidu.BaiduMap': '百度地图',
+  'com.sdu.didi.psnger': '滴滴出行', 'me.ele': '饿了么', 'com.sankuai.meituan': '美团',
+  'com.quark.browser': '夸克浏览器', 'com.UCMobile': 'UC浏览器', 'com.microsoft.emmx': 'Edge',
+  'com.miui.mediaeditor': '小米相册编辑', 'com.miui.videoplayer': '视频', 'tv.danmaku.bili': '哔哩哔哩',
+  'com.tencent.qqlive': '腾讯视频', 'com.qiyi.video': '爱奇艺', 'com.youku.phone': '优酷',
+  'com.kuaishou.nebula': '快手', 'com.dragon.read': '番茄小说', 'com.qidian.QDReader': '起点读书',
+  'com.zhihu.android': '知乎', 'com.ss.android.article.news': '今日头条',
+  'com.alibaba.android.rimet': '钉钉', 'com.tencent.wework': '企业微信',
+  'com.baidu.netdisk': '百度网盘', 'com.miui.cloudservice': '小米云服务',
+  'com.xiaomi.market': '应用商店', 'com.android.updater': '系统更新', 'com.miui.backup': '本地备份',
+  'com.miui.huanji': '小米换机', 'bin.mt.plus': 'MT管理器', 'com.miui.securitycenter': '手机管家',
+  'com.hyper.gallery.plugin': '相册插件', 'com.xiaomi.cameramind': '相机 AI',
+  'com.android.fileexplorer': '文件管理', 'com.miui.cleanmaster': '垃圾清理'
+};
+const DEMO_APP_PKGS = Object.keys(DEMO_LABELS);
+const FALLBACK_LABELS = DEMO_LABELS;
+
+const DEMO_THREADS = [
+  {
+    friendly: '极速 · 固定',
+    packages: ['com.android.camera', 'com.miui.gallery', 'com.miui.mediaeditor', 'com.xiaomi.market',
+      'com.android.updater', 'com.miui.backup', 'com.miui.huanji', 'com.baidu.netdisk', 'bin.mt.plus',
+      'com.android.fileexplorer', 'com.miui.cleanmaster', 'com.miui.securitycenter', 'com.miui.videoplayer'],
+    cpuset: { main_thread: '0-9', other: '0-9' }
+  },
+  {
+    friendly: '跟随全局 · 均衡',
+    packages: ['com.ss.android.ugc.aweme', 'com.kuaishou.nebula', 'tv.danmaku.bili', 'com.tencent.qqlive',
+      'com.tencent.mm', 'com.sina.weibo', 'com.taobao.taobao', 'com.jingdong.app.mall', 'com.xingin.xhs',
+      'com.quark.browser', 'com.autonavi.minimap', 'com.miui.home', 'com.alibaba.android.rimet',
+      'com.eg.android.AlipayGphone', 'com.coolapk.market', 'com.omarea.vtools', 'com.android.settings',
+      'com.tencent.mobileqq', 'com.netease.cloudmusic', 'com.zhihu.android', 'com.dragon.read',
+      'com.sdu.didi.psnger', 'me.ele', 'com.sankuai.meituan', 'com.miui.themestore', 'com.achievo.vipshop',
+      'com.ximalaya.ting.android', 'com.tencent.qqmusic', 'com.baidu.BaiduMap', 'com.youku.phone',
+      'com.qiyi.video', 'com.UCMobile', 'com.microsoft.emmx', 'com.qidian.QDReader', 'com.tencent.wework',
+      'com.ss.android.article.news', 'com.miui.cloudservice'],
+    cpuset: { main_thread: '0-7', other: '0-5' }
+  },
+  {
+    friendly: '金铲铲之战',
+    packages: ['com.tencent.jkchess'],
+    cpuset: {
+      main_thread: '1-9', heaviest_thread: 'UnityMain', heaviest_cores: '8-9',
+      heavy_thread: 'UnityGfx', heavy_cores: '4-7',
+      comm: { '4-7': ['RenderThread', 'Job.', 'Loading.'], '0-3': ['Audio', 'FMOD', 'Http'] },
+      other: '0-3'
+    }
+  },
+  {
+    friendly: '王者荣耀 / LOLM',
+    packages: ['com.tencent.tmgp.sgame', 'com.tencent.tmgp.sgamece'],
+    cpuset: {
+      main_thread: '1-9', heaviest_thread: 'UnityMain', heaviest_cores: '8-9',
+      heavy_thread: 'UnityGfx', heavy_cores: '4-7',
+      comm: { '4-7': ['RenderThread', 'Job.'], '1-9': ['IL2CPP', 'btm_', 'MTuner'], '0-3': ['Audio', 'FMOD'] },
+      other: '0-3'
+    }
+  }
+];
+
+/* ============================================================
+   19) 引导
+   ============================================================ */
+async function boot() {
+  const tabs = document.querySelector('.tabs');
+  if (tabs) {
+    tabs.addEventListener('click', e => {
+      const b = e.target.closest('[data-tab]');
+      if (!b) return;
+      switchTab(b.getAttribute('data-tab'));
+    });
+  }
+  document.addEventListener('click', clickHandler);
+  // 点空白（或任何非说明入口的地方）收起模板详情小窗。
+  // ⚠ 这里必须把**两个** ⓘ 入口都放过：
+  //   data-act="tpltips"（卡上的）与 data-act="tpltipsall"（标题行上的）。
+  //   漏掉后者的话，标题 ⓘ 刚把全部展开，就被本监听器当场收起（表现为「点了没反应」）。
+  document.addEventListener('click', ev => {
+    const t = ev.target;
+    if (t && t.closest && (t.closest('.tpl-b') || t.closest('[data-act="tpltips"]') ||
+        t.closest('[data-act="tpltipsall"]'))) return;
+    document.querySelectorAll('.tpl.tips').forEach(x => x.classList.remove('tips'));
+  });
+  document.addEventListener('change', INPUT_HANDLER);
+  document.addEventListener('input', INPUT_HANDLER);
+
+  window.addEventListener('scroll', () => {
+    const hd = document.querySelector('header');
+    if (hd) hd.classList.toggle('scrolled', window.scrollY > 4);
+  }, { passive: true });
+
+  const view = $('view');
+  if (view) view.innerHTML = '<div class="empty"><span class="spin"></span> 正在连接…</div>';
+
+  try { S.bridgeMode = await Bridge.probe(); } catch (e) { S.bridgeMode = 'demo'; }
+  S.demo = S.bridgeMode === 'demo';
+  const banner = $('demo-banner');
+  if (banner) banner.classList.toggle('hidden', !S.demo);
+
+  // ★ 不做全屏：状态栏 / 导航栏保持可见
+
+  // ⚠ 首屏要快：status 必须最先（后面依赖它），其余并发；
+  //   「写入自检」会写一个 ~10KB 文件再读回（6+ 次桥调用），放到界面上屏之后再做。
+  await refreshStatus();
+  await Promise.all([loadModel(), loadApps()]);
+  await loadModeFreqFromScene();   // 模式页必须是 Scene 真正会下发的那份频率
+  render();
+  // ⚠ 模板库（apps_tpl）必须**在第二次 render 之前**就绪：
+  //   它同时决定「应用页的模板卡」与「筛选项（各模板计数 / 未分配）」。
+  //   原来它是最后才发起、回调只做 updateAppList()（增量刷列表），
+  //   于是打开应用页看到的是「模板不显示、筛选项不全」——必须全量 render 才会补上。
+  await Promise.all([loadFreqs(), loadSceneModes(), loadGames(), loadAppsTpl().catch(() => { })]);
+  render();
+  // 兜底：万一上面超时/失败，切到应用页时再补一次
+  if (!(S.appTplLib || []).length) {
+    loadAppsTpl().then(() => render()).catch(() => { });
+  }
+  logOp('WebUI 启动 · 桥接=' + S.bridgeMode + (Bridge.isRoot ? ' (root)' : '') +
+    ' · 当前模式=' + (S.status.MODE_CN || '?'));
+
+  // 轮询刷新：只刷新状态，不整页重渲染。
+  //  · 30s 一次（原 20s）—— 每次 status 在后端约 1.3s，是 WebUI 打开时的主要额外负载
+  //  · 页面不可见（切走 / 息屏）时**完全不请求**，避免后台白跑
+  //  · 正在输入 / 正在忙 → 跳过，别打断用户
+  setInterval(async () => {
+    if (document.hidden) return;
+    if (S.busy || S.applying) return;
+    const ae = document.activeElement;
+    if (ae && /INPUT|TEXTAREA|SELECT/.test(ae.tagName)) return;
+    try {
+      await refreshStatus();
+      if (S.tab === 'overview') render();
+    } catch (e) { }
+  }, 30000);
+}
+
+document.addEventListener('DOMContentLoaded', boot);
+
+async function loadFreqs() {
+  if (Object.keys(S.freqs).length) return S.freqs;
+  S.freqs = await Api.freqs();
+  return S.freqs;
+}
+
+async function refreshStatus() {
+  S.status = await Api.status();
+  S.modeSync = String(S.status.MODE_SYNC) === '1' ? 1 : 0;
+  S.debug = String(S.status.DEBUG) === '1' ? 1 : 0;   // 日志开关（影响守护写盘）
+  S.mode = await Api.modes();
+  const sv = $('saved');
+  if (sv) sv.textContent = S.savedAt ? '已保存 ' + S.savedAt : '';
+}
+
+async function loadSceneModes() {
+  const o = await Api.appmodes();
+  S.sceneDefault = o.SCENE_DEFAULT || 'balance';
+  S.sceneCount = {
+    powersave: +o.COUNT_powersave || 0, balance: +o.COUNT_balance || 0,
+    performance: +o.COUNT_performance || 0, fast: +o.COUNT_fast || 0
+  };
+  const map = {}, own = {};
+  Object.keys(o).forEach(k => {
+    if (k.indexOf('A_') === 0) map[k.slice(2)] = o[k];        // 生效模式（含跟随全局的）
+    else if (k.indexOf('OWN_') === 0) own[k.slice(4)] = o[k];  // 只在 Scene 里显式设过的
+  });
+  S.appMode = map;
+  S.ownMode = own;
+  return map;
+}
+
+async function loadGames() {
+  // 游戏列表 / 模板 / 分配全部来自 Scene（cmd_games），不再读旧版 gamesjson
+  return await loadSceneGames();
+}
+
+async function refreshAll() {
+  // 并发拉取（串行要 ~2.5s，并发 ~0.9s）
+  await refreshStatus();
+  await Promise.all([
+    loadFreqs(),
+    S.model ? Promise.resolve() : loadModel(),
+    loadSceneModes(), loadGames(), loadAppsTpl(), loadBackups(), loadAudit()
+  ]);
+  await loadModeFreqFromScene();
+  if (S.tab === 'apps') updateAppList(); else render();
+}
+
+/* 配置完整性审计（概览页「注错文件清单」用）
+   ⚠ 只是只读检测，开机跑一次即可；失败就留空，不阻塞上屏。 */
+async function loadAudit() {
+  try {
+    const r = parseAudit(await Api.audit());
+    S.auditBad = r.bad;
+    S.auditAt = new Date().toTimeString().slice(0, 8);
+  } catch (e) { S.auditBad = []; }
+  return S.auditBad;
+}
+
+/* 调度配置备份列表（概览页「恢复备份」下拉用） */
+async function loadBackups() {
+  try {
+    S.backups = await Api.profilelist();
+  } catch (e) { S.backups = []; }
+  return S.backups;
+}
+
+async function loadLogs() {
+  const ml = $('modlog');
+  if (ml) ml.textContent = (await Api.run('log 80')) || '(空)';
+}
+
+function render() {
+  const view = $('view'); if (!view) return;
+  const chip = $('conn-chip');
+  if (chip) {
+    const m = S.bridgeMode || 'demo';
+    const bad = m === 'demo';
+    chip.className = 'pill ' + (bad ? 'bad' : 'ok');
+    chip.textContent = bad ? '未连接' : (m === 'official' ? '已连接' : '已连接 · ' + m);
+  }
+  document.querySelectorAll('.tabs [data-tab]').forEach(b =>
+    b.classList.toggle('on', b.getAttribute('data-tab') === S.tab));
+  const fn = {
+    overview: viewOverview, modes: viewModes, apps: viewApps,
+    games: viewGames, log: viewLog
+  }[S.tab];
+  if (!fn) return;
+  const out = fn();
+  if (out && typeof out.then === 'function') {
+    console.error('view "' + S.tab + '" is async; must return a string');
+    view.innerHTML = '<div class="empty">视图渲染出错：' + esc(S.tab) + '</div>';
+    return;
+  }
+  view.innerHTML = out;
+  renderDirtyBar();
+  if (S.tab === 'apps') afterAppsRender();
+  if (S.tab === 'log') loadLogs();
+  if (S.tab === 'modes' && !Object.keys(S.freqs).length) {
+    loadFreqs().then(() => { if (S.tab === 'modes') render(); });
+  }
+}
+
+function bindAppListScroll() {
+  const box = $('applist'), more = $('more');
+  if (!box || !more) return;
+  if (typeof IntersectionObserver !== 'function') {
+    more.textContent = '点击加载更多';
+    more.onclick = () => { S.showCount += 80; render(); };
+    return;
+  }
+  const io = new IntersectionObserver(es => {
+    if (es.some(e => e.isIntersecting)) { S.showCount += 80; render(); }
+  }, { root: box, rootMargin: '200px' });
+  io.observe(more);
+}
+
+/* ============================================================
+   18) 演示模式（浏览器里直接打开 index.html 时用）
+   ============================================================ */
+const Demo = {
+  exec(cmd) {
+    const c = String(cmd).replace(/^sh \S+ /, '');
+    if (/^status/.test(c)) return { code: 0, out: this.status() };
+    if (/^mode/.test(c)) return { code: 0, out: this.modeCmd() };
+    if (/^freqs/.test(c)) return { code: 0, out: this.freqs() };
+    // ⚠ apps_tpl 必须排在 apps 之前：/^apps/ 会前缀命中 apps_tpl，把模板当包名列表返回
+    if (/^apps_tpl/.test(c)) return { code: 0, out: this.apps_tpl() };
+    if (/^apps/.test(c)) return { code: 0, out: DEMO_APP_PKGS.join('\n') };
+    if (/^appmodes/.test(c)) return { code: 0, out: this.appmodes() };
+    if (/^games/.test(c)) return { code: 0, out: this.games() };
+    if (/^conf /.test(c)) return { code: 0, out: 'gold_first=0\nuse_presets=1\nin_apps=1\nin_games=1\nperf_notify=1\n' };
+    if (/^b64len/.test(c)) return { code: 0, out: String(b64enc(this.file(c.split(/\s+/)[1])).length) };
+    if (/^b64 /.test(c)) {
+      const p = c.split(/\s+/); const t = b64enc(this.file(p[1]));
+      const s = parseInt(p[2] || '1', 10), n = parseInt(p[3] || '40000', 10);
+      return { code: 0, out: t.slice(s - 1, s - 1 + n) };
+    }
+    if (/^(live|modeset|scheme|enforce)/.test(c)) return { code: 0, out: 'OK 演示模式' };
+    if (/^log/.test(c)) return { code: 0, out: '[演示模式] 未真正执行任何命令' };
+    if (/^(wbegin|wappend)/.test(c)) return { code: 0, out: 'OK' };
+    if (/^wcommit/.test(c)) return { code: 0, out: 'OK 0（演示模式不会真写）' };
+    return { code: 0, out: 'OK' };
+  },
+  file(id) {
+    if (id === 'model') return '';
+    if (id === 'threads') return JSON.stringify(DEMO_THREADS, null, 2);
+    if (id === 'profile') return '';
+    if (id === 'settings') return 'mode_sync=0\n';
+    return '';
+  },
+  modeCmd() {
+    const t = {
+      powersave:   ['省电', '417792 1353600 556800 1468800 1113600 2044800', '417792 1065600 556800 1142400 1113600 2044800', '0-3', '0-3'],
+      balance:     ['均衡', '417792 1939200 556800 1968000 1113600 2371200', '417792 1785600 556800 1804800 1113600 2198400', '0-7', '0-5'],
+      performance: ['性能', '672000 2246400 835200 2294400 1497600 2860800', '672000 2092800 835200 2131200 1497600 2707200', '0-7', '0-7'],
+      fast:        ['极速', '912000 3148800 1142400 3686400 2044800 4358400', '912000 2860800 1142400 3148800 2044800 3648000', '0-9', '0-9']
+    };
+    let s = 'MODE=balance\nMODE_CN=均衡\nMODE_LIST=powersave balance performance fast\n';
+    Object.keys(t).forEach(k => { s += 'MODE_' + k + '=' + t[k].join('|') + '\n'; });
+    return s + 'PRESET_OK=1';
+  },
+  status() {
+    return [
+      'VER=3.0 (2026-09-15)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
+      'SCHEME=sweet_bal', 'SCHEME_CN=日常均衡', 'MODE_SYNC=0', 'FREQ_SYNC=0', 'DEBUG=1', 'DAEMON=1', 'ACC=1',
+      'GUARD=1', 'CONF_OK=1', 'MODE=balance', 'MODE_CN=均衡', 'PRESET_OK=1',
+      'SCUR_L=912000', 'SCUR_M=1468800', 'SCUR_P=2044800',
+      'QMAX_L=1939200', 'QMAX_M=1968000', 'QMAX_P=2371200',
+      'TEMP_CPU0=37750', 'TEMP_CPU8=41250',
+      'THREADS_RULES=6', 'THREADS_MD5=f60f7e781959f29fa7af8f9a225413f5'
+    ].join('\n');
+  },
+  freqs() {
+    return 'FREQS_L=417792 556800 672000 787200 902400 1017600 1132800 1248000 1363200 1478400 1593600 1708800 1824000 1939200 2054400 2169600 2284800 2400000 2515200 3148800\n' +
+      'FREQS_M=556800 768000 979200 1190400 1401600 1612800 1824000 1968000 2035200 2246400 2294400 2457600 2668800 2880000 3091200 3302400 3686400\n' +
+      'FREQS_P=1113600 1401600 1497600 1689600 1977600 2044800 2265600 2371200 2553600 2841600 2860800 3129600 3417600 3705600 3993600 4281600 4358400\n' +
+      'HWMAX_L=3148800\nHWMAX_M=3686400\nHWMAX_P=4358400';
+  },
+  appmodes() {
+    return 'SCENE_DEFAULT=balance\nCOUNT_powersave=1\nCOUNT_balance=9\nCOUNT_performance=1\nCOUNT_fast=1\n' +
+      'A_com.taobao.taobao=powersave\nA_com.tencent.mm=performance\nA_com.miui.backup=fast\n' +
+      'OWN_com.taobao.taobao=powersave\nOWN_com.tencent.mm=performance\nOWN_com.miui.backup=fast';
+  },
+  games() {
+    const tpl = (id, friendly, other, ht, hc, et, ec, comm) =>
+      'TPL=' + id + '|' + friendly + '|' + other + '|' + ht + '|' + hc + '|' + et + '|' + ec + '|' + comm;
+    return [
+      'GAME=com.tencent.tmgp.sgame\tfast',
+      'GAME=com.tencent.jkchess\tfast',
+      'ASSIGN=com.tencent.tmgp.sgame\tunity',
+      'ASSIGN=com.tencent.jkchess\tunity',
+      tpl('unity', 'Unity 游戏', '{p1_core}', 'UnityMain', '{p2_core}', 'UnityGfx', '{p1_core}', '4-7:RenderThread,Job.;0-3:Audio'),
+      tpl('default', '通用游戏', '{p1_core}', 'main', '{p2_core}', 'render', '{p1_core}', '0-3:bg'),
+      'CPU_ONLINE=0-9',
+      'SEM_e_core=0-3', 'SEM_p1_core=4-7', 'SEM_p2_core=8-9',
+      'SEM_p_core=4-9', 'SEM_hp_core=8-9', 'SEM_all_core=0-9'
+    ].join('\n');
+  },
+  apps_tpl() {
+    const tpl = (id, friendly, other, ht, hc, et, ec, comm) =>
+      'TPL=' + id + '|' + friendly + '|' + other + '|' + ht + '|' + hc + '|' + et + '|' + ec + '|' + comm;
+    return [
+      'APP=com.tencent.mm\tperformance',
+      'APP=com.taobao.taobao\tpowersave',
+      'APP=com.android.camera\tfast',
+      'ASSIGN=com.tencent.mm\tsmooth',
+      tpl('light', '轻量·省电', '{e_core}', 'main', '{p1_core}', '', '', '{e_core}=IO,Network,Http,Binder,Pool;{p1_core}=Worker,Job,Async'),
+      tpl('smooth', '流畅日常', '{p1_core}', 'main', '{p1_core}', 'render', '{hp_core}', '{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async;{e_core}=IO,Network,Audio,Binder'),
+      tpl('perf', '高性能', '{p_core}', 'main', '{hp_core}', 'heavy', '{hp_core}', '{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async,Compute;{e_core}=IO,Network'),
+      'CPU_ONLINE=0-9',
+      'SEM_e_core=0-3', 'SEM_p1_core=4-7', 'SEM_p2_core=8-9',
+      'SEM_p_core=4-9', 'SEM_hp_core=8-9', 'SEM_all_core=0-9',
+      'MODE2TPL_powersave=light', 'MODE2TPL_balance=smooth',
+      'MODE2TPL_performance=perf', 'MODE2TPL_fast=',
+      'APP_TPL_HAS=1', 'APP_ASSIGNED=1'
+    ].join('\n');
+  }
+};
+
+</script>
+</body>
+</html>

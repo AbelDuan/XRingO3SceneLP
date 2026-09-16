@@ -1,1 +1,795 @@
-# XRingO3SceneLP
+# XRingO3SceneLP · 玄戒 O3 调度工具箱
+
+> 面向 **小米玄戒 O3（`xring_o3_asic`，10 核 4+4+2）** 的 KernelSU 模块，
+> 用来给 [Scene](https://github.com/omarea/Scene)（`com.omarea.vtools`）**补上它在本机没做到的两件事**：
+> 线程绑核的**真正落地**，以及相机频率区间的**不塌缩**。
+>
+> 顺带把调频权限**交还**给 Scene —— 模块只做 Scene 做不到的部分。
+
+[![Platform](https://img.shields.io/badge/platform-xring__o3__asic-blue)]()
+[![Framework](https://img.shields.io/badge/framework-KernelSU%20%2F%20SukiSU-green)]()
+[![Version](https://img.shields.io/badge/version-7.0-orange)]()
+[![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
+
+---
+
+## 目录
+
+- [1. 这个模块解决什么问题](#1-这个模块解决什么问题)
+- [2. 功能清单](#2-功能清单)
+- [3. 实现原理（读懂这一章就懂整个模块）](#3-实现原理读懂这一章就懂整个模块)
+  - [3.1 线程绑核为什么必须自己做](#31-线程绑核为什么必须自己做)
+  - [3.2 cgroup 预算是硬上限（最关键的一条）](#32-cgroup-预算是硬上限最关键的一条)
+  - [3.3 目标怎么解析：三级优先级](#33-目标怎么解析三级优先级)
+  - [3.4 频率：模块不写，交回 Scene](#34-频率模块不写交回-scene)
+  - [3.5 相机频率守护：三层根因](#35-相机频率守护三层根因)
+- [4. 目录结构](#4-目录结构)
+- [5. WebUI](#5-webui)
+- [6. 安装](#6-安装)
+- [7. ⚠️ 需要注意的东西](#7-️-需要注意的东西)
+- [8. 常见问题](#8-常见问题)
+- [9. 调参与排障](#9-调参与排障)
+- [10. 版本历史](#10-版本历史)
+- [11. 已知限制与未验证项](#11-已知限制与未验证项)
+- [12. 许可与致谢](#12-许可与致谢)
+
+---
+
+## 1. 这个模块解决什么问题
+
+在玄戒 O3 上装 Scene，会遇到两件事 Scene 自己做不了：
+
+### 问题一：Scene 不执行 `threads.json`
+
+Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。但在本机实测：
+
+> 把 `com.tencent.mm` 设成「轻量·省电 (0-3)」→ 写 `threads.json`
+> （`app_cpuset` 与 `cpuset/comm` 两种形状都试过）→ 重启 `scene-daemon` → 冷启动微信
+> → **60 秒内主线程与工作线程的 `Cpus_allowed_list` 仍然是 `0-9`**。
+
+用户看到的「先跑 `4-9`、过一阵才变 `0-3`」其实是 **Scene 自己对「前台/后台」的默认策略**，
+不是我们规则的延迟生效。
+
+→ **所以线程绑核由本模块自己做**。
+
+### 问题二：相机一开就锁频
+
+现象（用户原话）：**「打开相机瞬间频率会上升，但是会马上回落并严重限频。」**
+
+实测三簇频率：
+
+```text
+启动前  cpu0=1939200/1939200  cpu4=1968000/1968000  cpu8=2044800/2044800
+启动后  cpu0=417792/417792    cpu4=556800/556800    cpu8=1113600/1113600   ← min == max，区间塌缩
+退相机  cpu0=417792/1785600   cpu4=556800/1804800   cpu8=1113600/2198400   ← 1 秒内恢复
+```
+
+`min == max == cpuinfo_min_freq` —— CPU 被**钉死在最低档**。详见 [§3.5](#35-相机频率守护三层根因)。
+
+---
+
+## 2. 功能清单
+
+| 功能 | 实现位置 | 说明 |
+|---|---|---|
+| **线程绑核（核心）** | `Scripts/…/enforce_threads.sh` | 把模板真正落到 `sched_setaffinity`，幂等、带已落核缓存 |
+| **三级目标解析** | `lib/util.sh` | 游戏名单 → Scene 模式映射 → 手动模板 |
+| **模式同步线程** | `lib/util.sh` `mode_sync_assign()` | Scene 里设过模式的 app 自动套对应模板（可开关） |
+| **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
+| **配置完整性审计 + 一键还原** | `Scripts/…/integrity.sh` | 7 个维度核对，输出「注错文件清单」 |
+| **相机频率守护** | `Scripts/…/camera_freq_guard.sh` | 兜底：相机档位被写坏时写回 |
+| **相机档位看护** | `Scripts/…/guard.sh` | 在「进相机那一刻」判定是谁写坏的，零常驻开销 |
+| **调度守护** | `Scripts/…/guard.sh` | 目录权限、配置可写性、threads 重建、落核 |
+| **WebUI** | `webroot/index.html` | 单文件，KernelSU 桥接，5 个页签 |
+| **音量键操作菜单** | `action.sh` | 不装 WebUI 也能锁定 / 解锁 / 切换方案 |
+| **方案包 ×3** | `Config/4+4+2/O3/` | `sweet_eco` / `sweet_bal` / `sweet_perf` |
+| **动态模块描述** | `lib/util.sh` `update_module_desc()` | 管理器里直接显示当前启用状态 |
+
+---
+
+## 3. 实现原理（读懂这一章就懂整个模块）
+
+### 3.1 线程绑核为什么必须自己做
+
+见 [§1 问题一](#1-这个模块解决什么问题)。模块的做法是**不用 `threads.json` 驱动执行** ——
+它照样生成 `threads.json`（让 Scene 侧数据自洽），但真正下发的是自己的落核器。
+
+### 3.2 cgroup 预算是硬上限（最关键的一条）
+
+本机是 **cgroup v1 cpuset**（挂载在 `/dev/cpuset`，`cpuset_v2_mode`）。
+每个应用被放进一个组，**组里的 CPU 掩码就是它的硬预算**：
+
+```text
+/dev/cpuset/background       cpus = 0-3
+/dev/cpuset/foreground       cpus = 0-9
+/dev/cpuset/top-app          cpus = 0-9
+/dev/cpuset/top-app/0-5      ← Scene 就是靠建这种子组做「应用核心分配」
+```
+
+`sched_setaffinity` **只能在预算之内收窄**。对 `background` 组里的进程
+`taskset -p f0`（`4-7`）会直接返回 `EINVAL`（实测）。
+
+所以 `enforce_threads.sh` 把目标核与当前组的预算**取交集**：
+
+| 当前组 | 预算 | 行为 |
+|---|---|---|
+| `foreground` / `top-app` | `0-9` | 模板**完整生效**（这才是交互时真正需要的） |
+| `background` | `0-3` | 系统本身已把整个应用限在 `0-3`，交集与现状一致 → **一条命令都不发** |
+
+> 这也解释了「为什么后台应用看不到绑核变化」—— 那是设计，不是故障。
+
+### 3.3 目标怎么解析：三级优先级
+
+```text
+① Scene 游戏名单里的包
+      → 游戏页手动分配的模板
+      （名单唯一权威来源 = Scene 的 games.xml 里 value="true" 的项，
+        不能只看 game_assign.tsv 有没有这个包 —— 曾出现历史脏数据
+        把几百个普通应用塞进去，会让整条映射失效）
+
+② 在 Scene 里单独设过模式的包
+      → 「模式同步线程」开关开启时，按模式自动映射：
+            省电 powersave   → light  （轻量·省电）
+            均衡 balance     → smooth （流畅日常）
+            性能 performance → perf   （高性能）
+            极速 fast        → 不覆盖（保留手动模板）
+            igoned 等        → 不接管
+        开关关闭时 → 回落 ③
+
+③ 其余包
+      → 应用页手动分配的模板
+```
+
+#### ⚠️ 「极速 → 不覆盖」≠「删除」
+
+`MODE2TPL_fast` 是**空串**。v6.0 之前 `enforce_threads.sh` 的 awk 里写着：
+
+```awk
+if (t == "") { delete pick[p]; continue }   # ← 错：把包整个删掉
+```
+
+结果是：**凡在 Scene 里被设成 `fast` 的包，哪怕你在 WebUI 里手动给它套了模板，
+也会被从目标表里彻底抹掉** —— 界面照常显示「已套高性能」，实际一条 `taskset` 都没发。
+
+实测受害者：`com.android.camera`、`me.weishu.kernelsu`、`com.miui.backup`、
+`com.miui.packageinstaller`、`com.android.updater`、`org.swiftapps.swiftbackup`、
+`com.xiaomi.aicr`、`io.timepod.updater`。
+
+**这就是「Scene 限制了对相机的调度」的真相。**
+
+修法：空映射时 `continue`（保留手动模板，回落 ③），与前端 `effTpl()` 语义对齐。
+
+> **一般化教训：前后端对同一个映射表的空值语义必须一致**，
+> 否则同一份数据两边算出不同结果。v4.9 只修了前端，后端漏了，于是 bug 又多活了一个版本。
+
+### 3.4 频率：模块不写，交回 Scene
+
+**本模块不写任何频率节点。** 频率由 Scene 自己的模式 preset
+（`profile.json` 里 `<mode>_active` / `<mode>_inactive` 的 `@cpu_freq`）下发 ——
+那是 Scene 的正规通道，天然支持「按应用 / 按前后台」区分。
+
+#### 本机频率旋钮的实测粘性
+
+| 旋钮 | 粘得住 | 备注 |
+|---|---|---|
+| `cpuN/qos/max_freq` | ✅ | 唯一可靠的硬上限 |
+| `cpuN/qos/min_freq` | ✅ | **抬下限 = 常驻功耗主因**（平台不改写它） |
+| `scaling_max_freq` | ❌ | 写 `1968000` → 2s 后回 `556800` |
+| `scaling_min_freq` | ❌ | 写了立刻打回 |
+| `xres/*` | ✅ | 只调积极性，不能设硬上限 |
+| **Scene 自己** | ❌ | **完全不写频率**（默认 `balance`→`performance` + 重启 daemon，20s 后一个值都没变） |
+
+模块里保留 `apply_freq.sh`，但它已经**退化成一个幂等的「遗留 QoS 清理器」**：
+只把 v2 时代留下的上下限还原成「不限频」，值本来就对就一个字节都不写。
+
+> 保留而不是删掉的原因：`guard.sh` 与 WebUI 仍在调它，将来若要恢复模块限频，
+> 把 v2 那段写回去即可。
+
+#### `@cpu_freq` 的正确签名是 **4 参数**
+
+```json
+["@cpu_freq", "cpu0", "912000", "3148800"]
+   宏名        cpu簇   min      max
+```
+
+**v6.3 及更早写成了 5 参数**（错）：
+
+```json
+["@cpu_freq", "policy0", "min", "417792"]     ← 错：多了 "min" 字段，且用了 policy0
+```
+
+Scene 解析这种错误格式时，会**把最后一个参数直接写进 `scaling_max_freq`**。
+`strace` 实锤：`write(46, "417792", 6)`，而 `fd46 = policy0/scaling_max_freq`。
+
+#### 写入顺序固定「先 min 后 max」
+
+反过来 `max` 会被当时的 `min` 钳住（实测）：
+
+| 实验 | 操作 | 结果 |
+|---|---|---|
+| C | **先写 min（低位）再写 max（高位）** | `min=417792 max=2899200` **保住** ✅ |
+| C' | 先写 max（`min` 在高位） | `min=2899200 max=2899200` **塌缩** ❌ |
+
+### 3.5 相机频率守护：三层根因
+
+#### 第一层：`@cpu_freq` 签名写错（模块自己带的 bug）
+
+见 [§3.4](#34-频率模块不写交回-scene)。三个方案包的 `_Camera.json` **都带这个错误**，
+所以换方案包也修不好。
+
+#### 第二层：`@cpu_freq` 只落实 `max`，不落实 `min`
+
+即便改成正确签名，实测 `scaling_min_freq` 仍会被压回该簇最低档：
+
+```text
+写 min=912000  →  立即读回 672000  →  2 秒后 417792
+```
+
+全进程扫描确认：**只有 `scene-daemon` 持有 `scaling_min_freq` 的写 fd**（3 个）。
+
+#### 第三层：`xres` 让 `max` 跟随 `min` 塌缩
+
+`min` 处于最低档时，`xres` governor 重算 policy，把 `max` 压到同值：
+
+```text
+cpu_frequency_limits: min=417792 max=417792  cpu_id=0
+  => cpufreq_set_policy
+  => handle_update          ← freq_qos work 回调
+```
+
+#### ★ 第四层（v7.0 才找到）：**模块自己也在破坏相机频率**
+
+`guard.sh` 原本在**每次亮/息屏切换**时无条件跑 `apply_freq.sh`，
+而它把 QoS 上限清成 `cpuinfo_max_freq`。
+
+**问题在于 `cpuinfo_max_freq` 会跟着 thermal 限频 + 光感实时变化**：
+
+| 场景 | `cpuinfo_max_freq` | 清成它意味着 |
+|---|---|---|
+| 白天（常温） | `3148800` | 上界 = 硬件最高，无害 |
+| 夜间相机 / 强光下 | `1190400` | **上界被砍到 1/3，相机区间直接废掉** |
+
+于是「开关屏幕」这个**和相机毫无关系**的动作，会把相机正在用的频率区间直接掀掉。
+
+> 这也解释了为什么这个现象**有时重启后好一阵、有时一开相机就犯** ——
+> 取决于触发那一刻 `cpuinfo_max_freq` 是多少。
+
+**修法**：QoS 是**跨重启持久化**的，遗留值只在「模块刚升级 / 改过档位」时才存在，
+不是每次亮息屏都会有 → 改成 **「只清一次」**（标记 `$STATE_DIR/qos_cleared`）：
+
+```sh
+if [ "$on" != "$ON_PREV" ]; then
+    if [ ! -f "$QOS_CLEARED" ]; then       # $STATE_DIR/qos_cleared
+        sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" >/dev/null 2>&1
+        touch "$QOS_CLEARED"
+    fi
+    ON_PREV="$on"; FG_SIG=""
+fi
+```
+
+> **一般化教训**：任何「还原 / 清残留」动作，先确认写入的目标值是不是一个**会漂移的量**。
+> `cpuinfo_max_freq` / `cpuinfo_min_freq` / `scaling_available_frequencies` 末项**都会漂**；
+> 只有从 `qos/*_freq` 或配置里读回来的才是稳定真源。
+
+#### 修复：治本 + 兜底
+
+**① 方案包修正（治本）** —— 三个 `_Camera.json` 全部重写：
+
+```json
+"state": {
+  "active": [
+    ["@cpu_freq", "cpu0", "912000",   "3148800"],
+    ["@cpu_freq", "cpu4", "1142400",  "3686400"],
+    ["@cpu_freq", "cpu8", "2044800",  "4358400"],
+    ["/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq", "912000"],
+    ["/sys/devices/system/cpu/cpu4/cpufreq/scaling_min_freq", "1142400"],
+    ["/sys/devices/system/cpu/cpu8/cpufreq/scaling_min_freq", "2044800"],
+    ["/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq", "3148800"],
+    ["/sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq", "3686400"],
+    ["/sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq", "4358400"]
+  ]
+}
+```
+
+- `@cpu_freq` 用**正确签名**（设上限）
+- **追加裸 sysfs 路径**显式写 `scaling_min_freq` / `scaling_max_freq`
+  （写法与 `_Games.json` 里 `target_loads` 的裸路径同源）
+- **顺序固定：先 min 后 max**
+
+**② 看护放进 `guard.sh`，不另开常驻进程**
+
+`guard.sh` 的 WORK 分支**只在前台切换时**进入 —— 也就是「**进入相机的这一刻**」天然命中；
+其余时间（包括整个相机期间）一次都不跑。**常驻轮询没有存在的必要。**
+
+「是谁写坏的」判据 = **跑一次幂等的 `apply_freq.sh`，看它动不动手**：
+
+| 结果 | 含义 | 动作 |
+|---|---|---|
+| 一个字节都没写 | 上界已是硬件最高 → 写它的是 **Scene** 自己（Scene 写的策略上界比硬件最高低） | **不覆盖**（守「交回 Scene」约定） |
+| 写了 | 上界是**模块自己**留下的 | 写回相机档位 |
+
+**③ `camera_freq_guard.sh` 降为兜底，并做功耗治理**
+
+| | v1 | v2 |
+|---|---|---|
+| 间隔 | 1s | **2s** |
+| 息屏 | 睡 10 轮（10s） | 睡 40 轮（80s） |
+| **亮屏稳态 fork** | 每轮 `dumpsys`+`grep`+`sed` ≈ **3 个** | **0 个**（只内建 `read` 读 6 个节点） |
+| 「谁在写」判定 | 每轮 | 判一次后缓存 |
+| 判定为 Scene 接管后 | 仍每轮 fork 重判 | 直接睡，值对上自动解锁 |
+| 写入策略 | 每轮单遍 | 一次校正内连写 3 遍（覆盖 ~2s 回写窗口）+ 5 轮冷静期 |
+
+> **本机 fork 一个子进程要 10~40ms**，是这类守护功耗的唯一大头
+> （`/proc` 下 1 万+ 线程，fork/exec 被放大 ~10 倍）。
+> 所以目标是**把 fork 压到 0**。
+
+**④ 档位现读，不写死**
+
+三个方案包的相机档位**不一样**：
+
+| 方案 | L min/max | M min/max | P min/max |
+|---|---|---|---|
+| `sweet_bal` | `912000 / 3148800` | `1142400 / 3686400` | `2044800 / 4358400` |
+| `sweet_perf` | `912000 / 3148800` | `1142400 / 3686400` | `2044800 / 4358400` |
+| `sweet_eco` | **`672000 / 2246400`** | **`835200 / 2294400`** | **`1497600 / 2860800`** |
+
+所以守护**必须现读设备上正在用的 `_Camera.json`**（`camera_freq_load()`）——
+写死就等于「用 eco 时把频率拉到 bal 的档位」，比不修还糟。
+读不全就回退到 `sweet_bal`（最保守的一档），**绝不猜**。
+
+#### 已排除的嫌疑（全部实证否定）
+
+| 嫌疑 | 实测 |
+|---|---|
+| 温度 | 42~53 °C，trip 点全 ≥70 °C ❌ |
+| `mi_thermald` | `cooling_device{0,1,2,5,7}/cur_state` **全 0** ❌ |
+| IPA | `ipa_*_level_limit` 全开放，压 `ipa` 仍塌缩 ❌ |
+| `perfflinger` | `qos` 区间正常，压 `qos` 无效 ❌ |
+| `xres/pl` | `pl=0` 仍锁死 ❌ |
+| `special_cpu_limit` | 写 1 无变化 ❌ |
+| 节点权限 | `-rw-rw-r--` 可写，`rc=0` ❌ |
+
+> ⚠️ **不推荐**写 `cpu_nolimit_temp=100000` 绕过温度限制 —— 会解除温度保护，**有硬件风险**。
+
+---
+
+## 4. 目录结构
+
+```text
+XRingO3SceneLP/
+├── module.prop                          模块清单（id / version / action）
+├── customize.sh                         安装逻辑（首次灌配置，之后继承）
+├── service.sh                           开机：目录修复 → 生成线程分配 → 起守护
+├── action.sh                            管理器「操作」按钮（音量键菜单）
+├── uninstall.sh                         卸载清理
+├── README.md
+├── webroot/
+│   └── index.html                       WebUI 单文件（约 127 KB）
+├── lib/
+│   └── util.sh                          公共库（1600+ 行）
+│                                        路径常量 / 日志 / Scene pref / 频率预设缓存 /
+│                                        档位 helper / 规则生成 / 可写性修复
+├── Scripts/4+4+2/O3/
+│   ├── webui.sh                         后端命令分发（前端唯一入口）
+│   ├── enforce_threads.sh               ★ 线程落核器（模块核心）
+│   ├── guard.sh                         ★ 调度守护 + 相机档位看护
+│   ├── camera_freq_guard.sh             ★ 相机频率兜底守护
+│   ├── apply_freq.sh                    幂等的遗留 QoS 清理器
+│   ├── profile_sync.sh                  调度配置 传递 / 备份 / 恢复
+│   ├── integrity.sh                     配置完整性审计 + 一键还原
+│   └── set_scheme.sh                    方案应用
+└── Config/
+    ├── game_templates.tsv               游戏线程模板库
+    ├── game_assign.tsv                  游戏 → 模板 分配
+    ├── webui_model.seed.json            WebUI 种子数据
+    └── 4+4+2/O3/
+        ├── switch.sh                    Scene「自定义命令」入口
+        ├── sweet_eco/                   省电方案包
+        ├── sweet_bal/                   均衡方案包
+        └── sweet_perf/                  性能方案包
+            ├── manifest.json            配置身份（author + version）
+            ├── profile.json             ★ 主配置（模式 preset，含 @cpu_freq）
+            ├── _Apps.json / _Games.json / _Camera.json / _ELP.json
+            ├── description.txt          方案说明（显示在音量键菜单里）
+            ├── powercfg.sh              平台 sysfs 调优脚本
+            ├── threads.json / threads_games.json
+            └── features/
+                ├── cpuset.conf / env.conf / fas.conf
+                ├── limiter.conf / refresh_rate.conf
+```
+
+### 运行时数据目录
+
+| 路径 | 内容 |
+|---|---|
+| `/data/adb/SceneO3Tuner/webui/app_templates.tsv` | 应用线程模板库（可直编） |
+| `/data/adb/SceneO3Tuner/webui/app_assign.tsv` | 应用 → 模板 分配 |
+| `/data/adb/SceneO3Tuner/webui/game_templates.tsv` | 游戏线程模板库 |
+| `/data/adb/SceneO3Tuner/webui/game_assign.tsv` | 游戏 → 模板 分配 |
+| `/data/adb/SceneO3Tuner/webui/settings.conf` | `mode_sync=0|1`、`debug=0|1` |
+| `/data/adb/SceneO3Tuner/sceneo3.log` | 模块日志 |
+| `/data/adb/SceneO3Tuner/active_scheme` | 当前方案 |
+| `/data/adb/SceneO3Tuner/qos_cleared` | QoS 残留「只清一次」标记 |
+| `/data/adb/SceneO3Tuner/camera_freq_guard.off` | 存在则禁用相机守护 |
+| `/data/adb/SceneO3Tuner/backups/` | 调度配置备份（自动保留最近 3 份） |
+
+### 后端命令一览
+
+`sh Scripts/4+4+2/O3/webui.sh <cmd>`
+
+```text
+status                      模块状态（含 VER / SCENE_ID / SCENE_SOURCE / PROFILE_OK …）
+mode / modeset              读 / 改当前模式
+apps / apptpl / games       应用与游戏列表、模板
+appmodes                    读 Scene 的模式表（A_=生效模式 / OWN_=显式设过）
+syncmode / applymodes       按 Scene 模式同步线程分配
+enforce / enforcep <pkg…>   落核（全量 / 定向）
+freqapply / freqrestore     调 apply_freq.sh
+audit / fixall              配置完整性审计 / 一键还原
+profilepush / profilebackup / profilerestore / profilelist
+live / scheme / log <n>
+b64len / b64 / wbegin / wappend / wcommit     通用文件通道
+```
+
+---
+
+## 5. WebUI
+
+5 个页签：**概览 / 模式 / 应用 / 游戏 / 日志**。
+
+| 板块 | 内容 |
+|---|---|
+| **概览** | 功能状态、调度配置（传递 / 备份 / 恢复）、配置身份、注错文件清单 |
+| **模式** | 模式阶梯 · 频率（只读，由 Scene 下发）、模式 → 线程模板 |
+| **应用** | 模板卡（轻量·省电 / 流畅日常 / 高性能 / 不接管）、筛选、逐应用分配 |
+| **游戏** | 同应用页，数据源是 Scene 的游戏名单 |
+| **日志** | 查看 / 关闭模块日志 |
+
+### 开关
+
+| 开关 | 位置 | 默认 | 作用 |
+|---|---|---|---|
+| **自动切换**（模式同步线程） | 应用页顶部 | 关 | Scene 里单独设过模式的 app 自动按模式绑核 |
+| **记录模块日志** | 日志页 | 关 | 守护写不写 `sceneo3.log` |
+| 线程模板的具体数值 | 模式页 | — | 你改的就是生效值 |
+
+> **频率同步没有开关，因为模块不写频率** —— 频率完全由 Scene 下发（[§3.4](#34-频率模块不写交回-scene)）。
+
+### 交互约定
+
+- 模板卡标题旁的 **ⓘ** → 展开该卡说明；标题行的 ⓘ → 展开全部
+- 应用/游戏行内的两个标签**可点**：点「Scene ××」改该应用在 Scene 的模式，
+  点「模板」改线程模板
+- 单应用操作走**乐观更新**：先改本地状态 + 增量刷列表，再后台写盘（**不弹遮罩、不整页重绘**）
+
+---
+
+## 6. 安装
+
+### 前置条件
+
+- **机型**：玄戒 O3（`xring_o3_asic`），10 核 **4+4+2** 拓扑
+- **环境**：HyperOS + **KernelSU / SukiSU**（需要 root 上下文常驻守护）
+- **Scene**：需先装好 `com.omarea.vtools` 并**至少启动一次**
+
+> 安装脚本会读 `/sys/devices/system/cpu/cpufreq/*/related_cpus` 判断拓扑。
+> 不是 `4+4+2` / `4+4+1` 会给出警告，**但不会阻止安装**（不保证生效）。
+
+### 步骤
+
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v7.0-20260916.zip`
+2. 重启；或在终端执行 `/data/adb/ksu/bin/ksud services` 触发 `service.sh`
+3. 模块 → **「打开」** 进入 WebUI
+4. （可选）概览页 → **「传递调度」**，把内置方案灌进 Scene
+
+### ⚠️ 安装/升级的「首次灌配置，之后继承」
+
+| 情况 | 行为 |
+|---|---|
+| **首次**（Scene 里没有 `profile.json`） | 把模块内置配置灌进 Scene，按 Scene 的 uid 修属主/权限，并逐个校验关键文件落盘 |
+| **非首次** | **继承**已有配置，**绝不覆盖 `profile.json`** —— 那里面是你在 Scene 里调过的频率预设，覆盖了等于把调校冲掉 |
+
+想主动灌回去（Scene 重置 / 丢配置后），用 WebUI 概览页的「传递调度」。
+
+---
+
+## 7. ⚠️ 需要注意的东西
+
+这一章是踩过的坑，**照做能省掉几小时**。
+
+### 7.1 守护必须由 KSU 上下文启动
+
+在 `adb shell` 里用 `nohup` / `setsid` 起的进程，**shell 退出时会被杀掉**（实测）。
+只有 `ksud services` 或开机流程起的能常驻。
+
+### 7.2 不要用 `am force-stop` 停 Scene
+
+`force-stop` 会**连带掉无障碍服务 → Scene 直接失效**
+（它靠 `com.omarea.vtools.AccessibilitySceneMode` 感知前台）。
+
+**正确做法**：只 `pkill -f scene-daemon` —— 它是后台调度进程，
+**4~8 秒内 Scene 会自动拉起并重读配置**，不碰 Scene 本身。
+
+### 7.3 `while read` 会静默丢掉「没有结尾换行」的最后一行
+
+```sh
+# ✗ 错：EOF 处最后一行被静默丢弃
+while IFS= read -r line; do ... done < file
+
+# ✅ 对
+while IFS= read -r line || [ -n "$line" ]; do ... done < file
+```
+
+实测复现：`app_assign.tsv` 最后一行是 `com.xiaomi.ugd smooth`，**尾字节是 `h`（无换行）**
+→ 后端拿不到这一行 → 前端永远显示「未分配」。
+
+模块内**所有**读配置文件的 `while read` 都用 `|| [ -n "$line" ]` 保护；
+`webui.sh` 写入时也会**自动补结尾换行**。
+
+### 7.4 `set -- $LIST` + `shift` 遍历会死循环写第一簇
+
+```sh
+# ✗ 错：每次 set -- 都重置游标 → 只扫到第一簇，并把它重复写 N 遍
+set -- $FREQ_ALL
+while [ "$i" -lt "$WRITE_TRIES" ]; do
+    while [ $# -ge 3 ]; do fix_cluster "$1" "$2" "$3"; shift 3; done
+    set -- $FREQ_ALL        # ← 这里把游标打回去了
+    i=$((i+1))
+done
+```
+
+**症状**：只有 `cpu0` 的 min/max 被写，`cpu4`/`cpu8` 原封不动；**日志却报「写入 N 个节点」**。
+
+**修法**：外层重试循环里**逐簇显式展开**，或用 `for` 遍历一个不含 `set --` 的列表。
+
+### 7.5 `_Camera.json` 是「路径一行、值在下一行」
+
+```json
+"/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq",
+"912000"
+```
+
+→ 解析**必须用两行滑动窗口**（`__pend` 记住上一行路径，本行当值），
+**不能在同一行里找值**。第一版写成 `val="${line##*,}"` 直接全部解析失败。
+
+### 7.6 本机 `printf` 不是内建
+
+`/system/bin/printf` 是**外部命令**。在循环里逐行 `printf` 等于**每行 fork 一次**
+（72 行就要 1 秒，还会打断 `read` 缓冲）→ **必须攒好再一次写**。
+
+同理，热路径上：用 `read -r v < "$f"` 而不是 `cat "$f"`；用 shell 内建的
+`[ ]` / `case` 而不是 `grep` / `awk` / `sed`。
+
+### 7.7 别用 `chattr +i` 锁 Scene 的配置
+
+会让 Scene **自己存不下配置** —— 点小齿轮改特性、切模式都会 `ENOTSUP` 失败，
+现象就是「**改了没反应**」。
+
+模块现在会主动**清掉历史残留的 chattr 标志**（`repair_scene_writable`）。
+
+### 7.8 Scene 需要你在它的 UI 里被「显式选中」一次
+
+Scene 用 `shared_prefs/global.xml` 的两个键决定「启用哪套配置」：
+
+| 键 | 可用值 | 说明 |
+|---|---|---|
+| `scene_profile_source` | **`SOURCE_SCENE_ONLINE`** ★ | 唯一「显示对 + 能启用」的值 |
+| | `SOURCE_SCENE_CUSTOM` | 能启用，但界面显示成「自定义」 |
+| | `SOURCE_OUTSIDE` | 界面显示我们的身份却判为无效、`dynamic_control` 被按回 `false` ❌ |
+| `dynamic_control` | `true` | 「性能调节」总开关；`false` 时 Scene **完全不下发调度** |
+
+**正确操作**：Scene →「调节」页 → 点配置行（可能显示「未知」）→ 选「**自定义**」。
+
+> ⚠️ 选「自定义」时 Scene 会把它自己的 `profile.json` 重置成 451B、
+> `manifest.json` 写成 195B（`9.0 Customized`）。**选完请用 WebUI 的「传递调度」灌回我们的配置。**
+
+### 7.9 `dynamic_control` 是 boolean，不能用字符串正则读
+
+值在 `value="..."` 属性里。用字符串式正则读会**永远读成空**，误报「性能调节未打开」。
+模块为此单独实现了 `scene_bool_get`。
+
+### 7.10 被 `overflow: hidden` 祖先包住的 `position: absolute` 会被静默裁切
+
+WebUI 开发时的坑：模板说明面板原本 `position:absolute; top:41px`，
+而卡片有 `overflow:hidden` → 内容一多就被**静默裁掉**。
+
+**修法**：改成内联流式块（`max-height:40vh; overflow-y:auto`），由卡片撑高。
+
+### 7.11 同一节点上的多个 `addEventListener('click')` 之间 `stopPropagation()` 无效
+
+它**只拦后代 → 祖先的冒泡**。
+
+新增 `data-act` 名字时，**务必检查所有依赖 `data-act` 白名单的全局监听器** ——
+曾出现「标题 ⓘ 点了没反应」：全局「点空白处收起」的监听器白名单里没有新名字，
+于是刚展开就被同一个 click 事件的**下一个监听器**全收起了。
+
+### 7.12 `lib/util.sh` 的 `MODDIR` 有回退
+
+```sh
+[ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/SceneO3Tuner"
+```
+
+**做离线测试时**：沙盒目录里**必须放一个 `module.prop` 占位**，
+否则 `MODDIR` 会被打回 Android 路径，基线目录全部找不到。
+
+同理，Windows / Git Bash 下的原生 Python **打不开 `/tmp/xxx` 这类 POSIX 路径**，
+离线测试请用**相对 CWD** 的沙盒路径。
+
+### 7.13 让子进程收尾，别让它变僵尸
+
+`service.sh` 里每个 `nohup sh … &` 都要有对应的 `pkill -f "<pattern>"` 前置清理
+（`uninstall.sh` 里也有）。守护脚本互相之间**用 `pgrep -f` 精确匹配到具体路径**
+（如 `O3/guard\.sh`），否则会误杀同名脚本。
+
+---
+
+## 8. 常见问题
+
+**Q：为什么后台应用看不到绑核变化？**
+A：`background` 组的预算就是 `0-3`，系统已经把整个应用限住了；交集与现状一致，
+所以不下发命令。这是设计，不是故障（[§3.2](#32-cgroup-预算是硬上限最关键的一条)）。
+
+**Q：改了模板/分配，多久生效？**
+A：前台切换的那一刻（下一个 5 秒 tick 内），或最多 60 秒兜底；
+也可点右上角刷新按钮，或在应用页点保存后立即生效。
+
+**Q：Scene 里切模式，线程会跟着变吗？**
+A：只有开了「模式同步线程」开关才会
+（省电→轻量 / 均衡→流畅 / 性能→高性能 / **极速→不覆盖，保留你手动套的模板**）。
+
+**Q：频率会跟着模式变吗？**
+A：会 —— **由 Scene 自己下发**。本模块不写频率节点（[§3.4](#34-频率模块不写交回-scene)）。
+
+**Q：`threads.json` 还被写吗？**
+A：写，但只为让 Scene 侧的数据自洽 —— **Scene 不会执行它**。
+真正生效的是本模块的落核器。
+
+**Q：相机还是锁频怎么办？**
+A：按顺序检查：
+1. `cat /data/adb/SceneO3Tuner/sceneo3.log | grep 相机` 看守护有没有动作
+2. 确认没有 `touch /data/adb/SceneO3Tuner/camera_freq_guard.off`
+3. 核对设备上的 `_Camera.json` 是不是**正确 4 参数签名 + 先 min 后 max**
+4. 用 WebUI 的「传递调度」重新灌配置
+
+**Q：怎么彻底关掉相机守护？**
+A：`touch /data/adb/SceneO3Tuner/camera_freq_guard.off`，然后重启或
+`pkill -f camera_freq_guard`。
+
+**Q：怎么恢复出厂频率？**
+A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_scheme.sh restore`。
+
+---
+
+## 9. 调参与排障
+
+### 环境变量
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `GUARD_INTERVAL` | `5` | 调度守护间隔（秒） |
+| `CAM_FREQ_INTERVAL` | `2` | 相机兜底守护间隔（秒） |
+
+在 `service.sh` 里通过环境变量传入，例如：
+`GUARD_INTERVAL=3 CAM_FREQ_INTERVAL=2 sh service.sh`
+
+### 常用排障命令
+
+```sh
+# 看守护在不在
+pgrep -f "O3/guard\.sh"; pgrep -f "O3/camera_freq_guard\.sh"
+
+# 看三簇当前频率
+for c in 0 4 8; do
+  echo "cpu$c: $(cat /sys/devices/system/cpu/cpu$c/cpufreq/scaling_min_freq)/$(cat /sys/devices/system/cpu/cpu$c/cpufreq/scaling_max_freq)"
+done
+
+# QoS 上下限（本机的真硬限）
+for c in 0 4 8; do
+  echo "cpu$c qos: $(cat /sys/devices/system/cpu/cpu$c/qos/min_freq)/$(cat /sys/devices/system/cpu/cpu$c/qos/max_freq)"
+done
+
+# 谁在写频率（需要 root + strace）
+strace -f -e trace=write -p "$(pidof scene-daemon)" 2>&1 | grep -i freq
+
+# 模块状态
+sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh status
+
+# 配置完整性
+sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh audit
+
+# 日志
+tail -50 /data/adb/SceneO3Tuner/sceneo3.log
+```
+
+### 离线自检
+
+仓库里的 Python 自检脚本**完全离线**，不需要设备：
+
+```bash
+python test_camera_guard.py     # 相机档位逻辑：5 组、30+ 断言
+python lint_module.py           # 模块结构自检（脚本语法、页签/动作一一对应等）
+```
+
+`test_camera_guard.py` 覆盖：
+
+- 写入顺序必须「**先 min 后 max**」
+- 三簇**全覆盖**（专门断言 `set -- $LIST` + `shift` 的写法不出现 —— 这个 bug 真出现过）
+- 三个方案包的解析结果（含 `sweet_eco` 的档位差异）
+- 回退档位的**保守性**（回退值 = `sweet_bal`，不比任一方案更激进）
+- 在**假 sysfs 上真跑**一遍 `camera_band_fix`（含 `min==max==最低档` 的**塌缩态恢复**）
+
+---
+
+## 10. 版本历史
+
+| 版本 | 主要内容 |
+|---|---|
+| **v7.0** | ★ 相机守护功耗治理：QoS 只清一次、看护并入 `guard.sh`、兜底守护 **0-fork 稳态**、档位现读现用；新增离线自检 |
+| v6.4 | 修正三个方案包的 `_Camera.json`（4 参数签名 + 裸 sysfs + 先 min 后 max）；新增 `camera_freq_guard.sh` |
+| v6.3 | 相机频率取证；模板卡 ⓘ 紧跟名称、说明面板不再被裁 |
+| v6.2 | 概览页瘦身；模板区交互统一（标题行 = ⓘ + 右侧小按钮） |
+| v6.1 | **CPU 调频交回 Scene**；新增配置完整性审计 + 一键还原 |
+| v6.0 | 修掉「极速把包从线程管理里删掉」+ 频率下限策略；模板改名；WebUI 文案精简 |
+| v4.6 | ★ 定位 Scene「无法启用」的真机制（`global.xml` 两个键） |
+| v4.2 | 调度配置 传递 / 备份 / 恢复 |
+| v3.x | WebUI 迭代；`threads.json` 生成；`enforce_threads.sh` 性能重写（上万 fork → 固定 5 次） |
+| v1~v2 | 线程绑核 MVP；早期用 `qos/*_freq` 限频（v6.1 已交回 Scene） |
+
+---
+
+## 11. 已知限制与未验证项
+
+### 已知限制
+
+- **只适配玄戒 O3（4+4+2）**。其他拓扑（如 6+2 八核）的 `Config/` 需要重做 ——
+  历史上从 6+2 第三方配置包整包移植过来的 `_Camera.json` 就出过问题：
+  值虽然合法，但它们是 `min`，会把 L 簇顶到 `2390400`，而该簇「80% 能效上限」才 `1353600`
+  → 4 个小核全程满速空烧。
+- **依赖 Scene**。Scene 的配置结构变化（`global.xml` 键名、`profile.json` 格式）
+  会让模块失效。模块自己带的方案包是**跟随特定 Scene 9 版本**做的。
+- **守护需要 root 常驻上下文**，KernelSU / SukiSU 之外的环境（纯 Magisk 未验证）。
+
+### 未验证项（诚实标注）
+
+- ⚠️ **Scene 的 `call` 数组是否接受裸 sysfs 路径** —— 只在 `_Games.json` 里见过
+  `target_loads` 的裸路径先例，`_Camera.json` 里这么用**尚未在设备上证实生效**。
+  如果无效，兜底守护仍能盖住（看到值不对就写回）。
+- ⚠️ **守护 2s 间隔 + 连写 3 遍是否足够压住回写** —— 此前实测写 `min` 后约 2s 会被打回。
+- ⚠️ **v7.0 的 QoS「只清一次」在跨版本升级场景的表现** —— 逻辑上成立
+  （遗留值只在升级/改档位时出现），但如果将来有别的写入方，需要重新评估。
+
+> 欢迎在这三项上反馈实测结果。
+
+---
+
+## 12. 许可与致谢
+
+### 许可
+
+本项目以 **MIT License** 发布。详见 [LICENSE](LICENSE)。
+
+### 致谢
+
+- [**Scene**](https://github.com/omarea/Scene)（`com.omarea.vtools`）——
+  本模块的设计完全围绕 Scene 展开，`profile.json` / `threads.json` / `features/*.conf`
+  的结构与语义都源自它。没有 Scene 就没有这个模块。
+- [**KernelSU**](https://github.com/tiann/KernelSU) / SukiSU ——
+  模块框架与 WebUI 桥接。
+- [**ponytail**](https://github.com/dietrichgebert/ponytail) ——
+  v7.0 的功耗治理是在它的「偷懒优先 / 先问这东西需要存在吗」原则下做的，
+  正是那条原则让我发现**常驻轮询根本没必要存在**。
+
+### 免责声明
+
+改 CPU 频率、绑核、动 Scene 的配置，**都属于会影响设备稳定性与散热的行为**。
+本模块按「如实标注、不猜、不覆盖别人的写入」设计，但**请自行评估风险**。
+
+特别地：**不要**为了解锁频率去写 `cpu_nolimit_temp` —— 那会解除温度保护。
+
+---
+
+<div align="center">
+
+**XRingO3SceneLP** · 为玄戒 O3 补上 Scene 缺失的那两块
+
+</div>

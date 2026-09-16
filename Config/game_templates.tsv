@@ -1,0 +1,6 @@
+# id	friendly	other	heaviest_thread	heaviest_cores	heavy_thread	heavy_cores	comm
+tpl_moba	重度竞技（MOBA / FPS）	{e_core}	UnityMain	{hp_core}	UnityGfx	{p1_core}	{p1_core}=RenderThread,GLThread,Vulkan;{e_core}=Audio,FMOD,Http,Socket
+tpl_unity	Unity 通用	{e_core}	UnityMain	{p1_core}	UnityGfx	{p1_core}	{p1_core}=RenderThread,GLThread;{e_core}=Audio,FMOD
+tpl_ue	虚幻 / IL2CPP 重度	{e_core}	GameThread	{hp_core}	RenderThread	{p1_core}	{p1_core}=VulkanRHI,TaskGraph;{e_core}=AudioMixer
+tpl_light	轻量 / 休闲	{e_core}	UnityMain	{p1_core}			{e_core}=Audio,FMOD
+tpl_open	不限核（性能优先）	{all_core}					

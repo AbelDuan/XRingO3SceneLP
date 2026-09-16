@@ -1,0 +1,539 @@
+#!/system/bin/sh
+# ============================================================
+#  线程绑核「落地」器 v3（2026-09-15）
+# ------------------------------------------------------------
+#  【为什么必须自己做】Scene **不会**应用我们写进 threads.json 的规则：
+#    把 com.tencent.mm 设成「轻量·省电」(0-3)，app_cpuset / cpuset 两种形状都写过
+#    + 重启 scene-daemon，冷启动微信 60 秒内线程仍在 0-9。用户看到的
+#    「先跑 4-9、过一阵才变 0-3」是 Scene 自己的前台/后台默认策略。
+#
+#  【v3 的关键发现：cgroup 预算】
+#    本机是 cgroup v1 cpuset（挂载在 /dev/cpuset，cpuset_v2_mode），
+#    每个应用被放进一个组，组里的 CPU 掩码就是它的**硬预算**：
+#        /dev/cpuset/background      cpus = 0-3
+#        /dev/cpuset/foreground      cpus = 0-9
+#        /dev/cpuset/top-app         cpus = 0-9
+#        /dev/cpuset/top-app/0-5     ← Scene 就是靠建这种子组做「应用核心分配」
+#    sched_setaffinity 只能在预算**之内**收窄：对 background 组里的进程
+#    `taskset -p f0`（4-7）会直接 EINVAL（实测）。
+#    所以本脚本把目标核与当前组的预算取交集：
+#      · 前台/顶层组（0-9）→ 模板完整生效（这才是交互时真正需要的）
+#      · 后台组（0-3）    → 系统本身已把整个应用限在 0-3，交集就是 0-3，
+#                            与现状一致 → **一条命令都不发**（也几乎不耗电）
+#    这也顺带解释了「v2 每轮猛发任务却是无效功」的原因。
+#
+#  【v2 的性能教训】
+#    v1 对每条分配 fork 一次 pidof、命中后再 fork 6 次 tplcol(awk)、3 次
+#    cores2mask、expand_semantic 里还有 sed；800 条分配 ≈ 上万次 fork，
+#    单次 >180 秒，而守护每 5 秒跑一轮 → 守护永远跑不完，CPU 常驻打满。
+#    v2/v3：解析 + 判断 + 生成命令全在一个 awk 进程里，shell 只做 glob 与执行，
+#    基础开销固定 5 次 fork，与分配条数无关。
+#      ⚠ 本机 `printf` **不是内建**（/system/bin/printf），循环里逐行 printf
+#        等于每行 fork 一次（72 行就要 1 秒，还会打断 read 缓冲）→ 必须攒好再一次写。
+#
+#  目标解析优先级（与前端 / threads.json 完全一致）：
+#    ① Scene 游戏名单里的包        → game_assign.tsv 的手动模板
+#    ② 在 Scene 里单独设过模式的包 → 开关开启时按模式自动映射
+#         省电→light / 均衡→smooth / 性能→perf / 极速→**不覆盖**（保留手动模板）
+#         ⚠ 不覆盖 ≠ 删除。空映射必须回落 ③，否则被 Scene 设成 fast 的包会彻底
+#           失去线程管理（com.android.camera 就是这么被"吃掉"的）。
+#         开关关闭时 → 回落 ③
+#    ③ 其余包                      → app_assign.tsv 的手动模板
+#
+#  幂等：逐线程比对「目标∩预算」与当前值，一致就一条命令都不发。
+#  用法: enforce_threads.sh [pkg...]      不带参数 = 全部目标
+# ============================================================
+MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+. "$MODDIR/lib/util.sh"
+
+TASK="taskset"
+CG_ROOT="/dev/cpuset"
+TMP="${TMPD:-/data/adb/SceneO3Tuner/tmp}"
+mkdir -p "$TMP" 2>/dev/null
+
+SET="${WEBUI_DIR}/settings.conf"
+TGT="$TMP/t.targets"; PSF="$TMP/t.ps"; RUN="$TMP/t.run"; TIDS="$TMP/t.tids"; CMDS="$TMP/t.cmds"
+SIGF="$TMP/t.sig"
+# 已落核缓存 + 本轮待办（省功耗的关键，见下面 3.5 的说明）
+APL="$TMP/t.applied"; KEEP="$TMP/t.keep"; TODO="$TMP/t.todo"
+# 缓存有效期（秒）。到期后即使规格没变也会重新逐线程核对一遍 —— 外部（系统/框架）
+# 万一改了亲和性，最多 TTL 秒后自愈。
+APL_TTL="${APL_TTL:-180}"
+rm -f "$KEEP" "$TODO" 2>/dev/null
+
+# 输入是否变了：用**文件 mtime** 与 $SIGF 比较（shell 内建 -nt，0 子进程）。
+#   ⚠ 原来用 md5sum + awk 算签名，两个子进程 ≈ 30~80ms；而本脚本前台一变就会被调用，
+#     这笔开销是亮屏功耗的固定部分。mtime 判据同样可靠（输入都是整体重写的配置文件）。
+sig_inputs_newer() {   # 0 = 有输入比标记新（需要重算）
+    local f
+    for f in "$APP_TPL_FILE" "$APP_ASSIGN_FILE" "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE" \
+             "$SCENE_POWERCFG" "$SCENE_GAMES_XML" "$SET"; do
+        [ -f "$f" ] && [ "$f" -nt "$SIGF" ] && return 0
+    done
+    return 1
+}
+
+# ---- 语义占位符 / 在线核：走零 fork 读法 ----
+#   ⚠ 原来是 `$(cpu_semantic …)` × 6 + `$(cpu_expr_to_list "$(online_cpus)")`：
+#     9 个子 shell ≈ 90~150ms，每次前台一变都要付一遍。现在全是内建赋值。
+cpu_semantic_read e_core;   SEM_e="$SEM_VAL"
+cpu_semantic_read p1_core;  SEM_p1="$SEM_VAL"
+cpu_semantic_read p2_core;  SEM_p2="$SEM_VAL"
+cpu_semantic_read p_core;   SEM_p="$SEM_VAL"
+cpu_semantic_read hp_core;  SEM_hp="$SEM_VAL"
+cpu_semantic_read all_core; SEM_all="$SEM_VAL"
+online_cpus_read
+cpu_expr_to_list_read "$ONLINE_RAW"   # "0-3,8-9" → "0 1 2 3 8 9"（与旧版语义一致）
+ONLINE="$CPU_LIST"
+
+# ============================================================
+#  1) 解析目标表
+#     PKG|other|main|heavy|heaviest_thread|heavy_thread|commPairs|uni
+#     前三列是已展开并裁剪到在线核的核号表达式；commPairs 形如
+#     "RenderThread@8-9,Working@4-7,"（v3 起存表达式，掩码留给最后一步算）。
+# ============================================================
+if [ ! -s "$TGT" ] || [ ! -s "$SIGF" ] || sig_inputs_newer; then
+awk \
+    -v TAB="$(printf '\t')" \
+    -v SET="$SET" -v APPTPL="$APP_TPL_FILE" -v APPASG="$APP_ASSIGN_FILE" \
+    -v GTPL="$GAME_TPL_FILE" -v GASG="$GAME_ASSIGN_FILE" -v GAMEXML="$SCENE_GAMES_XML" \
+    -v PCFG="$SCENE_POWERCFG" -v ONL="$ONLINE" \
+    -v SE="$SEM_e" -v SP1="$SEM_p1" -v SP2="$SEM_p2" \
+    -v SP="$SEM_p" -v SHP="$SEM_hp" -v SALL="$SEM_all" '
+function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
+
+# 占位符展开（[{] / [}] 用字符类，避免 ERE 花括号歧义）
+function expand(v,   _k, _n, _out) {
+    _out = v
+    _n = split("e_core p1_core p2_core p_core hp_core all_core", K, " ")
+    for (_k = 1; _k <= _n; _k++) gsub("[{]" K[_k] "[}]", SEM[K[_k]], _out)
+    return _out
+}
+function expr2list(e,   _i, _n, _a, _lo, _hi, _c, _out) {
+    _out = ""
+    _n = split(e, _a, ",")
+    for (_i = 1; _i <= _n; _i++) {
+        _a[_i] = trim(_a[_i]); if (_a[_i] == "") continue
+        if (_a[_i] ~ /^[0-9]+-[0-9]+$/) { split(_a[_i], _b, "-"); _lo = _b[1]+0; _hi = _b[2]+0 }
+        else if (_a[_i] ~ /^[0-9]+$/)    { _lo = _a[_i]+0; _hi = _lo }
+        else continue
+        for (_c = _lo; _c <= _hi; _c++) if (!(_c in SEEN)) { SEEN[_c] = 1; _out = _out " " _c }
+    }
+    for (_i in SEEN) delete SEEN[_i]
+    return _out
+}
+function list2expr(s,   _i, _n, _a, _st, _pv, _out) {
+    _out = ""; _st = ""; _pv = ""
+    _n = split(s, _a, " ")
+    for (_i = 1; _i <= _n; _i++) {
+        if (_a[_i] == "") continue
+        if (_pv != "" && _a[_i] == _pv + 1) { _pv = _a[_i]; continue }
+        if (_st != "") _out = _out (_st == _pv ? _st : _st "-" _pv) ","
+        _st = _a[_i]; _pv = _a[_i]
+    }
+    if (_st != "") _out = _out (_st == _pv ? _st : _st "-" _pv)
+    return _out
+}
+# 展开 → 裁剪到在线核 → 规范表达式
+function norm(e,   _i, _n, _a, _out) {
+    e = expand(e)
+    _n = split(expr2list(e), _a, " ")
+    _out = ""
+    for (_i = 1; _i <= _n; _i++) if (ON[_a[_i]]) _out = _out " " _a[_i]
+    return list2expr(_out)
+}
+# 表达式 → 规范式 的 memo（同样几个 {e_core}/{p1_core} 会被算上千次）
+function normm(e,   _r) {
+    if (e in NRM) return NRM[e]
+    _r = norm(e); NRM[e] = _r; return _r
+}
+function load_tpl(f, T, P,   _l, _n, _a, _id) {
+    while ((getline _l < f) > 0) {
+        if (_l == "" || _l ~ /^#/) continue
+        _n = split(_l, _a, TAB)
+        if (_n < 2) continue
+        _id = trim(_a[1]); if (_id == "") continue
+        T[P _id] = trim(_a[3]) "|" trim(_a[4]) "|" trim(_a[5]) "|" trim(_a[6]) "|" trim(_a[7]) "|" trim(_a[8])
+    }
+    close(f)
+}
+BEGIN {
+    SEM["e_core"]=SE; SEM["p1_core"]=SP1; SEM["p2_core"]=SP2
+    SEM["p_core"]=SP; SEM["hp_core"]=SHP; SEM["all_core"]=SALL
+    m = split(ONL, oa, " "); for (i = 1; i <= m; i++) if (oa[i] != "") ON[oa[i]] = 1
+
+    # 「模式同步线程」开关
+    while ((getline l < SET) > 0) {
+        if (l ~ /^[ \t]*mode_sync[ \t]*=/) { v = l; sub(/^[^=]*=/, "", v); gsub(/[ \t\r]/, "", v); if (v == "1") MS = 1 }
+    }
+    close(SET)
+
+    load_tpl(APPTPL, T, "A")
+    load_tpl(GTPL,    T, "G")
+    while ((getline l < APPASG) > 0) { if (l == "" || l ~ /^#/) continue; split(l, f, TAB); if (f[1] != "" && f[2] != "") ASGA[f[1]] = f[2] }
+    close(APPASG)
+    while ((getline l < GASG) > 0)   { if (l == "" || l ~ /^#/) continue; split(l, f, TAB); if (f[1] != "" && f[2] != "") ASGG[f[1]] = f[2] }
+    close(GASG)
+
+    # Scene 真正标记为游戏的包（唯一权威来源 games.xml；不能只看 game_assign.tsv，
+    # 历史脏数据里可能塞了几百个普通应用）
+    while ((getline l < GAMEXML) > 0) {
+        if (match(l, /<boolean name="[^"]*" value="true"/)) {
+            g = l; sub(/^.*<boolean name="/, "", g); sub(/".*/, "", g)
+            if (g != "") GSET[g] = 1
+        }
+    }
+    close(GAMEXML)
+
+    # Scene 单应用模式（powercfg.xml）
+    while ((getline l < PCFG) > 0) {
+        if (match(l, /<string name="[^"]*">[^<]*<\/string>/)) {
+            snm = l; sub(/^.*<string name="[^"]*">/, "", snm); sub(/<\/string>.*$/, "", snm)
+            key = l; sub(/^.*<string name=/, "", key); sub(/">.*/, "", key); gsub(/"/, "", key)
+            if (key != "" && key != "*") OWN[key] = trim(snm)
+        }
+    }
+    close(PCFG)
+
+    M2T["powersave"]="light"; M2T["balance"]="smooth"; M2T["performance"]="perf"; M2T["fast"]=""
+
+    # ① 游戏：只用 game_assign 的手动模板
+    for (p in GSET) if (p in ASGG) { s = T["G" ASGG[p]]; if (s != "") pick[p] = s }
+    # ② 普通应用的手动模板
+    for (p in ASGA) { if (p in GSET) continue; s = T["A" ASGA[p]]; if (s != "") pick[p] = s }
+    # ③ 开关开启时：Scene 里单独设过模式的包改由模式自动映射（优先于手动模板）
+    #   ⚠ 映射为空（极速 / igoned / 认不得的档）时必须**保留手动模板**，绝不能 delete：
+    #     实测 Scene 把 com.android.camera、me.weishu.kernelsu 等 7 个包设成了 fast，
+    #     旧代码 delete 掉它们的 pick[] → 目标表里彻底消失 → 界面上显示「已套高性能」，
+    #     实际一条 taskset 都没发。用户看到的「Scene 限制了对相机的调度」就是这个。
+    #     语义与前端 effTpl() 一致：只有映射**非空**时才覆盖手动模板。
+    if (MS) {
+        for (p in OWN) {
+            if (p in GSET) continue
+            t = M2T[OWN[p]]
+            if (t == "") continue
+            s = T["A" t]
+            if (s == "") continue
+            pick[p] = s
+        }
+    }
+
+    for (p in pick) {
+        split(pick[p], c, "|")
+        ao = normm(c[1]); am = normm(c[3]); ah = normm(c[5])
+        if (ao == "" && am == "") continue
+        cp = ""
+        if (c[6] != "") {
+            ng = split(c[6], grp, ";")
+            for (gi = 1; gi <= ng; gi++) {
+                g = trim(grp[gi]); if (g == "") continue
+                eq = index(g, "="); if (eq < 2) continue
+                cn = normm(substr(g, 1, eq-1)); cl = trim(substr(g, eq+1))
+                if (cn == "" || cl == "") continue
+                nn = split(cl, nam, ",")
+                for (k = 1; k <= nn; k++) { tn = trim(nam[k]); if (tn != "") cp = cp tn "@" cn "," }
+            }
+        }
+        # uni=1：全进程所有线程目标核一致（例如 light 全是 0-3）→ 只看一个线程即可
+        uni = 0
+        if (am == ao && ah == ao) {
+            uni = 1
+            if (cp != "") {
+                ng2 = split(cp, cps, ",")
+                for (gi2 = 1; gi2 <= ng2; gi2++) {
+                    if (cps[gi2] == "") continue
+                    at2 = index(cps[gi2], "@"); if (at2 < 1) continue
+                    if (substr(cps[gi2], at2+1) != ao) { uni = 0; break }
+                }
+            }
+        }
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n", p, ao, am, ah, c[2], c[4], cp, uni
+    }
+}
+' > "$TGT" 2>/dev/null
+    [ -s "$TGT" ] && touch "$SIGF" 2>/dev/null
+fi
+
+[ -s "$TGT" ] || exit 0
+
+# ============================================================
+#  2) 运行中的进程（1 次 fork 取全表，不再逐包 pidof）
+# ============================================================
+ps -A -o PID,ARGS > "$PSF" 2>/dev/null
+
+#  3) 目标 ∩ 运行中 → PID|other|main|heavy|ht|hr|commPairs|uni
+#     ⚠ 用 -F'[|]' 而不是 -F'|'：管道符在正则里是「或」，单字符 FS 会被当正则用。
+awk -F'[|]' -v PS="$PSF" '
+BEGIN {
+    # ps 输出形如 "   1 init second_stage"（前面有空格）→ 先去前导空白，
+    # 否则按空白切分会得到一个空的首字段（这个坑踩过）。
+    while ((getline l < PS) > 0) {
+        l2 = l; sub(/^[ \t]+/, "", l2)
+        if (l2 ~ /^PID[ \t]/) continue
+        pid = l2 + 0
+        if (pid <= 0) continue
+        nm = l2; sub(/^[0-9]+[ \t]+/, "", nm); sub(/[ \t].*$/, "", nm)
+        if (nm == "") continue
+        if (nm in PID) PID[nm] = PID[nm] " " pid; else PID[nm] = pid
+    }
+    close(PS)
+}
+{
+    p = $1
+    if (!(p in PID)) next
+    n = split(PID[p], a, " ")
+    for (i = 1; i <= n; i++)
+        printf "%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8
+}
+' "$TGT" > "$RUN" 2>/dev/null
+
+[ -s "$RUN" ] || { : > "$APL"; exit 0; }
+
+# ============================================================
+#  3.5) 已落核缓存 —— 把稳定态的开销从「每轮扫全部线程」降到「一次比对」
+# ------------------------------------------------------------
+#  实测：一轮完整核对要 300~400ms（59 个运行中的目标进程、逐个读
+#  /proc/<tid>/status 与 comm）。但稳定态下这些进程的亲和性**本来就是对的**，
+#  每 5 秒重扫一遍纯属白烧 CPU（约占单核 1.5%~4%）。
+#
+#  缓存键 = pid | 规格(other/main/heavy/两个线程名/comm/uni) | cgroup 组
+#    · 规格变了（用户改了模板 / Scene 改了模式）→ 键不同 → 重扫
+#    · 应用切了前后台 → cgroup 组变了 → 键不同 → 重扫（预算变了，目标也就变了）
+#    · 键还在且未过期 → 跳过
+#  过期时间 APL_TTL（默认 180s）兜底自愈。
+#
+#  ⚠ 键里必须带 cgroup：目标核要先与「该进程所在组的 CPU 预算」取交集，
+#    同一个模板在 top-app(0-9) 与 background(0-3) 下算出来的目标完全不同。
+# ============================================================
+if [ -s "$APL" ]; then :; else : > "$APL"; fi
+if [ -s "$RUN" ]; then
+    NOW=$(date +%s)
+    # ⚠ 缓存行字段用**制表符**分隔，不能用 |：spec 本身就是用 | 拼起来的，
+    #   拿 | 当字段分隔符会把 spec 拆碎，回读时拼不回原键 → 缓存永远命中不了
+    #   （实测表现：每一轮 62 个目标全部重扫，耗时 665ms、功耗反而比优化前高）。
+    awk -F'[|]' -v TAB="$(printf '\t')" -v APL="$APL" -v NOW="$NOW" -v TTL="$APL_TTL" \
+        -v KEEP="$KEEP" -v TODO="$TODO" '
+    BEGIN {
+        while ((getline l < APL) > 0) {
+            n = split(l, a, TAB)
+            if (n >= 4 && a[1] != "") AT[a[1] TAB a[2] TAB a[3]] = a[4]
+        }
+        close(APL)
+    }
+    {
+        spec = $2 "|" $3 "|" $4 "|" $5 "|" $6 "|" $7 "|" $8
+        cg = ""
+        getline cg < ("/proc/" $1 "/cpuset"); close("/proc/" $1 "/cpuset")
+        sub(/[\r\n]+$/, "", cg)
+        key = $1 TAB spec TAB cg
+        ts = AT[key]
+        if (ts != "" && (NOW - ts) < TTL) { print key TAB ts > KEEP; next }
+        print key TAB NOW > TODO
+        print
+    }
+    ' "$RUN" > "$RUN.todo" 2>/dev/null
+    mv -f "$RUN.todo" "$RUN" 2>/dev/null
+fi
+
+[ -s "$RUN" ] || { cat "$KEEP" > "$APL" 2>/dev/null; exit 0; }
+
+# ============================================================
+#  4) 线程号列表（shell 内建 glob，不 fork）
+#     uni=1 的进程不扫线程（目标全进程一致，看一个线程就够），
+#     绝大多数应用都是 uni —— 这是把每轮耗时压到百毫秒级的关键。
+#     ⚠ printf 不是内建，循环里不能用；这里攒到一个变量后一次写出。
+# ============================================================
+buf=""
+while IFS='|' read -r p o m h ht hr cm uni; do
+    [ -n "$p" ] || continue
+    [ -d "/proc/$p" ] || continue
+    tl=""
+    if [ "$uni" != "1" ]; then
+        for t in "/proc/$p/task"/*; do tl="$tl ${t##*/}"; done
+    fi
+    buf="$buf$p|$o|$m|$h|$ht|$hr|$cm|$uni|$tl
+"
+done < "$RUN"
+printf '%s' "$buf" > "$TIDS"
+
+# ============================================================
+#  5) 决策：目标 ∩ cgroup 预算 → 与当前值比对 → 只写「确实要改」的 taskset
+#     awk 内部 getline 读 /proc 与 /dev/cpuset，不 fork。
+# ============================================================
+awk -F'[|]' -v CGROOT="$CG_ROOT" '
+function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
+function listof(e,   _i, _n, _a, _lo, _hi, _c, _out, _b) {
+    _out = ""
+    _n = split(e, _a, ",")
+    for (_i = 1; _i <= _n; _i++) {
+        _a[_i] = trim(_a[_i]); if (_a[_i] == "") continue
+        if (_a[_i] ~ /^[0-9]+-[0-9]+$/) { split(_a[_i], _b, "-"); _lo = _b[1]+0; _hi = _b[2]+0 }
+        else if (_a[_i] ~ /^[0-9]+$/)    { _lo = _a[_i]+0; _hi = _lo }
+        else continue
+        for (_c = _lo; _c <= _hi; _c++) if (!(_c in _S)) { _S[_c] = 1; _out = _out " " _c }
+    }
+    for (_i in _S) delete _S[_i]
+    return _out
+}
+# 表达式 → 核号列表 的 memo（每个进程都对同一批表达式重算，缓存后省一大截）
+function lom(e,   _r) {
+    if (e in LM) return LM[e]
+    _r = listof(e); LM[e] = _r; return _r
+}
+function maskof(l,   _i, _n, _a, _m) {
+    _m = 0
+    _n = split(l, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "") _m += 2^_a[_i]
+    return sprintf("%x", _m)
+}
+function inter(a, b,   _i, _n, _a, _out) {
+    for (_i in BSET) delete BSET[_i]
+    _n = split(b, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "") BSET[_a[_i]] = 1
+    _out = ""
+    _n = split(a, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "" && (_a[_i] in BSET)) _out = _out " " _a[_i]
+    return _out
+}
+# 读 /proc/<tid>/status 的 Cpus_allowed_list（不 fork）。
+# ⚠ 不用 split(...,/regex/)：toybox awk 对「正则字面量当分隔符」支持不稳，
+#   实测会让这里一直返回空串，于是每轮都判定全线程不一致、每轮白下发一遍。
+function affof(f,   _l) {
+    while ((getline _l < f) > 0) {
+        if (_l ~ /^Cpus_allowed_list:/) {
+            sub(/^Cpus_allowed_list:[ \t]*/, "", _l)
+            sub(/[ \t\r\n].*$/, "", _l)
+            close(f); return _l
+        }
+    }
+    close(f); return ""
+}
+# 该进程所在 cgroup 的 CPU 预算（v1 cpuset，cpuset_v2_mode 下文件名是 cpus）。
+# 按组路径缓存，避免每个进程都读一遍。
+function cgof(pid,   _g, _l, _f, _v, _i) {
+    _g = ""
+    while ((getline _l < ("/proc/" pid "/cpuset")) > 0) { _g = _l; break }
+    close("/proc/" pid "/cpuset")
+    sub(/[\r\n]+$/, "", _g)
+    if (_g == "" || _g == "/") return ""
+    if (_g in CG) return CG[_g]
+    _v = ""
+    for (_i = 1; _i <= 2; _i++) {
+        _f = CGROOT _g (_i == 1 ? "/cpus" : "/cpuset.cpus")
+        _l = ""
+        while ((getline _l < _f) > 0) break
+        close(_f)
+        sub(/[\r\n]+$/, "", _l)
+        if (_l != "") { _v = _l; break }
+    }
+    CG[_g] = _v
+    return _v
+}
+{
+    pid = $1; o = $2; m = $3; h = $4; ht = $5; hr = $6; cm = $7; uni = $8; tl = $9
+    if (pid == "") next
+    base = listof(cgof(pid))          # 预算；空 = 没有 cgroup 限制
+
+    # ---- 快路径：全线程同目标 ----
+    if (uni == "1") {
+        if (m == "") next
+        eff = base == "" ? lom(m) : inter(lom(m), base)
+        if (eff == "") next
+        em = maskof(eff)
+        if (em != maskof(listof(affof("/proc/" pid "/status")))) printf "taskset -a -p %s %s\n", em, pid
+        next
+    }
+
+    # ---- 慢路径：主线程 / 重线程 / comm 分到了不同核 ----
+    # 先做一次「在当前 cgroup 预算下根本无事可做」的廉价判定：
+    #   典型场景是应用在后台组（预算 0-3），而模板要求 4-9 / 8-9 等大核
+    #   → 主线程目标 与 所有特例线程目标 都落在预算之外或就等于整个预算，
+    #     此时整进程本来就该是「整个预算」，与现状一致 → 跳过整轮逐线程扫描。
+    #   （不做这个判定的话，300 线程的应用每轮要读 600 个 /proc 文件。）
+    eo = base == "" ? lom(o) : inter(lom(o), base)
+    em = base == "" ? listof(m) : inter(listof(m), base)
+    if (em == "" && tl != "") {
+        bad = 0
+        if (cm != "") {
+            nc = split(cm, cps, ",")
+            for (k = 1; k <= nc; k++) {
+                if (cps[k] == "") continue
+                at = index(cps[k], "@"); if (at < 1) continue
+                ce = base == "" ? lom(substr(cps[k], at+1)) : inter(lom(substr(cps[k], at+1)), base)
+                if (ce != "" && ce != eo) { bad = 1; break }
+            }
+        }
+        if (!bad) {
+            cur = maskof(listof(affof("/proc/" pid "/status")))
+            if (cur == maskof(eo)) next
+        }
+    }
+
+    nmis = 0; ntot = 0; tgt = ""
+    n = split(tl, tids, " ")
+    for (i = 1; i <= n; i++) {
+        tid = tids[i]; if (tid == "") continue
+        ntot++
+        c = ""; getline c < ("/proc/" pid "/task/" tid "/comm"); close("/proc/" pid "/task/" tid "/comm")
+        sub(/[\r\n]+$/, "", c)
+        w = o
+        if (tid == pid) w = m
+        if (c != "" && hr != "" && matchsub(c, hr)) w = h
+        if (c != "" && ht != "" && matchsub(c, ht)) w = m
+        if (cm != "" && c != "") {
+            ng = split(cm, pairs, ",")
+            for (k = 1; k <= ng; k++) {
+                if (pairs[k] == "") continue
+                at = index(pairs[k], "@"); if (at < 1) continue
+                tn = substr(pairs[k], 1, at-1); tm = substr(pairs[k], at+1)
+                if (tn != "" && matchsub(c, tn)) { w = tm; break }
+            }
+        }
+        if (w == "") w = o
+        # 目标 ∩ cgroup 预算；交集为空说明想要的大核不在预算里 → 这个线程不动
+        eff = base == "" ? lom(w) : inter(lom(w), base)
+        # ⚠ 必须「掩码 vs 掩码」比较（want/eff 与 /proc 里读到的都是表达式→都转掩码）
+        we = eff == "" ? "" : maskof(eff)
+        cur = maskof(listof(affof("/proc/" pid "/task/" tid "/status")))
+        if (we != "" && cur != we) nmis++
+        tgt = tgt " " tid ":" we ":" cur
+    }
+    if (ntot == 0) next
+
+    # 大面积不一致（应用刚起来 / 刚切前后台）→ 先整进程批量，再补差异
+    if (nmis > 8 && o != "" && m != "") {
+        eo = base == "" ? listof(o) : inter(listof(o), base)
+        emm = base == "" ? listof(m) : inter(listof(m), base)
+        if (eo != "") printf "taskset -a -p %s %s\n", maskof(eo), pid
+        if (emm != "") printf "taskset -p %s %s\n", maskof(emm), pid
+        eoM = eo == "" ? "" : maskof(eo)
+        n = split(tgt, tg, " ")
+        for (i = 1; i <= n; i++) {
+            if (tg[i] == "") continue
+            split(tg[i], q, ":")
+            if (q[2] == "" || q[2] == eoM) continue
+            printf "taskset -p %s %s\n", q[2], q[1]
+        }
+    } else {
+        n = split(tgt, tg, " ")
+        for (i = 1; i <= n; i++) {
+            if (tg[i] == "") continue
+            split(tg[i], q, ":")
+            if (q[2] == "" || q[3] == q[2]) continue
+            printf "taskset -p %s %s\n", q[2], q[1]
+        }
+    }
+}
+function matchsub(s, n) { return index(s, n) > 0 }
+' "$TIDS" > "$CMDS" 2>/dev/null
+
+# 6) 执行（只有真的需要改的命令才会在这里）
+if [ -s "$CMDS" ]; then
+    sh "$CMDS" >/dev/null 2>&1
+fi
+
+# 7) 落缓存：本轮核对过的（KEEP 里未过期的 + TODO 里本轮的）记下来，
+#    下一轮同 pid + 同规格 + 同 cgroup 就直接跳过，不再重扫线程。
+{ cat "$KEEP" 2>/dev/null; cat "$TODO" 2>/dev/null; } > "$APL.new" 2>/dev/null
+mv -f "$APL.new" "$APL" 2>/dev/null
+exit 0

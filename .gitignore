@@ -1,0 +1,19 @@
+# ---- 打包 / 编辑器产物 ----
+*.zip
+*.tgz
+*.bak
+*.bak-*
+*.orig
+*.rej
+.DS_Store
+Thumbs.db
+__pycache__/
+*.pyc
+
+# ---- 本地采集到的设备数据（可能含个人包名/截图，不入库）----
+*.png
+*.apk
+*.db
+*.xml
+scratch/
+_scratch_*/

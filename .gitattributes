@@ -1,0 +1,10 @@
+# Android shell 脚本对 CRLF 零容忍（会直接 `bad interpreter` / 语法错误）
+# 所以：文本文件在仓库内一律存 LF，检出时也不做转换。
+* text eol=lf
+
+# 二进制不做任何处理
+*.png  binary
+*.jpg  binary
+*.zip  binary
+*.apk  binary
+*.db   binary
