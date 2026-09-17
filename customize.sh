@@ -65,10 +65,14 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 chmod 0755 "$MODPATH/Config/4+4+2/O3"/*/*.sh 2>/dev/null
 
-# ---------- 先移除旧版（避免 KSU 走重启迁移）----------
-if [ -d "$FINAL_PATH" ] && [ "$MODPATH" != "$FINAL_PATH" ]; then
-    rm -rf "$FINAL_PATH" 2>/dev/null
-fi
+# ---------- 旧版目录：保留、不删 ----------
+#  这里早先是一句 `[ "$MODPATH" != "$FINAL_PATH" ] && rm -rf "$FINAL_PATH"`，
+#  想法是「让 KSU 以为没装过、别走重启迁移」。实测两点都不成立：
+#    ① KSU 的 installer.sh 在**跑本脚本之前**就已经把 MODPATH 指到
+#       /data/adb/modules_update/<id> 了，删 active 目录改变不了它的路径判定，纯白删；
+#    ② 删掉之后只要后面任何一步失败，模块目录就只剩一个 module.prop ——
+#       用户在管理器里看到的就是「卡片在、但内容全无、执行/打开按钮都不见了」。
+#  现在保留旧目录，靠后面的 `cp -af` 逐个覆盖（多出来的旧文件留着无害）。
 
 # ---------- ★ 清除「模块被禁用 / 待迁移」标记 ----------
 #
@@ -84,7 +88,9 @@ fi
 #  ⚠ 为什么必须由安装脚本主动清：
 #    用户唯一的自救动作就是「重装模块」。如果安装脚本不清这个标记，
 #    重装完**模块仍然是灰的** —— 用户会以为重装都没用，然后去重启手机（本机重启=掉 root）。
-#    （上面那句 `rm -rf "$FINAL_PATH"` 只在 MODPATH≠FINAL_PATH 时执行，覆盖不到 KSU 原地安装的分支。）
+#    ⚠ 但这里只能清 disable / remove。`update` 这个标记**必须由文件末尾的「安装后自愈」
+#      异步清** —— KSU 的 installer.sh 是在本脚本**返回之后**才 mktouch 出 update 的，
+#      在这个脚本里删它，删完立刻又被建一个（v16.1 就是这么白忙一场的）。
 #
 #  ⚠ 安全性：本模块**没有 post-fs-data.sh**，只有 late_start 的 service.sh，
 #    不参与、也不可能影响开机流程 → 清掉禁用标记绝不会引入「开不了机」的风险。
@@ -443,16 +449,32 @@ else
     ui_print "⚠ Scene 尚未启动过，配置将在首次开机由 service.sh 处理"
 fi
 
-# ---------- 自我保护：把 KSU 的「待重启迁移」就地做掉（本机不能重启）----------
+# ---------- 自我保护：把 KSU 的「待重启生效」就地做掉（本机不能重启）----------
 #
 #  ⚠⚠ 本机是**临时越狱 root**，重启会掉 root（用户铁律，2026-09-17）。
-#     而 KSU 在「模块已挂载」的情况下安装更新时，会把新内容解到
-#     /data/adb/modules_update/<id>/，并在 /data/adb/modules/<id>/ 里留一个空的
-#     `update` 标记，**等重启才合并** → 在这台机器上等于：
-#        · 模块目录只剩 module.prop（Config/Scripts/webroot 全没了）
+#     而 KSU 更新一个「已存在」的模块时走的是「暂存 + 待重启」这套：
+#        · 新内容解到 /data/adb/modules_update/<id>/
+#        · 在 /data/adb/modules/<id>/ 里留一个空的 `update` 标记
+#        · 真正的合并只发生在**开机**时（ksud handle_updated_modules 把
+#          modules_update/<id> 整个改名覆盖 modules/<id>）
+#     在这台机器上等于：
+#        · 模块目录可能只剩 module.prop（Config/Scripts/webroot 全没了）
+#        · 管理器里「开关变灰、点不动」（update=1）且「执行 / 打开(WebUI)」两个按钮
+#          直接不渲染（active 目录里没有 action.sh、没有 webroot/）
 #        · WebUI 打不开、守护脚本找不到文件（正在跑的进程引用的是已删除的 inode）
-#     所以这里在安装收尾时**自己合并**并删掉标记，跳过 KSU 的待迁移状态。
-#     （合并后 modules_update 里的副本也删掉，免得以后真重启时又盖一次。）
+#
+#  ⚠ 时序（2026-09-17 逐行读 KernelSU 源码确认，别再靠猜）：
+#      installer.sh 在 `. customize.sh` **返回之后**才执行下面三行：
+#          mktouch $NVBASE/modules/$MODID/update          ← 无条件创建，晚整整一步
+#          rm -rf  $NVBASE/modules/$MODID/{remove,disable}
+#          cp -af  $MODPATH/module.prop $NVBASE/modules/$MODID/module.prop
+#      ⇒ 「在自定义脚本里删 update 标记」**原理上就不可能成功**：
+#        脚本里删掉的那个，installer 紧接着又建一个。（v16.1 的失手点就在这。）
+#
+#  ⇒ 因此分两步：
+#      (1) 这里先把内容 `cp -af` 覆盖进 active 目录 —— 立刻可用，不依赖后面那步；
+#      (2) 文件末尾再拉起一个**脱离安装进程**的自愈脚本，等 installer.sh 把
+#          update 标记写出来之后，由它删标记 + 收拾 modules_update + 重拉服务。
 #
 #  判据：MODPATH（KSU 解压出来的位置）不等于 FINAL_PATH 就说明走了待迁移路径。
 _migrated=""
@@ -462,16 +484,20 @@ if [ -n "$MODPATH" ] && [ "$MODPATH" != "$FINAL_PATH" ] && [ -f "${MODPATH}/modu
     # 合并成功的判据：三个「缺了就废」的东西都在
     if [ -f "${FINAL_PATH}/module.prop" ] && [ -f "${FINAL_PATH}/service.sh" ] \
        && [ -f "${FINAL_PATH}/webroot/index.html" ] && [ -f "${FINAL_PATH}/lib/util.sh" ]; then
+        # 这一步对「adb push 部署」这条路径有用（那条路径没有 installer.sh 补标记）；
+        # zip 安装时 installer.sh 稍后还会重建 update —— 交给末尾的自愈收掉。
         rm -f "${FINAL_PATH}/update" "${FINAL_PATH}/remove" 2>/dev/null
         set_perm_recursive "$FINAL_PATH" 0 0 0755 0644
         set_perm_recursive "$FINAL_PATH/Scripts" 0 2000 0755 0755
         set_perm_recursive "$FINAL_PATH/Config"  0 2000 0755 0644
         chmod 0755 "$FINAL_PATH"/Config/4+4+2/O3/*/*.sh 2>/dev/null
-        rm -rf "/data/adb/modules_update/${MODID}" 2>/dev/null
+        # ⚠ 这里**不要** rm -rf modules_update/<id>：installer.sh 紧接着还要
+        #   `cp -af $MODPATH/module.prop $NVBASE/modules/$MODID/module.prop`，
+        #   提前删掉 MODPATH 会让它报错。清理由末尾的自愈脚本在安装进程结束后做。
         _migrated=1
         ui_print "- 已就地合并到 $FINAL_PATH（本机不重启，跳过 KSU 待迁移状态）"
     else
-        ui_print "- ⚠ 就地合并未完成（$FINAL_PATH 缺关键文件）—— 请勿重启，在 WebUI 点「传递调度」重试"
+        ui_print "- ⚠ 就地合并未完成（$FINAL_PATH 缺关键文件）—— 请勿重启，见末尾「安装后自愈」日志"
     fi
 fi
 
@@ -497,6 +523,85 @@ if [ -d "$SCENE_DIR" ]; then
     chmod 0777 "${CC_DIR}/O3调度·切换方案.sh"
     ui_print "- 已注入 Scene 自定义命令：O3调度·切换方案.sh"
 fi
+
+# ---------- ★ 安装后自愈：改写 KSU 的「待重启生效」状态 ----------
+#
+#  为什么必须异步：见上面「自我保护」的时序 —— `update` 标记是 installer.sh
+#  在本脚本返回**之后**才 mktouch 出来的，脚本里没有任何办法阻止它。
+#
+#  做法：落一个独立脚本 → setsid/nohup 脱离安装进程后台跑 → 它轮询等 update 标记
+#        出现（最多 90s），再把 modules_update/<id> 合并进 modules/<id>、删标记、
+#        重拉服务。这样 zip 安装也能**免重启**直接生效。
+#
+#  ⚠ 安全边界：只有「关键文件校验通过」才删 modules_update，校验不过就原样保留那份
+#     完整副本，绝不制造「两边都不全」的局面。失败会写日志，不会静默。
+SELFHEAL="${STATE_DIR}/fix_pending.sh"
+mkdir -p "$STATE_DIR"
+cat > "$SELFHEAL" <<'SHEOF'
+#!/system/bin/sh
+# 由 customize.sh 在安装收尾时拉起（后台）。
+# 用途：本机禁止重启，靠这一步跳过 KernelSU 的「待重启生效」——
+#   把 /data/adb/modules_update/<id> 合并进 /data/adb/modules/<id>，
+#   删掉 active 目录里的 update 标记，再让 ksud 重拉一次模块服务。
+# 日志：/data/adb/SceneO3Tuner/fix_pending.log
+ID=SceneO3Tuner
+UPD="/data/adb/modules_update/$ID"
+FIN="/data/adb/modules/$ID"
+LOG="/data/adb/SceneO3Tuner/fix_pending.log"
+
+now() { date '+%F %T' 2>/dev/null || echo '?'; }
+
+# ksud：优先全路径（init 起的进程 PATH 很窄），再退回 PATH 查找
+KSUD=""
+for c in /data/adb/ksu/bin/ksud /data/adb/ksud; do
+    [ -x "$c" ] && { KSUD="$c"; break; }
+done
+[ -z "$KSUD" ] && KSUD=$(command -v ksud 2>/dev/null)
+
+i=0
+while [ "$i" -lt 90 ]; do
+    if [ -e "$FIN/update" ]; then
+        [ -d "$UPD" ] && cp -af "$UPD"/. "$FIN"/ 2>/dev/null
+        if [ -f "$FIN/module.prop" ] && [ -f "$FIN/service.sh" ] \
+           && [ -f "$FIN/webroot/index.html" ] && [ -f "$FIN/lib/util.sh" ]; then
+            rm -f "$FIN/update" "$FIN/remove" 2>/dev/null
+            # zip 里的脚本被 installer 统一设成 0644，这里把该可执行的补回来
+            chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
+            chmod 0755 "$FIN"/Scripts/*/*/*.sh "$FIN"/Config/*/*/*.sh \
+                       "$FIN"/Config/*/*/*/*.sh 2>/dev/null
+            chmod 0644 "$FIN/module.prop" "$FIN/webroot/index.html" "$FIN/lib/util.sh" 2>/dev/null
+            # 留 3s 让 installer.sh 把剩下的收尾动作跑完（它还要 cp module.prop），
+            # 再清掉暂存目录 —— 等价于「重启后 handle_updated_modules 的结果」。
+            sleep 3
+            [ -d "$UPD" ] && rm -rf "$UPD" 2>/dev/null
+            echo "$(now) OK 已合并、已清 update 标记（免重启生效）" >> "$LOG"
+            [ -n "$KSUD" ] && "$KSUD" services >/dev/null 2>&1
+            exit 0
+        fi
+        echo "$(now) FAIL 校验不通过（$FIN 缺关键文件）—— 保留 modules_update 副本，未做任何删除" >> "$LOG"
+        exit 1
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+echo "$(now) SKIP 等待 90s 未出现 update 标记（可能不是 KSU zip 安装路径，无需处理）" >> "$LOG"
+exit 2
+SHEOF
+chmod 0755 "$SELFHEAL"
+
+# 脱离安装进程独立运行：安装器一退出，父进程可能连子孙一起收走
+if command -v setsid >/dev/null 2>&1; then
+    setsid "$SELFHEAL" </dev/null >/dev/null 2>&1 &
+    ui_print "- 已启动安装后自愈（setsid 后台，免重启生效）"
+elif command -v nohup >/dev/null 2>&1; then
+    nohup "$SELFHEAL" </dev/null >/dev/null 2>&1 &
+    ui_print "- 已启动安装后自愈（nohup 后台，免重启生效）"
+else
+    "$SELFHEAL" </dev/null >/dev/null 2>&1 &
+    ui_print "- 已启动安装后自愈（后台，免重启生效）"
+fi
+ui_print "- 约 10 秒后下拉刷新管理器：开关不再灰，出现「执行 / 打开」"
+ui_print "  （日志：/data/adb/SceneO3Tuner/fix_pending.log）"
 
 ui_print " "
 ui_print "✅ 安装完成"

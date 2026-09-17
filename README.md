@@ -81,7 +81,7 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 | **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
 | **配置完整性审计 + 一键还原** | `Scripts/…/integrity.sh` | 7 个维度核对，输出「注错文件清单」 |
 | **升级即覆盖（v15）** | `customize.sh` + `lib/util.sh` `SYNC_SKIP` | 升级时**直接覆盖** `profile.json`/`powercfg.sh`/`features/*.conf` 等模块设计文件，只保留 `threads*.json`（应用/游戏的线程表）；覆盖前自动备份 |
-| **装完不用重启（v15.1 / v16.1）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**；并且**主动清掉 `disable` 标记**（KSU 的启用状态就是 `/data/adb/modules/<id>/disable` 这个文件）—— 否则「管理器里模块是灰的」重装也修不好。安装收尾会自动 `ksud services` 把守护拉起来 |
+| **装完不用重启（v15.1 / v16.1 / v16.2）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**并将内容立即可用；并清掉 `disable` 标记（KSU 的启用状态就是 `/data/adb/modules/<id>/disable`）。⚠ **`update` 标记是 installer.sh 在 `. customize.sh` 返回之后才写的**，所以脚本里删它没用 —— v16.2 改成**落一个独立脚本 + `setsid` 后台拉起**，等 `update` 标记出现后再把它合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（全程不重启）。装完自动 `ksud services` 把守护拉起来 |
 | **Scene · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | Scene 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
 | **应用页只显示有前台界面的应用（v16）** | `webui.sh launchables` + `manualApps()` | 按 `MAIN/LAUNCHER` 取「启动器能点开」的包（本机 487 → 169），避免把没有界面的系统服务也拉进来绑核；已配过档位的包仍显示；标题行有「含无界面」开关 |
 | **调度守护** | `Scripts/…/guard.sh` | 目录权限、配置可写性、threads 重建、落核 |
@@ -520,12 +520,12 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.0-20260917.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.2-20260917.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
 > **不需要重启**（v15.1 起）。KSU 有时会把新版本先放到 `/data/adb/modules_update/<id>/`
-> 等你重启后再合并；本项目在 `customize.sh` 收尾**自己就地合并**并拉起服务。
+> 等你重启后再合并；本项目在 `customize.sh` 收尾**自己就地合并**并拉起服务，v16.2 进一步用一个**异步自愈脚本**等 KSU 写出 `update` 标记后再把它合并进 active 目录、删掉 `update`、`rm -rf modules_update` 并重拉服务。
 > 如果你的设备是「临时越狱 root」（重启即掉 root），这条尤其重要。
 
 ### ⚠️ 升级会覆盖什么（v15 起）
@@ -746,19 +746,35 @@ A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
 常见触发：① 管理器里误关；② **KSU 判定开机失败进入「安全模式」**（会把所有模块一起禁用，
 典型症状就是「一觉醒来模块全灰了」）；③ 曾经卡在 `modules_update` 待迁移状态。
 
+> **⚠ 灰的是「开关」+ 连「执行 / 打开」按钮都没有**（v16.2 重点修的局）：
+> 这是 **`update` 标记** 在作怪，和 `disable` 不是一回事 ——
+> ① 管理器里 `update` 文件存在时，**顶部开关会变灰且拨不动**（`ExpressiveSwitch` 被禁用）；
+> ② 同时 KSU 读取的是 `modules/<id>/`，而更新内容还在 `modules_update/<id>/`，
+> active 目录里可能**只有 `module.prop`**，没有 `webroot/` 和 `action.sh`
+> → 管理器据此**根本不渲染「执行 / 打开」两个按钮**（不是灰，是压根不显示）。
+> 关键坑：**`update` 是 installer.sh 在 `. customize.sh` 返回「之后」才写的**，
+> 所以在安装脚本里 `rm -f update` 一定失败（v16.1 的失手点）。v16.2 改成
+> **落一个独立自愈脚本 + `setsid` 后台拉起**，等 `update` 出现后把它合并进 active、
+> 删标记、`rm -rf modules_update`、重拉 `ksud services` —— **全程不重启**。
+
 按这个顺序处理：
 
 1. 管理器里把开关**拨回来**（能拨动就等于删掉了 `disable`）；
 2. 拨不动就用带 root 的文件管理器（MT 管理器）删掉上面那个 `disable` 文件；
 3. **让守护起来（不用重启）**：终端里 `su -c /data/adb/ksu/bin/ksud services`；
    > 被禁用的那一次开机里 `service.sh` 根本没执行过，所以这一步不能省 —— 否则模块「启用」了但守护是死的。
-4. 兜底：**重装本模块**（v16.1 起安装脚本会自动清 `disable`/`update`/`remove` 并补跑 `ksud services`）。
+4. 如果是 **`update` 卡死（开关灰 + 没按钮）**：直接 `su -c` 跑下面这句，等几秒刷新管理器即可，**不用重启**：
+   ```sh
+   su -c "cp -af /data/adb/modules_update/SceneO3Tuner/. /data/adb/modules/SceneO3Tuner/ && rm -f /data/adb/modules/SceneO3Tuner/update /data/adb/modules/SceneO3Tuner/remove && rm -rf /data/adb/modules_update/SceneO3Tuner && /data/adb/ksu/bin/ksud services"
+   ```
+   （用 MT 管理器手动做等价操作也行：把 `modules_update/SceneO3Tuner/` 整个覆盖进 `modules/SceneO3Tuner/`，删掉 `update`/`remove`，删掉 `modules_update/SceneO3Tuner/`。）
+5. 兜底：**重装本模块**（v16.2 起安装脚本会自动清 `disable`/`remove`，并由**异步自愈**处理 `update` 并补跑 `ksud services`）。
 
 > ✅ 放心清：本模块**没有 `post-fs-data.sh`**，只有 late_start 阶段的 `service.sh`，
 > 不挂载 `/system`、不影响开机流程 —— 重新启用它**不可能**导致开不了机。
 >
 > ⚠️ 顺带提醒：如果你的设备是**临时越狱 root**（重启即掉 root），遇到这种情况**千万不要靠重启去试**，
-> 按上面 1→4 处理即可。
+> 按上面 1→4（或 5）处理即可。
 
 ---
 
@@ -851,6 +867,7 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.2** | ★ **修「开关是灰的 + 没有执行 / 打开按钮」**：读 KernelSU 源码定位到这是 **`update` 待更新标记**（不是 v16.1 的 `disable`）—— 安装器在 `. customize.sh` 返回**之后**才写 `update`，脚本里删它必失败；且 `update` 存在时 active 目录可能只剩 `module.prop`（缺 `webroot/`/`action.sh`），导致按钮**根本不渲染**。修正：安装脚本就地合并 + 清 `disable`/`remove`，再落一个独立自愈脚本 `setsid` 后台拉起，等 `update` 出现后合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（不重启）。新增 `test_pending_selfheal.py`（22 断言）覆盖该路径 |
 | **v16.1** | ★ **修「模块在 KernelSU 里是灰的 / 启用不了」**：安装脚本现在会主动清掉 `/data/adb/modules/<id>/disable`（KSU 的启用状态就是这个标记文件）——在此之前，KSU 若是**原地安装**，重装模块也**清不掉禁用标记**，用户会以为重装都没用（甚至去重启手机）。同时在「刚从禁用态恢复」时补一次 `ksud services`，让守护不必重启就起来 |
 | **v16.0** | ★ **应用页默认只显示有前台界面的应用**（`cmd package query-activities` 取启动器可见包，487→169），避免把无界面的系统服务拉进来绑核；已配档位的包仍显示 + 可切「含无界面」 |
 | v15.1 | ★ **装完不用重启**：KSU 走到 `modules_update/` 待迁移时，`customize.sh` 收尾**自己就地合并**（本机 root 不允许重启）；顺带修 `powercfg.sh` 里 `/dev` 挂载后备目录随机名导致每次跑堆一个垃圾目录 |
