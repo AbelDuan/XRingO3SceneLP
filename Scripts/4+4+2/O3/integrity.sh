@@ -51,9 +51,9 @@ manifest.json|Scene 配置身份"
 
 # 模块自己维护的数据（Scene 不碰，必须与我们内存里的基线一致）
 MOD_FILES="app_assign.tsv|应用线程分配
-app_templates.tsv|应用线程模板
+app_templates.tsv|应用线程档位表
 game_assign.tsv|游戏线程分配
-game_templates.tsv|游戏线程模板"
+game_templates.tsv|游戏线程档位表"
 
 json_ok() {
     local f="$1"
@@ -216,9 +216,13 @@ do_restore() {
         chmod 0666 "${WEBUI_DIR}/${f}" 2>/dev/null
     done
 
-    # 模板显示名迁移（老机器上模板表已存在，seed 不会再跑改名）
-    fix_tpl_labels "$APP_TPL_FILE"
-    fix_tpl_labels "$GAME_TPL_FILE"
+    # 档位表迁移 v10（档位与模式同名 + 核位重写）。
+    # ⚠ 先删幂等标记：这是「一键还原」，语义上就是要**强制重写**档位表回模块基线
+    #   （前端没有编辑档位核位的入口，所以重写不会冲掉用户的自定义）。
+    rm -f "$TPL_V10_MARK" "$TPL_V11_MARK" "$TPL_V12_MARK" 2>/dev/null
+    migrate_templates_v10
+    migrate_templates_v11
+    migrate_templates_v12
 
     # 重建线程分配（Scene 配置刚变过）
     local out; out=$(gen_threads_from_scene 2>&1)

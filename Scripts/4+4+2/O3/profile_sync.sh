@@ -59,7 +59,7 @@ KEEP_BACKUPS="${KEEP_BACKUPS:-3}"
 SCENE_FILES="profile.json manifest.json _Apps.json _Camera.json _ELP.json _Games.json powercfg.sh description.txt threads.json threads_games.json"
 # Scene 的调度相关偏好
 SCENE_PREFS="powercfg.xml games.xml"
-# 模块自己的线程模板与分配表
+# 模块自己的线程档位表与分配表
 MOD_WEBUI="app_assign.tsv app_templates.tsv game_assign.tsv game_templates.tsv settings.conf"
 
 ts() { date '+%Y%m%d_%H%M%S'; }
@@ -233,7 +233,7 @@ do_backup() {
         cp -f "${SCENE_PREFS_DIR}/${f}" "${dir}/scene-prefs/${f}" 2>/dev/null && n=$((n+1))
     done
 
-    # ---- 模块自己的线程模板与分配表 ----
+    # ---- 模块自己的线程档位表与分配表 ----
     for f in $MOD_WEBUI; do
         [ -f "${WEBUI_DIR}/${f}" ] || continue
         cp -f "${WEBUI_DIR}/${f}" "${dir}/module-webui/${f}" 2>/dev/null && n=$((n+1))

@@ -49,7 +49,11 @@ lock_value() {
   fi
 }
 
-dev_mount=/dev/$(cat /dev/urandom | tr -dc 'a-z_' | head -c 8; echo)
+# ⚠ 挂载后备目录用**固定路径**，不要用随机名。
+#   旧写法 `dev_mount=/dev/$(cat /dev/urandom | ...)` 每跑一次脚本就在 /dev 里
+#   新建一个随机目录（实测一天下来攒了 67 个，且不会被清理，只能等重启）。
+#   hide_value 每次都是「先 umount 再 cp 再 mount」，复用同一个目录是安全的。
+dev_mount=/dev/.scene_o3_hide
 hide_value() {
   [ "$USE_HIDE" = "1" ] || { set_value "$2" "$1"; return; }
   if [ -e "$1" ]; then
@@ -79,7 +83,8 @@ echo 1024 > /proc/sys/kernel/sched_util_clamp_max 2>/dev/null && log "uclamp_max
 T=/sys/class/thermal/thermal_message
 hide_value $T/temp_state 0
 hide_value $T/market_download_limit 0
-hide_value $T/devfreq_gpu_limit 0
+# 注：原有一行 hide_value $T/devfreq_gpu_limit 0（解除温控对 GPU 的限频），
+#     v10 起删除 —— GPU 完全交回系统（含温控）管理，模块不做任何 GPU 调整。
 # 说明：$T/cpu_nolimit_temp 在 O3 默认 0（= 用系统策略）。蓝本设 49500，
 #       但 O3 语义未验证，贸然写入可能反而“打开”一个限频阈值 → 保持默认。
 set_value 0 $T/special_cpu_limit
@@ -121,11 +126,12 @@ set_value 0 /proc/sys/walt/input_boost/sched_boost_on_input
 set_value 0 /proc/sys/walt/input_boost/sched_boost_on_powerkey
 set_value 0 /proc/sys/walt/input_boost/sched_boost_on_volkey
 
-# ─────────────────────── 7. GPU devfreq（O3 专有）───────────────────────
-# Scene 的 @gpu_freq 在 O3 报 "Unsupported processor!"（daemon 无该 SoC 表）
-# → 这里统一关掉 GPU 联动抬频，具体上限交给 profile.json 的 gpu_* preset
-set_value 0 /sys/class/devfreq/gpufreq_core/boost_enable
-set_value 0 /sys/class/devfreq/gpufreq_core/linked_freq_disable
+# ─────────────────────── 7. GPU ───────────────────────
+# v10 起模块**完全不碰 GPU**：不写 boost_enable / linked_freq_disable，
+# 不解除温控 GPU 限频，profile.json 里也没有 gpu_* preset / alias。
+# 原因：O3 的 GPU 由 devfreq + 厂商 power HAL 自治（实证：手写 core_ctl 会被
+# vendor.xring.ha 在数秒内回写），模块插手既抢不过也有反效果。
+# Scene 侧同步改为 features/env.conf 的 gpu_lock=0（= 不禁止系统 GPU Boost）。
 
 # ─────────────────────── 8. 小米侧：停掉游戏加速服务 ───────────────────────
 # 蓝本强停 joyose（替代其 migt/metis 参数锁）

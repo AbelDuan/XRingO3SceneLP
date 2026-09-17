@@ -10,6 +10,10 @@ Thumbs.db
 __pycache__/
 *.pyc
 
+# ---- 自检脚本的沙盒（tools/test_sync_skip.sh 会在这里建假 Scene 目录）----
+.test_sync_skip/
+dist/
+
 # ---- 本地采集到的设备数据（可能含个人包名/截图，不入库）----
 *.png
 *.apk

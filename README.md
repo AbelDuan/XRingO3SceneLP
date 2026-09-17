@@ -8,7 +8,7 @@
 
 [![Platform](https://img.shields.io/badge/platform-xring__o3__asic-blue)]()
 [![Framework](https://img.shields.io/badge/framework-KernelSU%20%2F%20SukiSU-green)]()
-[![Version](https://img.shields.io/badge/version-7.0-orange)]()
+[![Version](https://img.shields.io/badge/version-16.0-orange)]()
 [![License](https://img.shields.io/badge/license-MIT-lightgrey)]()
 
 ---
@@ -25,6 +25,8 @@
   - [3.5 相机频率守护：三层根因](#35-相机频率守护三层根因)
 - [4. 目录结构](#4-目录结构)
 - [5. WebUI](#5-webui)
+  - [5.1 游戏页的「FAS 调速器 → 设为 xres」](#游戏页的fas-调速器--设为-xresv15)
+  - [5.2 应用页只显示「有前台界面」的应用](#应用页只显示有前台界面的应用v16)
 - [6. 安装](#6-安装)
 - [7. ⚠️ 需要注意的东西](#7-️-需要注意的东西)
 - [8. 常见问题](#8-常见问题)
@@ -72,18 +74,27 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 
 | 功能 | 实现位置 | 说明 |
 |---|---|---|
-| **线程绑核（核心）** | `Scripts/…/enforce_threads.sh` | 把模板真正落到 `sched_setaffinity`，幂等、带已落核缓存 |
+| **线程绑核（核心）** | `Scripts/…/enforce_threads.sh` + `pin_cgroup.sh` | **v12 起改为 cgroup 分组落核**：整进程写进 `/dev/cpuset/SceneO3Tuner/<pkg>/{c0-3,c4-7}`，**新线程自动继承**，不必轮询追；幂等重跑 39ms（逐线程 `taskset` 要 226~244ms，只能当回退路径） |
 | **三级目标解析** | `lib/util.sh` | 游戏名单 → Scene 模式映射 → 手动模板 |
-| **模式同步线程** | `lib/util.sh` `mode_sync_assign()` | Scene 里设过模式的 app 自动套对应模板（可开关） |
+| **档位（v10+）** | `lib/util.sh` `seed_app_templates()` | 档位与模式同名：**省电 / 均衡 / 性能 / 系统接管**（4 档，`fast` = 不绑核）；**默认不预设任何分配** |
+| **从 Scene 导入档位** | `lib/util.sh` `import_scene_assign()` | 一次性导入，之后不再实时跟随（避免 Scene 一改就把你的分配冲掉） |
 | **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
 | **配置完整性审计 + 一键还原** | `Scripts/…/integrity.sh` | 7 个维度核对，输出「注错文件清单」 |
-| **相机频率守护** | `Scripts/…/camera_freq_guard.sh` | 兜底：相机档位被写坏时写回 |
-| **相机档位看护** | `Scripts/…/guard.sh` | 在「进相机那一刻」判定是谁写坏的，零常驻开销 |
+| **升级即覆盖（v15）** | `customize.sh` + `lib/util.sh` `SYNC_SKIP` | 升级时**直接覆盖** `profile.json`/`powercfg.sh`/`features/*.conf` 等模块设计文件，只保留 `threads*.json`（应用/游戏的线程表）；覆盖前自动备份 |
+| **装完不用重启（v15.1）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**（本机 root 不允许重启） |
+| **Scene · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | Scene 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
+| **应用页只显示有前台界面的应用（v16）** | `webui.sh launchables` + `manualApps()` | 按 `MAIN/LAUNCHER` 取「启动器能点开」的包（本机 487 → 169），避免把没有界面的系统服务也拉进来绑核；已配过档位的包仍显示；标题行有「含无界面」开关 |
 | **调度守护** | `Scripts/…/guard.sh` | 目录权限、配置可写性、threads 重建、落核 |
 | **WebUI** | `webroot/index.html` | 单文件，KernelSU 桥接，5 个页签 |
-| **音量键操作菜单** | `action.sh` | 不装 WebUI 也能锁定 / 解锁 / 切换方案 |
+| **音量键操作菜单** | `action.sh` | 不装 WebUI 也能切换方案 / 修复配置 |
 | **方案包 ×3** | `Config/4+4+2/O3/` | `sweet_eco` / `sweet_bal` / `sweet_perf` |
 | **动态模块描述** | `lib/util.sh` `update_module_desc()` | 管理器里直接显示当前启用状态 |
+
+> ⚠️ **v7.0 时代的两个相机条目已删除**（下表保留只是为了对照历史）：
+> 「相机频率守护 `camera_freq_guard.sh`」与「相机档位看护」在 **v7 之后被移除** ——
+> 新结构下（频率交回 Scene、`_Camera.json` 用 `["@limiter","NONE"]` 豁免）
+> 守护读不到 `@cpu_freq` 会退回兜底表，**每次开相机反而写 3 个频率节点**，与设计矛盾。
+> 现在的相机策略见 [§3.5](#35-相机频率守护三层根因)（已改写）与更新日志。
 
 ---
 
@@ -211,6 +222,12 @@ Scene 解析这种错误格式时，会**把最后一个参数直接写进 `scal
 | C' | 先写 max（`min` 在高位） | `min=2899200 max=2899200` **塌缩** ❌ |
 
 ### 3.5 相机频率守护：三层根因
+
+> ⚠️ **本节描述的是 v7.0 时代的做法（`camera_freq_guard.sh`），该脚本已在 v10+ 删除**，
+> 只作为「当时为什么那样做」的记录保留。**当前做法**见
+> [§10 版本历史 v10/v11/v14 行](#10-版本历史)：相机在 `_Camera.json` 里固定走
+> `@preset fast_active` + `["@limiter","NONE"]`（豁免辅助调速器），模块不再写任何 CPU 频率，
+> 也不再常驻看护。
 
 #### 第一层：`@cpu_freq` 签名写错（模块自己带的 bug）
 
@@ -440,10 +457,36 @@ b64len / b64 / wbegin / wappend / wcommit     通用文件通道
 | 板块 | 内容 |
 |---|---|
 | **概览** | 功能状态、调度配置（传递 / 备份 / 恢复）、配置身份、注错文件清单 |
-| **模式** | 模式阶梯 · 频率（只读，由 Scene 下发）、模式 → 线程模板 |
-| **应用** | 模板卡（轻量·省电 / 流畅日常 / 高性能 / 不接管）、筛选、逐应用分配 |
-| **游戏** | 同应用页，数据源是 Scene 的游戏名单 |
+| **模式** | 4 档模式的**频率阶梯**（进/退前台各一组，读写 Scene 的真实 preset）、「频率跟随模式」开关 |
+| **应用** | 模板卡（省电 / 均衡 / 性能 / 系统接管）、筛选、逐应用分配；**默认只显示有前台界面的应用**，标题行可切「含无界面」 |
+| **游戏** | 同应用页，数据源是 Scene 的游戏名单；**顶部多一张「Scene · FAS 调速器」卡 + 「设为 xres」按钮** |
 | **日志** | 查看 / 关闭模块日志 |
+
+### 游戏页的「FAS 调速器 → 设为 xres」（v15）
+
+Scene 的「FAS 调速器」下拉候选是**它 APK 里硬编码的**（非联发科 = `{performance, conservative,
+sugov_ext}` ∩ 内核 + `auto`）—— 本机支持的 `xres` **根本选不到**。但 `features/fas.conf` 里的
+`governor_little/middle/prime` 是自由的（Scene 不校验写入值），所以这个按钮直接写文件：
+
+```
+读现三值 → awk 改写（缺键补上）→ 写完自检（行数不能变少 + 三条 governor_ 必须在）
+        → 写回并修权限 → 重启 scene-daemon → 回显「已设为 x…（原 y…）」
+```
+
+### 应用页只显示「有前台界面」的应用（v16）
+
+`pm list packages` 那 480+ 个包里有一大半是**没有界面的系统服务/组件**，给它们绑核既没意义、
+还可能把系统服务限制坏。所以启动时跑一次
+
+```sh
+cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER
+```
+
+取「启动器能点开」的包（本机 **487 → 169**），应用页默认只列这些：
+
+- **已配过档位的包照常显示**（否则老分配会变成「看不见但还在生效」，撤不掉）
+- 拉不到清单（老系统没有 `query-activities`）→ **不筛选**，宁可多显示也不让列表变空
+- 标题行右侧「**含无界面**」开关可临时显示全部，并在标题处提示「已隐藏 N 个无界面」
 
 ### 开关
 
@@ -477,19 +520,28 @@ b64len / b64 / wbegin / wappend / wcommit     通用文件通道
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v7.0-20260916.zip`
-2. 重启；或在终端执行 `/data/adb/ksu/bin/ksud services` 触发 `service.sh`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.0-20260917.zip`
+2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
-4. （可选）概览页 → **「传递调度」**，把内置方案灌进 Scene
 
-### ⚠️ 安装/升级的「首次灌配置，之后继承」
+> **不需要重启**（v15.1 起）。KSU 有时会把新版本先放到 `/data/adb/modules_update/<id>/`
+> 等你重启后再合并；本项目在 `customize.sh` 收尾**自己就地合并**并拉起服务。
+> 如果你的设备是「临时越狱 root」（重启即掉 root），这条尤其重要。
 
-| 情况 | 行为 |
-|---|---|
-| **首次**（Scene 里没有 `profile.json`） | 把模块内置配置灌进 Scene，按 Scene 的 uid 修属主/权限，并逐个校验关键文件落盘 |
-| **非首次** | **继承**已有配置，**绝不覆盖 `profile.json`** —— 那里面是你在 Scene 里调过的频率预设，覆盖了等于把调校冲掉 |
+### ⚠️ 升级会覆盖什么（v15 起）
 
-想主动灌回去（Scene 重置 / 丢配置后），用 WebUI 概览页的「传递调度」。
+| 处理 | 文件 | 理由 |
+|---|---|---|
+| **覆盖** | `profile.json`、`manifest.json`、`description.txt`、`powercfg.sh`、`_Camera.json`、`_Apps.json`、`_Games.json`、`_ELP.json`、`features/*.conf` | 都是**模块的设计**（频率 preset、调速器、limiter、相机豁免…），引擎改了就得跟着走 |
+| **保留** | `threads.json`、`threads_games.json` | 应用 / 游戏的线程档位表；**真值**在模块状态目录的 `app_assign.tsv` / `game_assign.tsv`，模块里那两份只是打包当天的旧快照，拿去覆盖等于倒退 |
+
+- 清单只有**一处**定义：`lib/util.sh` 的 `SYNC_SKIP`（`sync_scheme` 与同步后自检都认它）。置空即恢复「全量覆盖」。
+- 覆盖前自动备份到 `/data/adb/SceneO3Tuner/backup/upgrade-<时间戳>/`；覆盖后**重启 scene-daemon**
+  （`features/*.conf` 里的键它只在启动时读一次）。
+- ⚠ `_Apps.json` / `_Games.json` 名字像「应用 / 游戏配置」，**其实是模块的设计**（分组的 模式 → preset /
+  频率映射），而且 `_Games.json` 在三个方案包里各不相同（跟着 `fas.freq` 走）→ 必须跟方案一起换代。
+- 想**主动全量重灌**（Scene 重置 / 丢配置 / 手工改坏了）：WebUI 概览页 → **「传递调度」**
+  —— 它刻意**不设** `SYNC_SKIP`，属显式修复动作，会先自动备份。
 
 ---
 
@@ -645,15 +697,39 @@ A：写，但只为让 Scene 侧的数据自洽 —— **Scene 不会执行它**
 真正生效的是本模块的落核器。
 
 **Q：相机还是锁频怎么办？**
-A：按顺序检查：
-1. `cat /data/adb/SceneO3Tuner/sceneo3.log | grep 相机` 看守护有没有动作
-2. 确认没有 `touch /data/adb/SceneO3Tuner/camera_freq_guard.off`
-3. 核对设备上的 `_Camera.json` 是不是**正确 4 参数签名 + 先 min 后 max**
-4. 用 WebUI 的「传递调度」重新灌配置
 
-**Q：怎么彻底关掉相机守护？**
-A：`touch /data/adb/SceneO3Tuner/camera_freq_guard.off`，然后重启或
-`pkill -f camera_freq_guard`。
+> 先说结论：**现在（v14+）相机不再靠模块看护**，而是由 `_Camera.json` 固定走
+> `["@preset","fast_active"]` + `["@limiter","NONE"]`（豁免 Scene 的辅助调速器）。
+> 那个 `camera_freq_guard.sh` 已降级为**手动应急工具**，默认不开。
+
+按顺序检查：
+
+1. 辅助调速器开关（真凶）：`cat /data/data/com.omarea.vtools/files/features/limiter.conf`
+   → `limiters_in_apps` / `limiters_in_games` 应为 `1`；相机靠自身 `@limiter NONE` 豁免，
+   所以**开关关掉反而说明豁免链不完整**。
+2. 设备上的 `_Camera.json` 是否**全模式 × 全状态**都指向
+   `[["@preset","fast_active"],["@preset","limiter_on"],["@limiter","NONE"]]`
+   —— ⚠ `@limiter NONE` **必须排在 `@preset` 之后**（预设内部自带 `limiter_on` + `@limiter p3`，顺序反了会被覆盖）。
+3. 用 `pl_max_freq` 当**「哪个 preset 生效」的指纹**：
+   `fast_active` = `2745600/3148800/3955200`，`fast_inactive` = `2860800/3148800/3648000`。
+   ```sh
+   for c in 0 4 8; do echo cpu$c=$(cat /sys/devices/system/cpu/cpu$c/cpufreq/xres/pl_max_freq); done
+   ```
+4. 兜底：WebUI 概览页 →「传递调度」重灌配置（`_Camera.json` 每次安装都会被强制替换）。
+
+**Q：`camera_freq_guard.sh` 还要用吗？怎么开关？**
+A：默认**不开**。它只在「相机前台但频率区间塌缩」时写回档位，是最老的一层兜底，v14 之后
+正常情况下用不到。要用的话：
+
+```sh
+touch /data/adb/SceneO3Tuner/camera_freq_guard.on    # 启用
+rm -f /data/adb/SceneO3Tuner/camera_freq_guard.on    # 停用
+ksud services                                        # 让 service.sh 重新判定
+```
+
+> ⚠ 别用 `pkill -f camera_freq_guard` 了事 —— 那是上面 `service.sh` 自己做的事，
+> 而且**不能**用 `pkill -f scene-daemon`（那条命令的 `-f` 会匹配到你自己的 shell，等于自杀）。
+> 停 Scene 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，它 4~8 秒会自己拉起。
 
 **Q：怎么恢复出厂频率？**
 A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_scheme.sh restore`。
@@ -675,42 +751,67 @@ A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_sc
 ### 常用排障命令
 
 ```sh
-# 看守护在不在
-pgrep -f "O3/guard\.sh"; pgrep -f "O3/camera_freq_guard\.sh"
+# 看守护在不在（⚠ pgrep -f 会把自己也算进去，加 [.] 规避）
+pgrep -f "O3/guard[.]sh"
 
 # 看三簇当前频率
 for c in 0 4 8; do
   echo "cpu$c: $(cat /sys/devices/system/cpu/cpu$c/cpufreq/scaling_min_freq)/$(cat /sys/devices/system/cpu/cpu$c/cpufreq/scaling_max_freq)"
 done
 
-# QoS 上下限（本机的真硬限）
+# ★ 看「哪个 preset 生效」的指纹（比 scaling_max_freq 更硬）
+for c in 0 4 8; do echo cpu$c pl=$(cat /sys/devices/system/cpu/cpu$c/cpufreq/xres/pl_max_freq); done
+
+# ★ 看落核（v12+ 是 cgroup 分组，不是逐线程 taskset）
+P=$(pidof com.tencent.mm); cat /proc/$P/cpuset
+ls /dev/cpuset/SceneO3Tuner/ 2>/dev/null
+
+# QoS 上下限（老节点的遗留值，只作参考）
 for c in 0 4 8; do
   echo "cpu$c qos: $(cat /sys/devices/system/cpu/cpu$c/qos/min_freq)/$(cat /sys/devices/system/cpu/cpu$c/qos/max_freq)"
 done
 
-# 谁在写频率（需要 root + strace）
+# 谁在写频率（需要 root + strace）—— 定位辅助调速器时用的就是这条
 strace -f -e trace=write -p "$(pidof scene-daemon)" 2>&1 | grep -i freq
 
-# 模块状态
+# 模块状态 / 配置完整性 / 日志
 sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh status
-
-# 配置完整性
 sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh audit
-
-# 日志
 tail -50 /data/adb/SceneO3Tuner/sceneo3.log
+
+# 后端命令可以直接在 shell 里试（WebUI 走的是同一套）
+W=/data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh
+sh $W launchables          # 列出「启动器能点开」的包（应用页过滤用的就是它）
+sh $W conf fas             # 读 Scene 的 FAS 调速器三值
+sh $W fasxres              # 一键设成 xres/xres/xres（写完自检 + 重启 scene-daemon）
 ```
+
+> ⚠ 停 Scene 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，**不要** `pkill -f scene-daemon`
+> —— `-f` 会连你自己的 shell 一起匹配，等于自杀。daemon 被 kill 后 4~8 秒会自己拉起。
 
 ### 离线自检
 
-仓库里的 Python 自检脚本**完全离线**，不需要设备：
+仓库里带一套**完全离线**的自检套件（在 `tools/` 下，**不需要设备**），改完代码按顺序跑：
 
 ```bash
-python test_camera_guard.py     # 相机档位逻辑：5 组、30+ 断言
-python lint_module.py           # 模块结构自检（脚本语法、页签/动作一一对应等）
+python tools/lint_module.py          # 模块结构自检
+python tools/test_camera_guard.py    # 相机档位逻辑
+bash   tools/test_sync_skip.sh       # 升级覆盖语义
+python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint）
 ```
 
-`test_camera_guard.py` 覆盖：
+| 命令 | 覆盖什么 | 规模 |
+|---|---|---|
+| `tools/lint_module.py` | `webui.sh` 函数不重复 / 分发表引用的命令都有实现 / `sh -n` 语法 / 页签与视图函数一一对应 / `data-act` 全覆盖 / 前端调的后端命令都存在 / `index.html` 无预览注入 | 8 组 |
+| `tools/test_camera_guard.py` | 相机档位逻辑（见下） | 6 组 |
+| `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
+| `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录） | — |
+
+> ⚠ `test_sync_skip.sh` 是**唯一**能验证「升级时保留 `threads*.json`」的地方 ——
+> 这条语义是**静默生效**的，写错了在设备上只表现为「某些文件莫名回退」，很难发现。
+> 它在**两种布局**下都能跑：开发树（模块在 `module/SceneO3Tuner/`）与本仓库（模块 = 仓库根）。
+
+`test_camera_guard.py` 覆盖（v7.0 时代逻辑，脚本已删但断言仍保留）：
 
 - 写入顺序必须「**先 min 后 max**」
 - 三簇**全覆盖**（专门断言 `set -- $LIST` + `shift` 的写法不出现 —— 这个 bug 真出现过）
@@ -724,6 +825,16 @@ python lint_module.py           # 模块结构自检（脚本语法、页签/动
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.0** | ★ **应用页默认只显示有前台界面的应用**（`cmd package query-activities` 取启动器可见包，487→169），避免把无界面的系统服务拉进来绑核；已配档位的包仍显示 + 可切「含无界面」 |
+| v15.1 | ★ **装完不用重启**：KSU 走到 `modules_update/` 待迁移时，`customize.sh` 收尾**自己就地合并**（本机 root 不允许重启）；顺带修 `powercfg.sh` 里 `/dev` 挂载后备目录随机名导致每次跑堆一个垃圾目录 |
+| v15.0 | ★ **升级即覆盖**：升级时直接覆盖 `profile.json`/`powercfg.sh`/`features/*.conf` 等，只保留 `threads*.json`（应用/游戏线程表），覆盖前自动备份 + 覆盖后重启 daemon + 收掉旧版遗留的 GPU 温控 bind-mount；游戏页新增「FAS 调速器 → 设为 xres」按钮 |
+| v14.0 | ★ FAS 调速器统一为 **xres**（`governor_*`，与「CPU 控制」页和 preset 三处一致）；反汇编证实 **FAS 候选是硬编码的**（本机只有 `auto/performance/conservative`）；**辅助调速器默认开启**（相机经 `_Camera.json` 的 `@limiter NONE` 豁免） |
+| v13.0 | 修应用页「线程档位」点不动（`data-act` 处理函数引用了已删函数）；`pickSheet` 取消哨兵改 `__cancel__`（NUL 会被 HTML 换成 U+FFFD） |
+| v12.0 | ★ **落核改 cgroup 分组**（新线程自动继承）；删「不接管」伪卡、极速档改名「系统接管」；相机频率偏低定位到「Scene 日用 app 辅助调速器」 |
+| v11.0 | 清空所有内置默认线程分配；**相机固定「系统接管」且 UI 禁改**；给 `*_inactive` preset 补 `pl_max_freq` |
+| v10.0 | ★ **档位与模式同名**、一次性从 Scene 导入、彻底去 GPU（`gpu_lock=0`）；删 `mode_sync` 那一整套实时推导 |
+| v9.0 | 线程改回模块自己落核（Scene 核心分配的组级预算会把各档位压平） |
+| v8.0 | 「零守护」尝试（失败，详见 §3.2 的预算压平结论） |
 | **v7.0** | ★ 相机守护功耗治理：QoS 只清一次、看护并入 `guard.sh`、兜底守护 **0-fork 稳态**、档位现读现用；新增离线自检 |
 | v6.4 | 修正三个方案包的 `_Camera.json`（4 参数签名 + 裸 sysfs + 先 min 后 max）；新增 `camera_freq_guard.sh` |
 | v6.3 | 相机频率取证；模板卡 ⓘ 紧跟名称、说明面板不再被裁 |
@@ -734,6 +845,17 @@ python lint_module.py           # 模块结构自检（脚本语法、页签/动
 | v4.2 | 调度配置 传递 / 备份 / 恢复 |
 | v3.x | WebUI 迭代；`threads.json` 生成；`enforce_threads.sh` 性能重写（上万 fork → 固定 5 次） |
 | v1~v2 | 线程绑核 MVP；早期用 `qos/*_freq` 限频（v6.1 已交回 Scene） |
+
+### 从 v7.0 到 v16.0 期间修正的几条**关键认知**（都推翻了当时的写法）
+
+1. **「模块不写频率 + 相机守护」→ 相机守护整套删除**。真根因是 Scene 的
+   「日用 app 辅助调速器」每秒多次写 `scaling_max_freq`（strace 8 次/秒），把前台压到 417~912MHz；
+   正解是在 `_Camera.json` 里对相机用 `["@limiter","NONE"]` 豁免。
+2. **逐线程 `taskset` → cgroup 分组**。关键收益不是快，而是**新线程自动继承创建者的 cgroup**。
+3. **「实时跟随 Scene 模式」→ 一次性导入**。实时推导会被 Scene 的任何一次改动冲掉。
+4. **FAS 调速器候选读不到内核**（硬编码），写 `fas.conf` 反而有效。
+5. **升级不能「继承」，要直接覆盖**：否则模块改了什么永远送不到设备上
+   （实测：Scene 侧 `powercfg.sh` 停在旧版好几天没人发现）。
 
 ---
 

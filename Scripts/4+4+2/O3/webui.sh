@@ -25,10 +25,13 @@
 #    profilepush | profilebackup | profilerestore | profilelist
 #                                  传递/备份/恢复/列出调度配置
 #    audit | fixall [scheme]        配置完整性审计（注错文件清单）/ 一键还原
-#    appmodes | syncmode          读 Scene 的「应用→模式」表 / 按它重建线程分配
+#    importscene                  从 Scene 一次性导入档位（不实时跟随）
+#    syncmode                     按当前档位表重建线程分配 + 全量落核
 #    ksufix                       删除 KSU 孤儿 update 标记（修复开关点不动）
 #    live                         让配置生效（轻量：校正开关 + 重启核心分配服务）
+#    fasxres                      把 Scene 的 FAS 调速器（features/fas.conf 三簇）统一为 xres
 #    apps                         应用清单（兜底用；正常路径走桥的 listPackages）
+#    launchables                  有前台界面（启动器能点开）的包清单 —— 应用页过滤用
 #    log [n] | daemonlog [n]      日志
 # ============================================================
 MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
@@ -175,6 +178,26 @@ cmd_b64() {   # $1=id $2=start(1-based) $3=len
 cmd_conf() {
     local p="${SCENE_DIR}/features/$1.conf"
     [ -f "$p" ] && cat "$p" || echo ""
+}
+
+# ============================================================
+#  「有前台界面」的包清单（应用页过滤用）
+# ------------------------------------------------------------
+#  判据：能响应 [MAIN + LAUNCHER] 的 Activity —— 也就是**启动器里能点开的应用**。
+#  为什么需要：`pm list packages` 那 480+ 个包里有一大半是**没有界面的系统服务/组件**
+#  （各种 xxx.provider / xxx.service），给它们绑核既没意义，还可能把系统服务限制坏。
+#  实测（本机）：487 个已装包 → 169 个有启动器入口。
+#
+#  ⚠ 输出必须剥掉前导空格：query-activities 的格式是
+#       "170 activities found:" + "  Activity #0:" + "    priority=..." + "    pkg/Act"
+#     只有最后一种带 `/`，所以按「有 `/` 的行」取第一段并去空白。
+#  ⚠ 拿不到（老版本无 `cmd package query-activities`）就输出空 —— 前端见到空会**不筛选**，
+#    宁可多显示，也不能让应用列表变空。
+cmd_launchables() {
+    cmd package query-activities --brief -a android.intent.action.MAIN \
+        -c android.intent.category.LAUNCHER 2>/dev/null \
+      | sed -n 's#^[[:space:]]*\([^/][^/]*\)/.*#\1#p' \
+      | sort -u
 }
 
 # ============================================================
@@ -383,69 +406,32 @@ cmd_appmodes() {
 #    实测多数情况能留住（它不会主动整份重写），若发现被回滚，去 Scene 里改一次即可。
 # ============================================================
 # ============================================================
-#  立即按 Scene 模式同步线程模板（应用页按钮）
+#  从 Scene 导入档位（v10）
 # ------------------------------------------------------------
-#  和守护里那套的区别：这里是**显式、立即、且落盘**——
-#    · 把「Scene 里显式设过模式」的应用，按 省电→light / 均衡→smooth /
-#      性能→perf / 极速→不覆盖 算出模板
-#    · 真正**改写 app_assign.tsv**（先备份，保留最近 3 份），
-#      所以即使之后关掉「模式同步线程」开关，表里的值也是刚同步过的
+#  把 Scene powercfg.xml 里「单独设过模式」的应用，按**同名档位**合并进
+#  app_assign.tsv —— powersave/balance/performance/fast 一一对应，不再查映射表。
+#    · 只覆盖 Scene 里显式设过模式的条目，其余条目原样保留（不整表重建）
+#    · 导入前备份分配表（保留最近 3 份）
 #    · 立刻重建 threads.json + 落核，不用等守护周期
-#  ⚠ 会覆盖这些应用原先手动套的模板 —— 所以先备份，并在输出里报出备份名。
+#  与旧 applymodes 的区别：旧版是「实时跟随」（Scene 一改模式线程就跟着漂，
+#  还会和手动套用打架）；新版是显式的一次性动作，用户不点就不动。
 # ============================================================
-cmd_applymodes() {
-    local asg="$APP_ASSIGN_FILE" ov="${TMPD}/mode_ov.tsv" merged="${TMPD}/app_asg.mat"
-    mkdir -p "$TMPD" 2>/dev/null
-    mode_sync_assign > "$ov" 2>/dev/null
-    local n; n=$(grep -c . "$ov" 2>/dev/null); n=${n:-0}
+cmd_importscene() {
+    local asg="$APP_ASSIGN_FILE"
+    mkdir -p "$TMPD" "${STATE_DIR}/backup" 2>/dev/null
 
-    settings_load
-    if [ "$SET_MODE_SYNC" != "1" ]; then
-        echo "ERR 「模式同步线程」开关未开启 —— 请先在「应用」页上方打开它，再点这个按钮"
-        return 1
-    fi
-    if [ "$n" -eq 0 ]; then
-        echo "OK 没有需要跟随的应用（Scene 里没有任何应用单独设过 省电/均衡/性能/极速）"
-        return 0
+    if [ -f "$asg" ]; then
+        cp -f "$asg" "${STATE_DIR}/backup/app_assign.$(date '+%H%M%S').tsv" 2>/dev/null
+        ls -1t "${STATE_DIR}/backup/"app_assign.*.tsv 2>/dev/null \
+          | tail -n +4 | while IFS= read -r f; do rm -f "$f" 2>/dev/null; done
     fi
 
-    # 合并：手动表里已有的包改成模式映射值；表里没有的**只**追加「真能匹配到的目标」。
-    #  ⚠ Scene 的 powercfg.xml 里混着 Activity 名（xxx.CaptureActivity / xxx.BaseScanUI），
-    #    它们不是包名、也不含 ":"，enforce_threads.sh 按进程名匹配永远命中不了 ——
-    #    写进分配表只会让 threads.json 与「不接管」列表虚胖，所以一律不追加。
-    installed_pkgs > "${TMPD}/inst.txt" 2>/dev/null
-    awk -F'\t' -v OV="$ov" -v ASG="$asg" -v INST="${TMPD}/inst.txt" '
-      BEGIN {
-        while ((getline l < INST) > 0) { if (l != "") INS[l] = 1 }
-        close(INST)
-        while ((getline l < OV) > 0) {
-          if (l == "") continue
-          k = split(l, f, "\t"); if (f[1] != "" && f[2] != "") ovr[f[1]] = f[2]
-        }
-        close(OV)
-        while ((getline l < ASG) > 0) {
-          if (l == "" || l ~ /^#/) continue
-          k = split(l, f, "\t"); if (f[1] == "") continue
-          if (f[1] in ovr) { printf "%s\t%s\n", f[1], ovr[f[1]]; done[f[1]] = 1; continue }
-          printf "%s\n", l
-        }
-        close(ASG)
-        for (p in ovr) {
-          if (p in done) continue
-          if (!(p in INS) && index(p, ":") == 0) continue     # Activity 名/未安装包 → 不追加
-          printf "%s\t%s\n", p, ovr[p]
-        }
-      }' > "$merged" 2>/dev/null
-
-    [ -s "$merged" ] || { rm -f "$merged"; echo "ERR 生成新分配表失败"; return 1; }
-    printf '\n' >> "$merged"        # 保证结尾换行（否则 while read 会丢掉最后一行）
-    write_replace "$merged" "$asg" || { rm -f "$merged"; echo "ERR 写入 app_assign.tsv 失败"; return 1; }
-    rm -f "$merged" 2>/dev/null
-    chmod 0666 "$asg" 2>/dev/null
+    local r; r=$(import_scene_apply app)
+    case "$r" in ERR*) echo "$r"; return 1 ;; esac
 
     local so; so=$(gen_threads_from_scene 2>&1)
     sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
-    echo "OK 已按 Scene 模式把 ${n} 个应用的线程模板改到对应档"
+    echo "$r"
     echo "   ${so}"
 }
 
@@ -488,26 +474,26 @@ cmd_setappmode() {
     fi
     rm -f "$bak" 2>/dev/null
 
-    # ⚠ 刻意**不**重启 scene-daemon：实测它不会读到新值，却要等 4~8 秒才起来 ——
-    #   那就是「点一下标签要等好几秒」的元凶。我们的落核器是直接读 powercfg.xml 的，
-    #   不依赖 daemon；只重建 threads.json + 对该包做一次定向落核即可（毫秒级）。
+    # ⚠ 刻意**不**重启 scene-daemon：它读到新值的时机不可控，重启还要等好几秒 ——
+    #   那就是「点一下标签要等好几秒」的元凶。
+    #   注意：这里改的是 **Scene 的频率档位**（powercfg.xml），不是模块的线程档位。
+    #   v10 起模块线程档位由 app_assign.tsv 自持，落核器不再读 powercfg.xml，
+    #   所以改完只需重建展示用的 threads.json + 落核一次（毫秒级）。
     local so; so=$(gen_threads_from_scene 2>&1)
     sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" "$pkg" >/dev/null 2>&1 &
     echo "OK 已把 ${pkg} 设为 Scene「${mode}」｜${so}"
 }
 
 cmd_syncmode() {
+    # 「重建线程分配」：按当前 app_assign.tsv / game_assign.tsv 重生成 threads.json
+    #   （Scene 界面用的展示副本）并全量落核一次。
+    #   ⚠ 刻意**不重启 scene-daemon**：重启只是白等好几秒（甚至触发完整重绑），
+    #     而落核本来就是我们自己做的，跟 daemon 无关。
     local so; so=$(gen_threads_from_scene 2>&1) || { echo "$so"; return 1; }
-    case "$so" in
-      *"保留 Scene 默认"*) echo "$so"; return 0 ;;
-    esac
-    # ⚠ 刻意**不重启 scene-daemon**：实测 Scene 根本不读我们写的 threads.json，
-    #   重启只是白等好几秒（甚至触发完整重绑），落核本来就是我们自己做的。
     sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
     echo "$so"
 }
 
-# 只落核（不重建规则）：前端/手动可用
 cmd_enforce() { sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" 2>&1; echo "OK 已按模板落核"; }
 
 # ============================================================
@@ -590,7 +576,6 @@ cmd_topo() {
 
 cmd_games() {
   seed_game_templates
-  fix_tpl_labels "$GAME_TPL_FILE"
   local gp="${TMPD}/gp.txt" pm="${TMPD}/pm.txt" asg="$GAME_ASSIGN_FILE" tpl="$GAME_TPL_FILE"
   mkdir -p "$TMPD" 2>/dev/null
   scene_games > "$gp" 2>/dev/null
@@ -628,7 +613,6 @@ cmd_games() {
 
 cmd_apps_tpl() {
   seed_app_templates
-  fix_tpl_labels "$APP_TPL_FILE"
   local asg="$APP_ASSIGN_FILE" tpl="$APP_TPL_FILE" pm="${TMPD}/apm.txt" gp="${TMPD}/gp.txt"
   mkdir -p "$TMPD" 2>/dev/null
   scene_pkg_modes > "$pm" 2>/dev/null
@@ -681,11 +665,7 @@ cmd_apps_tpl() {
           printf "EXTRA=%s\t%s\n", k, v
       }' "$SCENE_POWERCFG" 2>/dev/null
   fi
-  # 模式 → 线程模板 映射（开关开启时生效）：省电→light 均衡→smooth 性能→perf 极速→不覆盖
-  echo "MODE2TPL_powersave=light"
-  echo "MODE2TPL_balance=smooth"
-  echo "MODE2TPL_performance=perf"
-  echo "MODE2TPL_fast="
+  # 注：v10 起档位 id 与模式同名，前端不再需要 MODE2TPL_* 映射表
   echo "APP_TPL_HAS=$([ -f "$APP_TPL_FILE" ] && echo 1 || echo 0)"
   echo "APP_ASSIGNED=$(awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/ {n++} END{print n+0}' "$APP_ASSIGN_FILE" 2>/dev/null)"
 }
@@ -799,6 +779,60 @@ cmd_freqs() {
     echo "HWMAX_P=$(hwmax 8)"
 }
 
+# ============================================================
+#  Scene 的 FAS 调速器：一键统一为 xres（游戏页的按钮）
+# ------------------------------------------------------------
+#  为什么需要这个按钮：
+#    · O3 三簇**实际只有** xres / conservative / powersave / performance / schedutil，
+#      且「CPU 控制」页默认值、profile.json 各模式 preset（12 处）都是 xres；
+#    · 但 Scene 的「FAS 调速器」候选是**它 APK 里硬编码的**（O3 上只有
+#      auto / performance / conservative —— 反汇编 a.sq0.d() 得到），UI 里选不到 xres，
+#      于是「FAS/FEAS 工作期间」这几簇的调速器就可能不是 xres，与其余三处不一致；
+#    · Scene 不校验写入值（实测写 xres 后重启 daemon 被原样保留），所以直接写文件有效。
+#  动作：features/fas.conf 的 governor_{little,middle,prime} → xres，然后重启 scene-daemon
+#        （这几个键它只在启动时读一次，不重启不生效）。
+#  ⚠ 副作用与 customize.sh 的 e) 步一致：FAS 运行期间改用 xres 调速，属既定设计。
+cmd_fasxres() {
+    local f="${SCENE_DIR}/features/fas.conf"
+    [ -f "$f" ] || { echo "ERR 找不到 features/fas.conf（Scene 目录不可读？）"; return 1; }
+
+    # 读现三值（分开读是为了回显能写成 小/中/大，而不是含糊的一串）
+    local ol om op
+    ol=$(sed -n 's/^governor_little=//p' "$f" 2>/dev/null | head -1)
+    om=$(sed -n 's/^governor_middle=//p' "$f" 2>/dev/null | head -1)
+    op=$(sed -n 's/^governor_prime=//p'  "$f" 2>/dev/null | head -1)
+
+    local tmp="${TMPD}/fas.conf.new"
+    awk -F= -v OFS='=' '
+        /^governor_little=/ { $2="xres"; a=1 }
+        /^governor_middle=/ { $2="xres"; b=1 }
+        /^governor_prime=/  { $2="xres"; c=1 }
+        { print }
+        END {
+            if(!a) print "governor_little=xres"
+            if(!b) print "governor_middle=xres"
+            if(!c) print "governor_prime=xres"
+        }
+    ' "$f" > "$tmp" 2>/dev/null || { echo "ERR 生成新 fas.conf 失败"; return 1; }
+    # 先自检：行数不能变少、必须三条 governor_ 都在（防 awk 把文件写坏）
+    local n_old n_new
+    n_old=$(grep -c . "$f" 2>/dev/null); n_new=$(grep -c . "$tmp" 2>/dev/null)
+    if [ "${n_new:-0}" -lt "${n_old:-0}" ] || [ "$(grep -c '^governor_' "$tmp" 2>/dev/null)" -lt 3 ]; then
+        rm -f "$tmp"; echo "ERR 新内容自检未过（行数 $n_old→$n_new），已放弃写入"; return 1
+    fi
+    if ! write_replace "$tmp" "$f"; then rm -f "$tmp"; echo "ERR 写回 fas.conf 失败"; return 1; fi
+    perm_file "$f"
+    rm -f "$tmp"
+
+    local nl nm np
+    nl=$(sed -n 's/^governor_little=//p' "$f" 2>/dev/null | head -1)
+    nm=$(sed -n 's/^governor_middle=//p' "$f" 2>/dev/null | head -1)
+    np=$(sed -n 's/^governor_prime=//p'  "$f" 2>/dev/null | head -1)
+    restart_scene_daemon >/dev/null 2>&1
+    log_quiet "fasxres: ${ol:-?}/${om:-?}/${op:-?} -> ${nl:-?}/${nm:-?}/${np:-?}"
+    echo "OK FAS 调速器已设为 ${nl:-?}/${nm:-?}/${np:-?}（原 ${ol:-?}/${om:-?}/${op:-?}）· scene-daemon 已重启"
+}
+
 cmd_log(){ tail -n "${1:-40}" "$LOG_FILE" 2>/dev/null; }
 cmd_daemonlog(){
     local n="${1:-30}"
@@ -837,7 +871,7 @@ case "$1" in
   modeset)       cmd_modeset "$2" ;;
   appmodes)      cmd_appmodes ;;
   setappmode)    shift; cmd_setappmode "$1" "$2" ;;
-  applymodes)    cmd_applymodes ;;
+  importscene)   cmd_importscene ;;
   syncmode)      cmd_syncmode ;;
   enforce)       cmd_enforce ;;
   # CPU 调频已交回 Scene 接管；下面两条只做「清理 v2 遗留 QoS 值」的幂等动作
@@ -845,10 +879,16 @@ case "$1" in
   freqrestore)   sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --restore 2>&1; echo "OK 频率由 Scene 接管（已恢复不限频）" ;;
   # 只落核指定的几个包：前端「套用到所选」之后立刻生效用，比全量快得多
   enforcep)      shift; sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" "$@" >/dev/null 2>&1; echo "OK 已落核 $# 个应用" ;;
+  # 「极速」档 = 不绑核 → 切档后要把它从旧绑核里放出来（还原到 cgroup 预算）
+  unbindfast)    sh "$MODDIR/Scripts/4+4+2/O3/unbind_fast.sh" 2>&1 ;;
   ksufix)        cmd_ksufix ;;
   live)          cmd_live ;;
   apps)          cmd_apps ;;
   freqs)         cmd_freqs ;;
+  # 应用页过滤：有前台界面（启动器能点开）的包清单
+  launchables)   cmd_launchables ;;
+  # 游戏页按钮：把 Scene 的 FAS 调速器（features/fas.conf 三簇）统一成 xres
+  fasxres)       cmd_fasxres ;;
   log)           cmd_log "$2" ;;
   daemonlog)     cmd_daemonlog "$2" ;;
   *) echo "err: unknown command '$1'"; exit 1 ;;

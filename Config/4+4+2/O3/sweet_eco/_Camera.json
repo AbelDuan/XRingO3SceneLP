@@ -2,102 +2,150 @@
   "friendly": "相机",
   "call": [
     [
-      "@limiter",
-      "NONE"
-    ],
-    [
       "@preset",
       "cpu_on"
     ]
   ],
-  "state": {
-    "active": [
-      [
-        "@cpu_freq",
-        "cpu0",
-        "672000",
-        "2246400"
+  "modes": [
+    {
+      "mode": [
+        "powersave"
       ],
-      [
-        "@cpu_freq",
-        "cpu4",
-        "835200",
-        "2294400"
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "balance"
       ],
-      [
-        "@cpu_freq",
-        "cpu8",
-        "1497600",
-        "2860800"
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "performance"
       ],
-      [
-        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq",
-        "672000"
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "fast"
       ],
-      [
-        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_min_freq",
-        "835200"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu8/cpufreq/scaling_min_freq",
-        "1497600"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
-        "2246400"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq",
-        "2294400"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq",
-        "2860800"
-      ]
-    ],
-    "inactive": [
-      [
-        "@cpu_freq",
-        "cpu0",
-        "672000",
-        "2246400"
-      ],
-      [
-        "@cpu_freq",
-        "cpu4",
-        "835200",
-        "2294400"
-      ],
-      [
-        "@cpu_freq",
-        "cpu8",
-        "1497600",
-        "2860800"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_min_freq",
-        "672000"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_min_freq",
-        "835200"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu8/cpufreq/scaling_min_freq",
-        "1497600"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu0/cpufreq/scaling_max_freq",
-        "2246400"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu4/cpufreq/scaling_max_freq",
-        "2294400"
-      ],
-      [
-        "/sys/devices/system/cpu/cpu8/cpufreq/scaling_max_freq",
-        "2860800"
-      ]
-    ]
-  }
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    }
+  ]
 }

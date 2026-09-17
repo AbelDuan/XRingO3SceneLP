@@ -2,7 +2,7 @@
 # ============================================================
 #  切换 / 落地方案   (v2 · 实测校正版)
 #  用法: set_scheme.sh <sweet_eco|sweet_bal|sweet_perf> [quiet]
-#  可选: set_scheme.sh lock | unlock | restore
+#  可选: set_scheme.sh repair | restore
 # ============================================================
 MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
 . "$MODDIR/lib/util.sh"
@@ -12,23 +12,13 @@ QUIET="$2"
 
 # ---------- 前置：Scene 数据目录必须可进入 ----------
 # 目录缺 owner 执行位会导致 Scene 无法访问自己的配置，直接卡在启动 splash。
-# 任何动作（含 lock/unlock）前都先自愈一次。
+# 任何动作前都先自愈一次。
 ensure_scene_dir_perm
 
-# ---------- 锁定 / 解锁：已废除（2026-09-15）----------
-# ⚠ chattr +i 会让 **Scene 自己存不下配置** —— 用户在 Scene 里点小齿轮改特性、
-#   切全局/单应用模式时，写 features/*.conf 与 profile.json 会 ENOTSUP 失败，
-#   现象就是「改了没反应」。本机型云端并无对应配置，没有防替换的必要，
-#   所以彻底不再加锁。
-#   保留 lock / unlock 这两个词是为了兼容旧入口（音量键菜单、switch.sh），
-#   它们现在都等价于「修复可写性」。
-if [ "$ACTION" = "lock" ] || [ "$ACTION" = "unlock" ]; then
-    r=$(repair_scene_writable)
-    unlock_scene_all >/dev/null 2>&1
-    log "✅ 锁定机制已废除 → 已改为「确保配置可写」($r)；Scene 内可自由调整"
-    [ -z "$QUIET" ] && echo "✅ 配置已解锁且可写（Scene 内可自由调整）"
-    exit 0
-fi
+# ---------- 修复可写性 ----------
+# 注：lock / unlock 两个动作已随锁定机制一起删除（2026-09-15）——
+#     chattr +i 会让 Scene 自己存不下配置（写 features/*.conf / profile.json
+#     会 ENOTSUP，表现是「在 Scene 里改了没反应」）。现在唯一的动作是 repair。
 if [ "$ACTION" = "repair" ]; then
     r=$(repair_scene_writable)
     unlock_scene_all >/dev/null 2>&1

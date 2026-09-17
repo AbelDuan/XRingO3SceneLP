@@ -78,12 +78,34 @@ pkg_in_targets() {
 #   1) 那里面混着本模块自己 fork 出来的进程（sh / resetprop / busybox / zn-*），
 #      它们每次调用都在变 → 几乎每轮都误判「前台换过」，白跑一次完整落核（功耗翻几倍）；
 #   2) 它只能告诉你「一组进程」，无法回答「现在前台是哪个应用」，而频率要按应用定。
+#
+# ⚠⚠ 2026-09-17 真机修正（本函数曾经**恒返回空**，导致落核从来没跑过）：
+#    `dumpsys window` 里会出现**多行** `mCurrentFocus`，而且**第一行是 `null`**
+#    （非默认 display 的占位行）。旧写法 `grep -m1 mCurrentFocus` 恰好取到那个
+#    null → `FG=""` → `pkg_in_targets ""` 为假 → `enforce_threads.sh` 永不执行。
+#    真机实测（lhasa / 2608BPX34C）同一份 dump：
+#        mCurrentFocus=null
+#        ...
+#        mCurrentFocus=Window{92e4e34 u0 com.omarea.vtools/...}   ← 真实焦点在下面
+#    修法两条：
+#      1) 跳过所有 `=null` 的行，取**第一个非 null** 的；
+#      2) 解析改用内建 `while read` + `case`，顺带省掉 grep 的一次 fork
+#         （本机一次 fork 约 10~40ms，是亮屏功耗主因）。
 fg_pkg() {
-    local line pkg
-    line=$(dumpsys window 2>/dev/null | grep -m1 mCurrentFocus)
-    case "$line" in
+    local l pkg fg=""
+    fg=$(dumpsys window 2>/dev/null | {
+        while IFS= read -r l; do
+            case "$l" in
+              *"mCurrentFocus="*)
+                case "$l" in *"=null"*) continue ;; esac
+                printf '%s' "$l"; break
+                ;;
+            esac
+        done
+    })
+    case "$fg" in
       *"Window{"*)
-        pkg="${line##* }"; pkg="${pkg%%/*}"; pkg="${pkg##* }"
+        pkg="${fg##* }"; pkg="${pkg%%/*}"; pkg="${pkg##* }"
         case "$pkg" in *.*) printf '%s' "$pkg" ;; *) printf '' ;; esac
         ;;
       *) printf '' ;;
@@ -135,7 +157,8 @@ while :; do
     #  · 每 24 轮（120s）兜底一次全量：万一有进程被外部改了亲和性，最多 2 分钟自愈
     if [ "$on" = "1" ]; then
         FG=$(fg_pkg)
-        # 相机前台标记（纯字符串匹配，0 子进程）——相机档位看护要用
+        # 相机前台标记（纯字符串匹配，0 子进程）——曾用于相机档位看护，v12 起
+        # 该功能已移除；保留这个变量只为了前台识别时不被相机包名干扰
         case "$FG" in
           *camera*|*cameramind*) FG_CAM=1 ;;
           *)                     FG_CAM=0 ;;
@@ -200,28 +223,22 @@ while :; do
             sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
         fi
 
-        # ---- 6) 相机档位看护 ----
-        #   本机相机有个「冲高 → 回落 → 严重限频」的三段式问题，根因在 Scene 的
-        #   _Camera.json（详见 camera_freq_guard.sh 头部）。这里做的是**最省事的那一半**：
-        #   · 相机在前台时，值不对就写回相机档位（先 min 后 max）
-        #   · 但先跑一次原生「清 QoS 残留」：
-        #       一个字节都没写 → 上界已是硬件最高 → 写它的是 Scene 自己，
-        #                         我们绝不覆盖（交权 Scene，这也是当初的约定）
-        #       写了               → 上界是**我们模块自己**留下的 → 写回相机档位
-        #   ⚠ 为什么放在这里而不是单开一个守护进程：本函数所在的分支**只在前台
-        #     切换时**进入，也就是「进入相机的这一刻」正好天然命中；其余时间
-        #     （包括整个相机期间）一次都不会跑。常驻轮询没有存在的必要。
-        #     QOS_CLEARED 那个门闸保证「清残留」这件事全模块只发生一次。
-        if [ "$FG_CAM" = "1" ] && ! camera_band_ok; then
-            s=$(sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" 2>/dev/null | tail -1)
-            case "$s" in
-              *"未写任何节点"*)
-                log_quiet "📷 相机频率不对但 Scene 正在接管 → 不覆盖" ;;
-              *)
-                W=$(camera_band_fix)
-                [ "$W" -gt 0 ] && log "📷 相机档位校正（模块自身造成，写入 $W 个节点）" ;;
-            esac
-        fi
+        # ---- 6) 相机档位看护：**已移除（v12，2026-09-17）** ----
+        #   它原本是 v7 的 workaround，修的是「Scene 的 _Camera.json 里 @cpu_freq
+        #   签名错（5 参数）导致相机态 min==max 区间塌缩」。当时的做法是模块
+        #   自己把档位写回 sysfs —— 但那与「CPU 频率交回 Scene」的约定是矛盾的。
+        #
+        #   现在根因已经在源头修掉：
+        #     · 新的 _Camera.json 里**一个 @cpu_freq 都没有**，全部改引用
+        #       profile.json 的 fast_active（合法 4 参数签名）→ 塌缩的成因结构性消失；
+        #     · 相机固定走 fast 档 + 关掉 Scene 的「日用 app 辅助调速器」，
+        #       实测打开相机 cpu0 稳定 1.5~2.9GHz（修前是 557056 单点锁死）。
+        #   继续留着这段的坏处很实在：camera_freq_load() 在新结构下读不到档位，
+        #   会退回内置兜底表，于是**每次打开相机都往 sysfs 写 3 个节点**
+        #   （日志里那串「📷 相机档位校正」），等于模块还在抢频率。
+        #
+        #   camera_freq_guard.sh / apply_freq.sh 仍保留在原位，仅作**手动应急工具**，
+        #   开机与守护都不再拉起。
 
         # ---- 7) 频率：**不再由本模块处理** ----
         #   CPU 调频权限已交回 Scene（profile.json 的 <mode>_active/inactive @cpu_freq）。

@@ -26,7 +26,6 @@ MODDIR="${MODDIR:-${0%/*}}"
 
 STATE_DIR="/data/adb/SceneO3Tuner"
 ACTIVE_FILE="${STATE_DIR}/active_scheme"
-UNLOCK_FILE="${STATE_DIR}/unlocked"
 LOG_FILE="${STATE_DIR}/sceneo3.log"
 mkdir -p "$STATE_DIR" 2>/dev/null
 
@@ -46,21 +45,21 @@ mkdir -p "$TMPD" "$WEBUI_DIR" 2>/dev/null
 #    · log()        → **始终**回显（WebUI 命令的输出要靠它），只在开关打开时落盘
 #    · log_quiet()  → 只落盘，开关关闭时完全不写
 #  默认「开」：首次安装/升级后仍能拿到完整日志，用户可在 WebUI「日志」页一键关掉。
-SET_MODE_SYNC=""; SET_FREQ_SYNC="0"; SET_DEBUG="1"; LOG_ON=1
+SET_FREQ_SYNC="0"; SET_DEBUG="1"; LOG_ON=1
 
 # 读 settings.conf。用 shell 内建 read 循环而不是 sed：
 #   · 不起子进程（sed 每次约 5ms，守护每轮都要读）
 #   · 一次读出全部键，避免多处各自 grep 一遍
 settings_load() {
-    SET_MODE_SYNC=""; SET_FREQ_SYNC="0"; SET_DEBUG="1"
+    SET_FREQ_SYNC="0"; SET_DEBUG="1"
     local line
     if [ -f "${WEBUI_DIR}/settings.conf" ]; then
         while IFS= read -r line; do
             case "$line" in
-              mode_sync=*)    SET_MODE_SYNC="${line#*=}" ;;
-              # ⚠ CPU 调频已按用户要求**交回 Scene 接管**（模块不写任何频率节点）。
-              #   这个键现在恒为 0，只用于模块卡片描述里如实标注状态；
-              #   历史 settings.conf 里残留的 freq_sync=1 一律忽略（否则会误报「频率同步 开」）。
+              # ⚠ v10 起**没有 mode_sync 了**：线程档位由 app_assign.tsv 自持，
+              #   与 Scene 的关系改成「点一次『从 Scene 导入』」。历史 settings.conf
+              #   里残留的 mode_sync=1 一律忽略 —— 否则又会退回
+              #   「在 Scene 改一下模式，线程分组就跟着漂」的老问题。
               debug=*)        SET_DEBUG="${line#*=}" ;;
             esac
         done < "${WEBUI_DIR}/settings.conf"
@@ -81,14 +80,13 @@ update_module_desc() {
     [ -f "$prop" ] || return 0
     settings_load
 
-    local scene dyn freq guard logv desc old tmp
+    local scene guard logv desc old tmp
     if [ "$(scene_source_get)" = "$SCENE_SOURCE_WANT" ]; then scene="已启用"; else scene="未启用"; fi
-    [ "${SET_MODE_SYNC:-0}" = "1" ] && dyn="开" || dyn="关"
-    [ "${SET_FREQ_SYNC:-0}" = "1" ] && freq="本模块" || freq="Scene 接管"
     [ "${SET_DEBUG:-1}" = "1" ] && logv="开" || logv="关"
     if pgrep -f "O3/guard\.sh" >/dev/null 2>&1; then guard="运行中"; else guard="停止"; fi
 
-    desc="功能状态｜Scene 配置 ${scene} · 自动切换 ${dyn} · 频率同步 ${freq} · 守护 ${guard} · 日志 ${logv}"
+    # v10 分工：线程 = 本模块逐线程落核（档位自持）；频率 = Scene 下发（模块提供图形化调整）
+    desc="功能状态｜Scene ${scene} · 线程 cgroup落核 · 频率 Scene 下发 · 守护 ${guard} · 日志 ${logv}"
 
     old=$(sed -n 's/^description=//p' "$prop" 2>/dev/null | head -1)
     [ "$old" = "$desc" ] && return 0
@@ -488,9 +486,13 @@ validate() {   # $1=id  $2=file —— 输出空串=通过
     esac
     case "$id" in
       threads)
+        # ⚠ 空数组（[]）是**合法结果**：把全部档位分配清空后，生成的就是它。
+        #   不豁免的话「重建线程分配」会一直报「过小、疑似截断」而拒绝落盘。
+        if [ "$(tr -d ' \t\r\n' < "$f" 2>/dev/null)" != "[]" ]; then
         [ "${sz:-0}" -ge 200 ] || { echo "threads.json 仅 ${sz} 字节，过小，疑似截断"; return 1; }
         grep -q '"friendly"' "$f" || { echo "threads.json 缺 friendly 字段"; return 1; }
         grep -q '"packages"' "$f" || { echo "threads.json 缺 packages 字段"; return 1; }
+        fi
         ;;
       games)
         [ "${sz:-0}" -ge 200 ] || { echo "_Games.json 仅 ${sz} 字节，过小，疑似截断"; return 1; }
@@ -509,6 +511,29 @@ validate() {   # $1=id  $2=file —— 输出空串=通过
     return 0
 }
 
+# ---------- 同步时「一律不覆盖」的文件清单 ----------
+#   用户 2026-09-17 定下的升级语义：**升级时其余配置一律直接覆盖，只保留「应用 / 游戏」这类配置**。
+#   清单里的两个文件就是「应用 / 游戏」的线程配置本身：
+#     · threads.json        —— 应用（一般 APP）的线程档位表
+#     · threads_games.json  —— 游戏的线程档位表
+#   为什么不覆盖它们：
+#     ① 真值在**模块状态目录**的 app_assign.tsv / app_templates.tsv（安装从不碰它），
+#        这两份只是模块生成给 Scene 界面看的快照；
+#     ② 模块 Config/ 里带的是**打包那天**的旧快照 —— 拿它去覆盖，等于把设备上
+#        最新的分配倒退回去（Scene 界面会显示错，若哪天核心分配再打开还会用错 cpuset）。
+#   ⚠ 不在此清单、因而**会被覆盖**的 `_Apps.json` / `_Games.json` / `_ELP.json` 看着名字像
+#     「应用/游戏配置」，其实是**模块自己的设计**：分组的 模式 → preset / 频率(call) 映射，
+#     且 `_Games.json` 三个方案包各不相同（跟着 fas.freq/频率走）→ 必须跟方案一起更新。
+#   ⚠ 想让它们（以及被保留的线程表）也重灌：`SYNC_SKIP= sync_scheme "$src"` ——
+#     注意是 `-` 不是 `:-`，置空串才真的等于「不跳过任何文件」。
+SYNC_SKIP="${SYNC_SKIP-threads.json threads_games.json}"
+sync_skip() {   # $1=文件 basename；返回 0 = 该跳过
+    case " ${SYNC_SKIP} " in
+      *" $1 "*) return 0 ;;
+    esac
+    return 1
+}
+
 # ---------- 方案同步（Scene 配置目录）----------
 sync_scheme() {
     local src="$1"
@@ -524,6 +549,7 @@ sync_scheme() {
     for s in "$src"/*.json "$src"/*.sh "$src"/*.txt; do
         [ -f "$s" ] || continue
         b="${s##*/}"
+        sync_skip "$b" && continue
         d="${SCENE_DIR}/${b}"
         # 用 write_replace（替换 inode）而不是 cp -af：
         # 个别 inode 会拒写（ENOTSUP），cp -f 遇 open 失败时会 unlink 重建，才能落地。
@@ -535,6 +561,7 @@ sync_scheme() {
         for s in "$src/features"/*.conf; do
             [ -f "$s" ] || continue
             b="${s##*/}"
+            sync_skip "$b" && continue
             d="${SCENE_DIR}/features/${b}"
             write_replace "$s" "$d" && n=$((n+1))
             fix_perm "$d" "$uid"
@@ -609,6 +636,8 @@ verify_synced() {   # $1=方案源目录
     for f in profile.json manifest.json _Apps.json _Games.json _Camera.json _ELP.json powercfg.sh; do
         [ -f "${src}/${f}" ] || continue
         [ -f "${SCENE_DIR}/${f}" ] || continue
+        # 被 SYNC_SKIP 排除的文件本来就该和源不一致，跳过比对
+        sync_skip "$f" && continue
         if [ "$(md5of "${src}/${f}")" != "$(md5of "${SCENE_DIR}/${f}")" ]; then
             echo "同步后 ${f} 与源 md5 不一致"; return
         fi
@@ -685,10 +714,11 @@ mode_freq() {
     case "$1:$2" in
       powersave:active)     echo "417792 1353600 556800 1468800 1113600 2044800" ;;
       powersave:inactive)   echo "417792 1065600 556800 1142400 1113600 2044800" ;;
-      balance:active)       echo "417792 1939200 556800 1968000 1113600 2371200" ;;
-      balance:inactive)     echo "417792 1785600 556800 1804800 1113600 2198400" ;;
-      performance:active)   echo "672000 2246400 835200 2294400 1497600 2860800" ;;
-      performance:inactive) echo "672000 2092800 835200 2131200 1497600 2707200" ;;
+      # ⚠ 与 sweet_bal/profile.json 的 @cpu_freq 保持一致（cpu4 = Premium 天花板）
+      balance:active)       echo "417792 1939200 556800 2419200 1113600 2371200" ;;
+      balance:inactive)     echo "417792 1785600 556800 2131200 1113600 2198400" ;;
+      performance:active)   echo "672000 2246400 835200 3148800 1497600 2860800" ;;
+      performance:inactive) echo "672000 2092800 835200 2668800 1497600 2707200" ;;
       fast:active)          echo "912000 3148800 1142400 3686400 2044800 4358400" ;;
       fast:inactive)        echo "912000 2860800 1142400 3148800 2044800 3648000" ;;
       *)                    echo "" ;;
@@ -939,17 +969,55 @@ restore_stock_freq() {
 #     {p2_core} = (空)    只有 4 层 SOC 才有第二级中核
 #     {p_core}  = 4-9     中核 ∪ 大核
 #     {hp_core} = 8-9     最高频层（超大核）
+#     {lead_core}= 随当前模式变的「主力核」（见下）
 #     {all_core}= 0-9     全部
 # ============================================================
+
+# ── {lead_core}：当前模式下的「主力核」（2026-09-17 新增）──────────────────
+#  背景（极客湾实测 + 本机 profile 佐证）：
+#    · C1-Ultra(cpu8-9) **只在 >2.2GHz 才有能效优势**，低频段反而最差，
+#      而且**只有 2 个核** —— 把主线程/渲染线程直接绑上去是错的：
+#      若该簇被压在低频，主线程会卡在「名义最强、实际最慢」的核上。
+#    · C1-Premium(cpu4-7) 有 4 个核，且覆盖中间频段（能效甜点），
+#      是**中高负载真正的主力**。
+#  所以按「当前默认模式」决定主力核：
+#      省电 / 均衡 / 性能 → 4-7（Premium 4 核）
+#      极速               → 8-9（此时 Ultra 常驻 >2.2GHz，才划算）
+#  结果缓存到 CPU_LEAD_CACHE：6 个占位符只会触发一次模式查询。
+CPU_LEAD_CACHE=""
+cpu_lead_core() {
+    if [ -z "$CPU_LEAD_CACHE" ]; then
+        case "$(scene_default_mode 2>/dev/null)" in
+          performance|fast) CPU_LEAD_CACHE="8-9" ;;
+          *)                CPU_LEAD_CACHE="4-7" ;;
+        esac
+    fi
+    echo "$CPU_LEAD_CACHE"
+}
+
+# 零 fork 版：结果写进全局 CPU_LEAD_CACHE / SEM_VAL
+cpu_lead_core_read() {
+    if [ -z "$CPU_LEAD_CACHE" ]; then
+        scene_mode_def_read          # → SCENE_MODE_DEF（已存在的零 fork 版）
+        case "$SCENE_MODE_DEF" in
+          performance|fast) CPU_LEAD_CACHE="8-9" ;;
+          *)                CPU_LEAD_CACHE="4-7" ;;
+        esac
+    fi
+    SEM_VAL="$CPU_LEAD_CACHE"
+    return 0
+}
+
 cpu_semantic() {   # $1=占位符名 -> 核号表达式
     case "$1" in
-      e_core)   echo "0-3" ;;
-      p1_core)  echo "4-7" ;;
-      p2_core)  echo "" ;;
-      p_core)   echo "4-9" ;;
-      hp_core)  echo "8-9" ;;
-      all_core) echo "0-9" ;;
-      *)        echo "" ;;
+      e_core)    echo "0-3" ;;
+      p1_core)   echo "4-7" ;;
+      p2_core)   echo "" ;;
+      p_core)    echo "4-9" ;;
+      hp_core)   echo "8-9" ;;
+      lead_core) cpu_lead_core ;;
+      all_core)  echo "0-9" ;;
+      *)         echo "" ;;
     esac
 }
 
@@ -957,7 +1025,7 @@ cpu_semantic() {   # $1=占位符名 -> 核号表达式
 expand_semantic() {
     local v="$1" n
     case "$v" in *'{'*) ;; *) echo "$v"; return ;; esac
-    for n in e_core p1_core p2_core p_core hp_core all_core; do
+    for n in e_core p1_core p2_core p_core hp_core lead_core all_core; do
         case "$v" in
           *"{$n}"*) v=$(echo "$v" | sed "s/{$n}/$(cpu_semantic "$n")/g") ;;
         esac
@@ -977,13 +1045,14 @@ expand_semantic() {
 # 零 fork 版：把结果写进全局 SEM_VAL，而不是用 $( ) 取回（$( ) 会开子 shell）
 cpu_semantic_read() {   # $1=占位符名
     case "$1" in
-      e_core)   SEM_VAL="0-3" ;;
-      p1_core)  SEM_VAL="4-7" ;;
-      p2_core)  SEM_VAL="" ;;
-      p_core)   SEM_VAL="4-9" ;;
-      hp_core)  SEM_VAL="8-9" ;;
-      all_core) SEM_VAL="0-9" ;;
-      *)        SEM_VAL="" ;;
+      e_core)    SEM_VAL="0-3" ;;
+      p1_core)   SEM_VAL="4-7" ;;
+      p2_core)   SEM_VAL="" ;;
+      p_core)    SEM_VAL="4-9" ;;
+      hp_core)   SEM_VAL="8-9" ;;
+      lead_core) cpu_lead_core_read ;;
+      all_core)  SEM_VAL="0-9" ;;
+      *)         SEM_VAL="" ;;
     esac
     return 0
 }
@@ -1088,10 +1157,23 @@ clip_online() {
 # ============================================================
 GAME_TPL_FILE="${WEBUI_DIR}/game_templates.tsv"
 GAME_ASSIGN_FILE="${WEBUI_DIR}/game_assign.tsv"
-# 应用（非游戏）线程模板：与游戏模板同格式、同生成器。
+# 应用（非游戏）线程档位表：与游戏档位表同格式、同生成器。
 # 线程只由模板驱动（不再跟随全局模式的「核心」集合，见 gen_threads_from_scene）。
 APP_TPL_FILE="${WEBUI_DIR}/app_templates.tsv"
 APP_ASSIGN_FILE="${WEBUI_DIR}/app_assign.tsv"
+
+# ------------------------------------------------------------
+#  系统相机：线程**固定「系统接管」**，用户不可调整
+# ------------------------------------------------------------
+#  v11（2026-09-17 用户要求）：相机不绑核、不参与任何档位，UI 入口也隐藏。
+#  三个落点共用同一套前缀，改的时候三处一起改：
+#    · manualApps()（webui/app.js）—— 从应用列表里滤掉 → 界面上看不到、选不到
+#    · import_scene_assign     —— 从 Scene 导入时不写相机
+#    · enforce_threads.sh      —— 兜底：任何档位都绑不上相机（陈旧分配表也无效）
+#  ✅ 为什么相机适合「不接管」：相机线程模型（HAL / ISP / 编码 / AI）跨进程跨线程，
+#     硬绑主线程反而会把它挤到 2 核 Ultra 上；交回系统调度器最稳。
+CAMERA_GLOB='com.android.camera*|com.xiaomi.camera*'          # shell case 用
+CAMERA_RE='com[.]android[.]camera|com[.]xiaomi[.]camera'      # awk 用（子串匹配，含 cameraextensions/mind/tools）
 
 # 生成规则 JSON 到 stdout（通用：游戏 / 应用共用同一套生成器）
 #   $1=模板文件(TSV)  $2=分配文件(TSV: pkg<TAB>tpl_id)
@@ -1116,15 +1198,17 @@ gen_rules_json() {
       -v SEMp2="$(cpu_semantic p2_core)" \
       -v SEMp="$(cpu_semantic p_core)" \
       -v SEMhp="$(cpu_semantic hp_core)" \
+      -v SEMlead="$(cpu_semantic lead_core)" \
       -v SEMall="$(cpu_semantic all_core)" \
       -v TPL="$tpl" -v ASG="$asg" '
     function sem(n) {
-        if (n=="e_core")   return SEMe
-        if (n=="p1_core")  return SEMp1
-        if (n=="p2_core")  return SEMp2
-        if (n=="p_core")   return SEMp
-        if (n=="hp_core")  return SEMhp
-        if (n=="all_core") return SEMall
+        if (n=="e_core")    return SEMe
+        if (n=="p1_core")   return SEMp1
+        if (n=="p2_core")   return SEMp2
+        if (n=="p_core")    return SEMp
+        if (n=="hp_core")   return SEMhp
+        if (n=="lead_core") return SEMlead
+        if (n=="all_core")  return SEMall
         return ""
     }
     # 展开 {占位符}；未识别的占位符保留原样（由调用方判断）
@@ -1256,51 +1340,41 @@ gen_rules_json() {
     END { if (printed) printf "\n" }
     ' "$tpl"
 }
-gen_game_rules_json() { gen_rules_json "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE" game; }
-# ============================================================
-#  模式同步线程 —— Scene 里给应用设的模式 → 线程模板
-# ------------------------------------------------------------
-#  WebUI「应用」页早就有一个「跟随 Scene 模式自动切换线程模板」开关（settings.conf
-#  的 mode_sync），但后端一直**只读 app_assign.tsv**，这个映射从没真正参与生成 ——
-#  结果就是「在 Scene 里把相机设成性能，线程却还是 light」。
-#  这里把它补上：映射只在后端定义一份，前端由 cmd_apps_tpl 下发同一份常量。
-#
-#  规则（与 WebUI 文案一致）：
-#    · 只在「Scene 里**显式**设过模式」的应用上生效（powercfg.xml 里 key != "*"）；
-#      只跟随全局默认的应用不参与，避免把没调过的应用全绑一遍。
-#    · 优先级高于手动「套用模板」；被覆盖的包会从手动表里剔除（不是重复出现）。
-#    · 映射到空串的档（fast）表示「不接管」，即该应用不生成线程规则。
-#    · 关掉开关即完全回到手动模式。
-# ============================================================
-MODE2TPL_powersave="light"
-MODE2TPL_balance="smooth"
-MODE2TPL_performance="perf"
-MODE2TPL_fast=""
-
-mode2tpl() {   # $1=mode → 模板 id（空 = 不接管）
-    case "$1" in
-      powersave)   echo "$MODE2TPL_powersave" ;;
-      balance)     echo "$MODE2TPL_balance" ;;
-      performance) echo "$MODE2TPL_performance" ;;
-      fast)        echo "$MODE2TPL_fast" ;;
-      *)           echo "" ;;
-    esac
+gen_game_rules_json() {
+    # ★ v8（2026-09-17）：游戏改用 app 形状（app_cpuset{main,render,other}）。
+    #   实测（王者荣耀 / 设备 lhasa）：Scene 会读 app_cpuset 并在触摸时写
+    #   /dev/cpuset/top-app/{main,render,other}/cpus，组级 cpus 对全组立即生效。
+    #   旧的 game 形状（cpuset{heaviest_thread,comm}）Scene **不落地** ——
+    #   它需要 sched_setaffinity 逐线程钉核，必须常驻进程，那正是 v8 剥离的部分。
+    #   代价：失去按线程名（UnityMain / UnityGfx）细分；Scene 自己按负载把线程
+    #   分进 main/render/other 三组，对游戏同样够用（实测分类正常）。
+    gen_rules_json "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE" app
 }
+# ============================================================
+#  从 Scene 导入档位（v10：一次性，不再实时跟随）
+# ------------------------------------------------------------
+#  设计（2026-09-17 用户拍板）：
+#    · 线程档位只有 4 个，且与模式**同名同义**：
+#        powersave 省电 / balance 均衡 / performance 性能 / fast 极速
+#      ⇒ 「模式 → 档位」是恒等映射，不再需要 MODE2TPL_* 常量表。
+#    · 应用/游戏页的档位分配是**模块自持数据**（app_assign.tsv / game_assign.tsv），
+#      不再由 Scene 的 powercfg.xml 实时推导 —— 否则你在 Scene 改一下模式，
+#      线程分组就跟着漂移，还会和手动套用的档位打架（实测过：相机被 Scene 设成
+#      fast 后从目标表里消失，界面上却还显示「已套高性能」）。
+#    · 想跟 Scene 对齐时，显式点 WebUI「应用」页的「从 Scene 导入」按钮跑一次。
+#
+#  ⚠ enforce_threads.sh 里原本还有一份硬编码的 M2T 映射（同样由 mode_sync 开关控制）
+#    —— v10 已一并删除，落核只认 app_assign.tsv / game_assign.tsv。
+# ============================================================
 
-# 列出「Scene 里显式设过模式」的 包<TAB>模板id（mode_sync 关闭时输出为空）
+# 列出「Scene 里显式设过模式」的 包<TAB>档位。恒等映射，不再查常量表。
 # ⚠ 用 awk 单进程解析，不要用 while-read + 参数展开去抠引号：
 #   `"` 在 ${var#pat} 里各家 shell 的处理不一致（能过 dash 也可能被 sh 当字符串结尾），
-#   实测直接写 `line="${line#*name="}"` 就触发了 unexpected EOF。
-#   而且 powercfg.xml 有几百行，纯 shell 逐行处理还慢。
-mode_sync_assign() {
-    settings_load
-    [ "$SET_MODE_SYNC" = "1" ] || return 0
-    [ -f "$SCENE_POWERCFG" ] || return 0
-    awk -v MAP="powersave=$MODE2TPL_powersave balance=$MODE2TPL_balance performance=$MODE2TPL_performance fast=$MODE2TPL_fast" '
-      BEGIN {
-        n = split(MAP, kv, " ")
-        for (i = 1; i <= n; i++) { split(kv[i], a, "="); m[a[1]] = a[2] }
-      }
+#   实测直接写下方那种写法会触发 unexpected EOF。powercfg.xml 有几百行，逐行 shell 还慢。
+import_scene_assign() {
+    [ -f "$SCENE_POWERCFG" ] || return 1
+    # ⚠ 相机不导入：它在 Scene 里是什么模式都无所谓 —— 线程固定「系统接管」。
+    awk -v CAMRE="$CAMERA_RE" '
       {
         # 行形如：  <string name="com.foo.bar">balance</string>
         if (!match($0, /name="[^"]*"/)) next
@@ -1308,41 +1382,62 @@ mode_sync_assign() {
         if (!match($0, />[^<]*</)) next
         mode = substr($0, RSTART + 1, RLENGTH - 2)
         if (pkg == "" || pkg == "*") next
-        if (pkg !~ /\./) next                 # 非包名（如 device_info 之类）跳过
-        if (!(mode in m)) next
-        if (m[mode] == "") next               # fast → 不接管
-        printf "%s\t%s\n", pkg, m[mode]
+        if (pkg !~ /\./) next                # 非包名（如 device_info 之类）跳过
+        if (CAMRE != "" && pkg ~ CAMRE) next   # 相机固定不接管，不进分配表
+        if (mode !~ /^(powersave|balance|performance|fast)$/) next
+        printf "%s\t%s\n", pkg, mode
       }' "$SCENE_POWERCFG" 2>/dev/null
     return 0
 }
 
-# 合并「手动分配」+「模式同步覆盖」→ $1（模式同步优先，被覆盖的包不再出现两次）
-build_app_assign_merged() {
-    local out="$1" ov="${TMPD}/mode_ov.tsv"
-    mode_sync_assign > "$ov" 2>/dev/null
-    awk -F'\t' -v OV="$ov" -v ASG="$APP_ASSIGN_FILE" '
+# 导入并合并进 app_assign.tsv / game_assign.tsv：
+#   Scene 里显式设过模式的条目 → 用 Scene 的值覆盖；其余条目原样保留。
+#   不整表重建 —— 那样会把用户在模块里手动套的档位全部冲掉。
+# $1 = app | game（默认 app）
+import_scene_apply() {
+    local kind="${1:-app}" asg src
+    case "$kind" in
+      game) asg="$GAME_ASSIGN_FILE" ;;
+      *)    asg="$APP_ASSIGN_FILE" ;;
+    esac
+    mkdir -p "$TMPD" 2>/dev/null
+    src="${TMPD}/import.src"
+    import_scene_assign > "$src" 2>/dev/null
+    local n; n=$(grep -c . "$src" 2>/dev/null); n=${n:-0}
+    [ "$n" = 0 ] && { echo "OK Scene 里没有单独设过模式的应用，未改动"; return 0; }
+
+    local out="${TMPD}/import.out"
+    awk -F'\t' -v OFS='\t' -v SRC="$src" -v ASG="$asg" '
       BEGIN {
-        while ((getline l < OV) > 0) {
+        while ((getline l < SRC) > 0) {
           if (l == "") continue
-          n = split(l, f, "\t"); if (f[1] != "" && f[2] != "") ovr[f[1]] = f[2]
+          n = split(l, f, "\t"); if (f[1] != "" && f[2] != "") imp[f[1]] = f[2]
         }
-        close(OV)
-        while ((getline l < ASG) > 0) {
-          if (l == "" || l ~ /^#/) continue
-          n = split(l, f, "\t"); if (f[1] == "" || f[2] == "") continue
-          if (f[1] in ovr) continue          # 模式同步优先
-          printf "%s\t%s\n", f[1], f[2]
+        close(SRC)
+        seen = 0
+        if (ASG != "") {
+          while ((getline l < ASG) > 0) {
+            if (l == "") continue
+            if (l ~ /^#/) { print l; continue }
+            n = split(l, f, "\t"); if (f[1] == "" || f[2] == "") continue
+            seen++
+            if (f[1] in imp) { printf "%s\t%s\n", f[1], imp[f[1]]; delete imp[f[1]] }
+            else             { printf "%s\t%s\n", f[1], f[2] }
+          }
+          close(ASG)
         }
-        close(ASG)
-        for (p in ovr) printf "%s\t%s\n", p, ovr[p]
+        for (p in imp) printf "%s\t%s\n", p, imp[p]
       }' > "$out" 2>/dev/null
+    [ -s "$out" ] || { echo "ERR 导入结果为空，未改动"; return 1; }
+    write_replace "$out" "$asg" && chmod 0666 "$asg" 2>/dev/null
+    rm -f "$out" "$src" 2>/dev/null
+    echo "OK 已从 Scene 导入 $n 条档位（覆盖同名条目，其余保留）"
     return 0
 }
 
 gen_app_rules_json()  {
-    local merged="${TMPD}/app_asg.merged"
-    build_app_assign_merged "$merged"
-    gen_rules_json "$APP_TPL_FILE" "$merged" app
+    # v10：直接用 app_assign.tsv（模块自持），不再与 Scene 模式做实时合并
+    gen_rules_json "$APP_TPL_FILE" "$APP_ASSIGN_FILE" app
 }
 
 # ---------- 从 Scene 读取「应用 → 模式」与「游戏名单」----------
@@ -1489,9 +1584,11 @@ gen_threads_from_scene() {
     fi
 
     # 游戏规则同时落一份到模块 Config 便于查看/备份
+    # ⚠ MODCFG 由 webui.sh 定义（含 scheme 名）。service.sh / 手动调用时它可能是空的，
+    #   不判空会去写 "/threads_games.json"（根目录只读 → 报 Read-only file system）。
     if [ -s "${TMPD}/games.gen" ]; then
         gf="${MODCFG}/threads_games.json"
-        if [ -d "$(dirname "$gf")" ]; then
+        if [ -n "$MODCFG" ] && [ -d "$MODCFG" ]; then
             { printf '[\n'; cat "${TMPD}/games.gen"; printf '\n]\n'; } > "$gf" 2>/dev/null
             chmod 0644 "$gf" 2>/dev/null
         fi
@@ -1511,7 +1608,7 @@ gen_threads_from_scene() {
     write_replace "$out" "${SCENE_DIR}/threads.json" || { echo "ERR 写入 Scene 失败"; return 1; }
     perm_file "${SCENE_DIR}/threads.json"
     ensure_scene_dir_perm >/dev/null 2>&1
-    if [ -d "$(dirname "${MODCFG}/threads.json")" ]; then
+    if [ -n "$MODCFG" ] && [ -d "$MODCFG" ]; then
         cp -f "$out" "${MODCFG}/threads.json" 2>/dev/null
         chmod 0644 "${MODCFG}/threads.json" 2>/dev/null
     fi
@@ -1536,9 +1633,9 @@ gen_threads_from_scene() {
 
 # ---------- 状态 ----------
 active_scheme() { cat "$ACTIVE_FILE" 2>/dev/null; }
-# 锁定已废除 ⇒ 永远「未锁定」。保留此函数是因为 action.sh / switch.sh 在用；
-# 回 true 让它们统一走「可自由修改」的分支，不会再显示「已锁定」。
-is_unlocked()   { return 0; }
+# 注：锁定机制（chattr +i）已于 2026-09-15 彻底废除，is_unlocked() 与
+#     $STATE_DIR/unlocked 标记一并删除 —— 所有入口（action.sh / switch.sh /
+#     WebUI）都不再询问锁定状态。详见 action.sh 头部说明。
 scheme_name_cn() {
     case "$1" in
       sweet_eco)  echo "极致能效" ;;
@@ -1549,7 +1646,7 @@ scheme_name_cn() {
 }
 
 # ============================================================
-#  线程模板：种子生成 + 显示名迁移
+#  线程档位表：种子生成（唯一定义处）
 # ------------------------------------------------------------
 #  ⚠ 2026-09-16 从 webui.sh 迁到这里：integrity.sh（一键还原/审计）也要用，
 #    而它不是通过 webui.sh 调起的 —— 放在 webui.sh 里会导致「命令找不到」，
@@ -1568,56 +1665,205 @@ seed_game_templates() {
   mkdir -p "$(dirname "$GAME_TPL_FILE")" 2>/dev/null
   {
     printf '# id\tfriendly\tother\theaviest_thread\theaviest_cores\theavy_thread\theavy_cores\tcomm\n'
-    printf 'unity\tUnity 游戏\t{p1_core}\tUnityMain\t{hp_core}\tUnityGfx\t{p_core}\t{hp_core}=RenderThread,GLThread;{p1_core}=Job.,Loading.;{e_core}=Audio,FMOD\n'
-    printf 'default\t通用游戏\t{p1_core}\t\t\t\t\t{p_core}=RenderThread,GLThread;{e_core}=Audio\n'
+    # 档位 id 与模式**同名**（powersave/balance/performance/fast）——
+    #   应用页与游戏页共用同一套档位名，不再有额外的"模板名"。
+    # 列语义（enforce_threads.sh 实际消费的部分）：
+    #   other           → 其余线程的核位
+    #   heaviest_thread → **留空**（主线程由 tid==pid 自动识别；填角色名是无效值）
+    #   heaviest_cores  → 主线程核位
+    #   heavy_thread    → **真实线程名**，匹配到才用 heavy_cores
+    #   heavy_cores     → 上面对应线程的核位
+    #   comm            → "核位=线程名1,线程名2;核位=..."（优先级最高）
+    # 核位全空 = 该游戏一条 taskset 都不发（不绑核，交回系统）→ 「系统接管」档。
+    printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
+    printf 'balance\t均衡\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n'
+    printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
+    printf 'fast\t系统接管\t\t\t\t\t\t\n'
   } > "$GAME_TPL_FILE" 2>/dev/null
   chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
-  log_quiet "webui: 已生成默认游戏线程模板"
+  log_quiet "webui: 已生成默认游戏线程档位表"
 }
 
-# 模板显示名迁移（幂等）：老机器上 app_templates.tsv 已经存在，seed 不会再生成，
-#   所以每次读取模板前都跑一次改名 —— 内容没变时不落盘（cmp + write_replace）。
-#   只改 friendly 列，模板 id 与核心/线程定义一律不动。
-TPL_RENAME_MAP="light:轻量·省电:省电 smooth:流畅日常:均衡 perf:高性能:性能"
-fix_tpl_labels() {   # $1 = tsv 路径
-    [ -f "$1" ] || return 0
-    mkdir -p "$TMPD" 2>/dev/null
-    local t="${TMPD}/tpl.rename"
-    awk -F'\t' -v OFS='\t' -v MAP="$TPL_RENAME_MAP" '
-      BEGIN { n = split(MAP, kv, " "); for (i = 1; i <= n; i++) { split(kv[i], a, ":"); OLD[a[1]] = a[2]; NEW[a[1]] = a[3] } }
-      { if ($1 in OLD && $2 == OLD[$1]) $2 = NEW[$1]; print }
-    ' "$1" > "$t" 2>/dev/null || { rm -f "$t"; return 0; }
-    [ -s "$t" ] || { rm -f "$t"; return 0; }
-    if ! cmp -s "$t" "$1" 2>/dev/null; then
-        write_replace "$t" "$1" && chmod 0666 "$1" 2>/dev/null \
-            && log_quiet "webui: 模板名已更新（$(basename "$1")）"
-    fi
-    rm -f "$t" 2>/dev/null
+# 注：v10 起「模板」概念并入「模式档位」，档位 id 直接就是 powersave/balance/
+#     performance/fast，显示名由 mode_name_cn() 统一给出 —— 原先那种
+#     "light:轻量·省电:省电" 的改名表（TPL_RENAME_MAP / fix_tpl_labels）已删除。
+
+# ============================================================
+#  档位表迁移 v10（2026-09-17）—— 档位与模式同名 + 核位重写
+# ------------------------------------------------------------
+#  做两件事：
+#    ① **档位 id 与模式同名**：light→powersave、smooth→balance、
+#       perf→performance、ultra/none→fast。
+#       旧版是 5 档（light/smooth/perf/ultra/none），其中 smooth 与 perf 的核位
+#       高度重复、ultra 又只比 perf 高一档 —— 用户反馈「模板有重复、不清晰」。
+#       现在收敛成与 4 个模式一一对应的 4 档，两个页面共用同一套名字。
+#    ② **核位重写**：Ultra(8-9) 不作绑核目标（它只在 >2.2GHz 有能效优势且仅 2 核），
+#       主线程/渲染一律落 Premium(4-7)，其余线程压 Pro(0-3)；
+#       fast 档核位全空 = 不绑核（交回系统）。
+#
+#  幂等：靠 $STATE_DIR/tpl_v10 标记。
+#  保守性：
+#    · 档位表**整体重写**（核位是模块的设计，前端也没有改核位的入口），
+#      重写前把旧表备份到 $STATE_DIR/backup/。
+#    · 分配表只替换「值恰好等于某个旧 id」的条目，用户手动套过的其它值不动。
+# ============================================================
+TPL_V10_MARK="${STATE_DIR}/tpl_v10"
+
+migrate_templates_v10() {
+    [ -f "$TPL_V10_MARK" ] && return 0
+    mkdir -p "$TMPD" "${STATE_DIR}/backup" 2>/dev/null
+    local changed=0
+
+    # ---- ① 备份 + 重写档位表 ----
+    local n
+    for n in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$n" ] || continue
+        cp -f "$n" "${STATE_DIR}/backup/$(basename "$n").pre-v10" 2>/dev/null
+    done
+    rm -f "$APP_TPL_FILE" "$GAME_TPL_FILE" 2>/dev/null
+    seed_app_templates
+    seed_game_templates
+    changed=1
+
+    # ---- ② 分配表里的旧档位 id → 新 id ----
+    local asg t
+    for asg in "$APP_ASSIGN_FILE" "$GAME_ASSIGN_FILE"; do
+        [ -f "$asg" ] || continue
+        t="${TMPD}/asg.v10"
+        awk -F'\t' -v OFS='\t' '
+          # 旧 id → 新 id。**应用表与游戏表的旧 id 不同**，必须都列全：
+          #   应用：light/smooth/perf/ultra/none
+          #   游戏：unity/casual/default/ultra/open
+          BEGIN { M["light"]="powersave"; M["smooth"]="balance";
+                  M["perf"]="performance"; M["ultra"]="fast"; M["none"]="fast";
+                  M["unity"]="balance"; M["casual"]="powersave";
+                  M["default"]="balance"; M["open"]="fast" }
+          /^#/ { print; next }
+          NF>=2 && ($2 in M) { $2 = M[$2] }
+          { print }
+        ' "$asg" > "$t" 2>/dev/null
+        if [ -s "$t" ] && ! cmp -s "$t" "$asg"; then
+            write_replace "$t" "$asg" && chmod 0666 "$asg" 2>/dev/null
+        fi
+        rm -f "$t" 2>/dev/null
+    done
+
+    : > "$TPL_V10_MARK" 2>/dev/null
+    [ "$changed" = 1 ] && log_quiet "webui: 档位表已升级到 v10（与模式同名，旧表备份在 backup/）"
     return 0
 }
 
-# 应用（非游戏）线程模板：参考 Aether_OptExt 的负载分级思路，结合玄戒 O3（4+4+2）。
-#   e_core=0-3（小核） p1_core=4-7（中核） p_core=4-9（中+大） hp_core=8-9（超大核）
-#   other=该应用全部「其它线程」的默认核；comm=按线程名单独挑核。
-#   设计：省电应用压到小核；均衡应用主线程上中核、渲染线程上超大核；
-#   性能应用主线程上超大核、重负载全放开到中+大核。
-#   （2026-09-16 改名：轻量·省电→省电 / 流畅日常→均衡 / 高性能→性能，模板 id 不变）
+
+# ============================================================
+#  档位表 / 分配表迁移 v11（2026-09-17）
+# ------------------------------------------------------------
+#  ① 档位表重写（刷新显示名；v12 起 fast 档叫「系统接管」）
+#     （核位定义没变：极速依然是「核位全空 = 不绑核」）
+#  ② **清空内置默认分配**：两份分配表只留表头。
+#     用户要求「不再预设任何默认值，改由手动导入或手动调整自行配置」。
+#     旧表备份到 $STATE_DIR/backup/*.pre-v11，需要时可以捞回来。
+#  ③ 把①之前已经写进内核的亲和性放掉 —— 清表不会解除已绑定的线程。
+#     用备份清单逐个还原到 cgroup 预算（幂等，已放开的不会重发命令）。
+# ============================================================
+TPL_V11_MARK="${STATE_DIR}/tpl_v11"
+
+migrate_templates_v11() {
+    [ -f "$TPL_V11_MARK" ] && return 0
+    mkdir -p "$TMPD" "${STATE_DIR}/backup" 2>/dev/null
+    local n asg bk
+
+    # ---- ① 档位表重写（刷新显示名）----
+    for n in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$n" ] && cp -f "$n" "${STATE_DIR}/backup/$(basename "$n").pre-v11" 2>/dev/null
+    done
+    rm -f "$APP_TPL_FILE" "$GAME_TPL_FILE" 2>/dev/null
+    seed_app_templates
+    seed_game_templates
+
+    # ---- ② 清空分配表（备份原表，便于反悔）----
+    bk=""
+    for asg in "$APP_ASSIGN_FILE" "$GAME_ASSIGN_FILE"; do
+        [ -f "$asg" ] || continue
+        cp -f "$asg" "${STATE_DIR}/backup/$(basename "$asg").pre-v11" 2>/dev/null
+        printf '# pkg\ttemplate_id\n' > "$asg" 2>/dev/null
+        chmod 0666 "$asg" 2>/dev/null
+        [ -z "$bk" ] && bk="$asg"
+    done
+
+    # ---- ③ 放掉旧绑定（用备份清单）----
+    if [ -n "$bk" ] && [ -f "${STATE_DIR}/backup/app_assign.tsv.pre-v11" ]; then
+        sh "$MODDIR/Scripts/4+4+2/O3/unbind_fast.sh" \
+            $(awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/ { print $1 }' \
+                "${STATE_DIR}/backup/app_assign.tsv.pre-v11" 2>/dev/null) >/dev/null 2>&1
+    fi
+
+    : > "$TPL_V11_MARK" 2>/dev/null
+    log_quiet "webui: 已清空内置默认分配，档位表已重建（旧表在 backup/）"
+    return 0
+}
+
+
+# ============================================================
+#  档位显示名迁移 v12（2026-09-17）
+# ------------------------------------------------------------
+#  只做一件事：把 fast 档的显示名从「极速（不接管）」改成「系统接管」。
+#  为什么用「只改匹配到的 friendly 值」而不是整表重写：
+#    档位表里**只有 friendly 这一列**是给人看的，核位/线程名是模块的设计基线 ——
+#    整表重写会把用户在旧版里对 friendly 的自定义一起冲掉。改名是幂等的，
+#    重复跑不会有副作用。
+#  同时把分配表里可能残留的旧档位 id 一并归一（历史上 fast 曾写作 ultra/none）。
+# ============================================================
+TPL_V12_MARK="${STATE_DIR}/tpl_v12"
+
+migrate_templates_v12() {
+    [ -f "$TPL_V12_MARK" ] && return 0
+    mkdir -p "$TMPD" 2>/dev/null
+    local t n=0
+
+    for t in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$t" ] || continue
+        cp -f "$t" "${STATE_DIR}/backup/$(basename "$t").pre-v12" 2>/dev/null
+        awk -F'\t' -v OFS='\t' '
+          # 只改 friendly 列（第 2 列），其余列一律不动
+          NF >= 2 && $1 == "fast" && $2 ~ /极速/ { $2 = "系统接管"; n++ }
+          { print }
+        ' "$t" > "${TMPD}/tpl.v12" 2>/dev/null
+        [ -s "${TMPD}/tpl.v12" ] && ! cmp -s "${TMPD}/tpl.v12" "$t" && \
+            write_replace "${TMPD}/tpl.v12" "$t" && chmod 0666 "$t" 2>/dev/null
+        rm -f "${TMPD}/tpl.v12" 2>/dev/null
+    done
+
+    : > "$TPL_V12_MARK" 2>/dev/null
+    log_quiet "webui: 档位显示名已更新（极速 → 系统接管）"
+    return 0
+}
+
+# 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
+#   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
+#   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
+#   · Premium(4-7) 4 核、能效甜点 → 主线程 / 渲染线程放这里
+#   · Ultra(8-9) 只在 >2.2GHz 有能效优势、且仅 2 核 → **不作绑核目标**；
+#     负载需要时内核 core_ctl 会自行把它拉上线（厂商 power HAL 自治，我们不去抢）
+#   enforce_threads.sh 的匹配规则（决定这几列怎么填）：
+#     if (tid == pid)              w = heaviest_cores   ← 主线程【自动识别，不要填线程名】
+#     if (heavy_thread 匹配 comm)   w = heavy_cores
+#     if (comm 规则匹配)            w = 该规则核位        ← 优先级最高
+#   核位全空 = 该应用**一条 taskset 都不发**（不绑核，交回系统）→ 这就是「极速」档。
 seed_app_templates() {
   [ -f "$APP_TPL_FILE" ] && return 0
   mkdir -p "$(dirname "$APP_TPL_FILE")" 2>/dev/null
   {
     printf '# id\tfriendly\tother\theaviest_thread\theaviest_cores\theavy_thread\theavy_cores\tcomm\n'
-    # 列语义（应用模板走 Scene 的 app_cpuset 形状）：
-    #   other          → app_cpuset.other   （其余线程）
-    #   heaviest_cores → app_cpuset.main    （主线程）
-    #   heavy_cores    → app_cpuset.render  （渲染/GL 线程）
-    # 省电（原「轻量·省电」）：整条应用都压小核（含主线程/渲染）
-    printf 'light\t省电\t{e_core}\tmain\t{e_core}\trender\t{e_core}\t{e_core}=IO,Network,Http,Binder,Pool\n'
-    # 均衡（原「流畅日常」）：主线程中核、渲染上超大核、其余小核
-    printf 'smooth\t均衡\t{e_core}\tmain\t{p1_core}\trender\t{hp_core}\t{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async\n'
-    # 性能（原「高性能」）：主线程/渲染上超大核，其余中+大核
-    printf 'perf\t性能\t{p_core}\tmain\t{hp_core}\trender\t{hp_core}\t{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async,Compute\n'
+    # 省电：整条应用压 Pro 簇（主线程/其余都在 0-3）。低功耗场景能效最优。
+    printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
+    # 均衡：主线程 + 渲染线程上 Premium(4-7)，其余压 Pro。Worker 留在 Pro 省电。
+    printf 'balance\t均衡\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n'
+    # 性能：其余线程也升到 Premium —— 应对浏览器/WebView 的多进程渲染并发。
+    printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n'
+    # 系统接管：核位全空 = 一条 taskset 都不发，交回系统调度器
+    #   （含内核 core_ctl 的动态超大核 —— 那本来就是厂商 HAL 的活，我们不去抢）
+    printf 'fast\t系统接管\t\t\t\t\t\t\n'
   } > "$APP_TPL_FILE" 2>/dev/null
   chmod 0666 "$APP_TPL_FILE" 2>/dev/null
-  log_quiet "webui: 已生成默认应用线程模板"
+  log_quiet "webui: 已生成默认应用线程档位表"
 }

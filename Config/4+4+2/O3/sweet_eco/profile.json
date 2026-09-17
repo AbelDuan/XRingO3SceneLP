@@ -6,10 +6,6 @@
     "core_ctl_8": "/sys/devices/system/cpu/cpu8/core_ctl/enable",
     "min_cpus_cpu8": "/sys/devices/system/cpu/cpu8/core_ctl/min_cpus",
     "max_cpus_cpu8": "/sys/devices/system/cpu/cpu8/core_ctl/max_cpus",
-    "gpu_max_khz": "/sys/class/devfreq/gpufreq_core/max_freq",
-    "gpu_core_min": "/sys/class/devfreq/gpufreq_core/min_freq",
-    "gpu_core_max": "/sys/class/devfreq/gpufreq_core/max_freq",
-    "gpu_top_max": "/sys/class/devfreq/gpufreq_top/max_freq",
     "sched_boost": "/proc/sys/walt/sched_boost"
   },
   "features": {
@@ -171,10 +167,6 @@
     [
       "/proc/sys/walt/sched_boost",
       "0"
-    ],
-    [
-      "@preset",
-      "gpu_balance"
     ]
   ],
   "presets": {
@@ -314,49 +306,7 @@
       ],
       [
         "@preset",
-        "cpu_on"
-      ]
-    ],
-    "gpu_lp": [
-      [
-        "/sys/class/devfreq/gpufreq_core/min_freq",
-        "119370000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_core/max_freq",
-        "518400000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_top/max_freq",
-        "854400000"
-      ]
-    ],
-    "gpu_balance": [
-      [
-        "/sys/class/devfreq/gpufreq_core/min_freq",
-        "119370000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_core/max_freq",
-        "854400000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_top/max_freq",
-        "1113600000"
-      ]
-    ],
-    "gpu_perf": [
-      [
-        "/sys/class/devfreq/gpufreq_core/min_freq",
-        "179055000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_core/max_freq",
-        "1392000000"
-      ],
-      [
-        "/sys/class/devfreq/gpufreq_top/max_freq",
-        "1593600000"
+        "cpu_auto_prime"
       ]
     ],
     "powersave_active": [
@@ -645,6 +595,13 @@
       [
         "@preset",
         "cpu_auto"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "powersave_inactive": [
@@ -695,6 +652,18 @@
         "2044800"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "787200"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "988800"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "2044800"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -713,6 +682,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "balance_active": [
@@ -1000,7 +976,14 @@
       ],
       [
         "@preset",
-        "cpu_on"
+        "cpu_auto_prime"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "balance_inactive": [
@@ -1051,6 +1034,18 @@
         "2198400"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "1065600"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "1296000"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "2198400"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -1069,6 +1064,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "performance_active": [
@@ -1357,6 +1359,13 @@
       [
         "@preset",
         "cpu_on"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "performance_inactive": [
@@ -1407,6 +1416,18 @@
         "2553600"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "1497600"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "1651200"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "2553600"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -1425,6 +1446,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "fast_active": [
@@ -1713,6 +1741,13 @@
       [
         "@preset",
         "cpu_on"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "fast_inactive": [
@@ -1763,6 +1798,18 @@
         "2860800"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "1785600"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "1968000"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "2860800"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -1781,6 +1828,39 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
+      ]
+    ],
+    "cpu_auto_prime": [
+      [
+        "$core_ctl_8",
+        "1"
+      ],
+      [
+        "$min_cpus_cpu8",
+        "#0"
+      ],
+      [
+        "$max_cpus_cpu8",
+        "#2"
+      ],
+      [
+        "$core_ctl_4",
+        "1"
+      ],
+      [
+        "$min_cpus_cpu4",
+        "#4"
+      ],
+      [
+        "$max_cpus_cpu4",
+        "#4"
       ]
     ]
   },
@@ -1793,10 +1873,6 @@
         ],
         [
           "@preset",
-          "gpu_lp"
-        ],
-        [
-          "@preset",
           "powersave_active"
         ]
       ],
@@ -1804,10 +1880,6 @@
         [
           "@preset",
           "common_gaming"
-        ],
-        [
-          "@preset",
-          "gpu_lp"
         ],
         [
           "@preset",
@@ -1823,10 +1895,6 @@
         ],
         [
           "@preset",
-          "gpu_balance"
-        ],
-        [
-          "@preset",
           "balance_active"
         ]
       ],
@@ -1834,10 +1902,6 @@
         [
           "@preset",
           "common_gaming"
-        ],
-        [
-          "@preset",
-          "gpu_balance"
         ],
         [
           "@preset",
@@ -1853,10 +1917,6 @@
         ],
         [
           "@preset",
-          "gpu_perf"
-        ],
-        [
-          "@preset",
           "performance_active"
         ]
       ],
@@ -1864,10 +1924,6 @@
         [
           "@preset",
           "common_gaming"
-        ],
-        [
-          "@preset",
-          "gpu_perf"
         ],
         [
           "@preset",
@@ -1883,10 +1939,6 @@
         ],
         [
           "@preset",
-          "gpu_perf"
-        ],
-        [
-          "@preset",
           "fast_active"
         ]
       ],
@@ -1894,10 +1946,6 @@
         [
           "@preset",
           "common_gaming"
-        ],
-        [
-          "@preset",
-          "gpu_perf"
         ],
         [
           "@preset",

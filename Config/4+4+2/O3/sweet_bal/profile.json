@@ -6,10 +6,6 @@
     "core_ctl_8": "/sys/devices/system/cpu/cpu8/core_ctl/enable",
     "min_cpus_cpu8": "/sys/devices/system/cpu/cpu8/core_ctl/min_cpus",
     "max_cpus_cpu8": "/sys/devices/system/cpu/cpu8/core_ctl/max_cpus",
-    "gpu_max_khz": "/sys/class/devfreq/gpufreq_core/max_freq",
-    "gpu_core_min": "/sys/class/devfreq/gpufreq_core/min_freq",
-    "gpu_core_max": "/sys/class/devfreq/gpufreq_core/max_freq",
-    "gpu_top_max": "/sys/class/devfreq/gpufreq_top/max_freq",
     "sched_boost": "/proc/sys/walt/sched_boost"
   },
   "features": {
@@ -310,7 +306,7 @@
       ],
       [
         "@preset",
-        "cpu_on"
+        "cpu_auto_prime"
       ]
     ],
     "powersave_active": [
@@ -599,6 +595,13 @@
       [
         "@preset",
         "cpu_auto"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "powersave_inactive": [
@@ -649,6 +652,18 @@
         "2044800"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "1065600"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "1142400"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "2044800"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -667,6 +682,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "balance_active": [
@@ -692,7 +714,7 @@
         "@cpu_freq",
         "cpu4",
         "556800",
-        "1968000"
+        "2419200"
       ],
       [
         "/sys/devices/system/cpu/cpu8/cpufreq/scaling_governor",
@@ -938,7 +960,7 @@
       ],
       [
         "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
-        "1968000"
+        "2419200"
       ],
       [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
@@ -954,7 +976,14 @@
       ],
       [
         "@preset",
-        "cpu_on"
+        "cpu_auto_prime"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "balance_inactive": [
@@ -984,7 +1013,7 @@
         "@cpu_freq",
         "cpu4",
         "556800",
-        "1804800"
+        "2131200"
       ],
       [
         "/sys/devices/system/cpu/cpu4/cpufreq/xres/hispeed_freq",
@@ -1002,6 +1031,18 @@
         "@cpu_freq",
         "cpu8",
         "1113600",
+        "2198400"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "1785600"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "2131200"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
         "2198400"
       ],
       [
@@ -1023,6 +1064,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "performance_active": [
@@ -1048,7 +1096,7 @@
         "@cpu_freq",
         "cpu4",
         "835200",
-        "2294400"
+        "3148800"
       ],
       [
         "/sys/devices/system/cpu/cpu8/cpufreq/scaling_governor",
@@ -1294,7 +1342,7 @@
       ],
       [
         "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
-        "2544000"
+        "3148800"
       ],
       [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
@@ -1311,6 +1359,13 @@
       [
         "@preset",
         "cpu_on"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "performance_inactive": [
@@ -1340,7 +1395,7 @@
         "@cpu_freq",
         "cpu4",
         "835200",
-        "2131200"
+        "2668800"
       ],
       [
         "/sys/devices/system/cpu/cpu4/cpufreq/xres/hispeed_freq",
@@ -1358,6 +1413,18 @@
         "@cpu_freq",
         "cpu8",
         "1497600",
+        "2707200"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "2092800"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "2668800"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
         "2707200"
       ],
       [
@@ -1379,6 +1446,13 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "fast_active": [
@@ -1667,6 +1741,13 @@
       [
         "@preset",
         "cpu_on"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
       ]
     ],
     "fast_inactive": [
@@ -1717,6 +1798,18 @@
         "3648000"
       ],
       [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/pl_max_freq",
+        "2860800"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/pl_max_freq",
+        "3148800"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/pl_max_freq",
+        "3648000"
+      ],
+      [
         "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq",
         "1497600"
       ],
@@ -1735,6 +1828,39 @@
       [
         "@limiter",
         "inactive"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-3",
+        "0-9",
+        "0-9"
+      ]
+    ],
+    "cpu_auto_prime": [
+      [
+        "$core_ctl_8",
+        "1"
+      ],
+      [
+        "$min_cpus_cpu8",
+        "#0"
+      ],
+      [
+        "$max_cpus_cpu8",
+        "#2"
+      ],
+      [
+        "$core_ctl_4",
+        "1"
+      ],
+      [
+        "$min_cpus_cpu4",
+        "#4"
+      ],
+      [
+        "$max_cpus_cpu4",
+        "#4"
       ]
     ]
   },

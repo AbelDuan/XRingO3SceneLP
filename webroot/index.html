@@ -519,7 +519,7 @@ pre.tall { max-height: 62vh; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">6.2 (2026-09-16)</span>
+    <span class="h-ver" id="ver">16.0 (2026-09-17)</span>
     <div class="h-chips">
       <span class="pill" id="conn-chip">连接中…</span>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
@@ -752,7 +752,7 @@ const Api = {
   async modes() { return this._kv(await this.run('mode')); },
   async appmodes() { return this._kv(await this.run('appmodes')); },
   async setAppMode(pkg, mode) { return await this.run('setappmode ' + this.shq(pkg) + ' ' + this.shq(mode)); },
-  async applyModes() { return await this.run('applymodes'); },
+  async importScene() { return await this.run('importscene'); },
   async syncmode() { return await this.run('syncmode'); },
   async freqs() { return this._kv(await this.run('freqs')); },
   async readText(id) {
@@ -777,8 +777,14 @@ const Api = {
     return await this.run('wcommit ' + this.shq(id));
   },
   async live() { return await this.run('live'); },
+  /* 读 Scene 的 features/<name>.conf（原样 K=V 文本） */
+  async conf(name) { return await this.run('conf ' + this.shq(String(name))); },
+  /* 游戏页：把 Scene 的 FAS 调速器（features/fas.conf 三簇）统一为 xres */
+  async fasxres() { return await this.run('fasxres'); },
   async games() { return await this.run('games'); },
-  async apps_tpl() { return await this.run('apps_tpl'); },
+  apps_tpl() { return this.run('apps_tpl'); },
+  /* 有前台界面（启动器能点开）的包清单，应用页过滤用 */
+  async launchables() { return await this.run('launchables'); },
   /* 只落核指定包：批量套用后立刻生效，比全量快得多 */
   async enforce(pkgs) {
     const a = (pkgs || []).map(p => this.shq(String(p))).join(' ');
@@ -841,6 +847,10 @@ const S = {
   status: {}, freqs: {}, mode: {},
   model: null,
   apps: [],
+  /* 「有前台界面」的包集合（启动器能点开的）。null = 没拿到清单 → 不筛选。
+     用途：应用页默认只显示有界面的应用，避免把没有界面的系统服务也拉进来绑核。 */
+  launchable: null,
+  showHeadless: false,   // 「含无界面」开关：临时显示全部（含系统服务）
   appMode: {},        // pkg → Scene 里指定的模式（'A_<pkg>' 去掉前缀）
   sceneDefault: '',   // Scene 的全局默认模式（powercfg.xml 里的 "*"）
   sceneCount: {},     // 各模式命中多少应用
@@ -848,18 +858,18 @@ const S = {
   games: [],          // [{pkg, mode}]
   templates: [],      // [{id, friendly, other}]
   gameAssign: {},     // pkg → template id
-  // 应用（非游戏）：线程模板驱动
+  // 应用（非游戏）：线程档位驱动
   appTplLib: [],      // [{id, friendly, other, ...}]
   appTplAssign: {},   // pkg → template id
-  mode2tpl: {},       // 模式 → 线程模板 id（后端下发；mode_sync 开启时生效）
   ownMode: {},        // pkg → 模式：**只在 Scene 里单独设过**的（powercfg 有显式条目）
-  modeSync: 0,        // 「跟随 Scene 模式自动切线程模板」开关
+                      //   仅用于行内展示「Scene 省电」这种标记，**不再**驱动线程档位
   debug: 1,           // 「记录模块日志」开关（关掉可省掉守护的写盘开销）
   semCores: {},       // 语义占位符 → 实际核号
   sel: new Set(),
   query: '', filter: 'all',
   showCount: 100,
   backups: [],        // [{name, files, label}] —— 调度配置备份列表
+  fasGov: null,       // {l,m,p} —— Scene 的 FAS 调速器（features/fas.conf 三簇）当前值
   auditBad: [],       // [{file, cn, why, detail}] —— 配置完整性异常项（注错文件清单）
   auditAt: '',        // 上次审计时间
   ops: [],
@@ -929,7 +939,6 @@ async function busy(label, fn) {
                            cpuset:{main_thread,other} }, ... },
      pins:  { pkg: mode },     // 例外表：固定到某模式；其余全部跟随全局
      games: [ 线程级规则 ],
-     deny:  [ 不接管 ],
      allPkgs: [ 设备上全部应用 ]
    }
    ============================================================ */
@@ -1110,8 +1119,17 @@ async function doApply(auto) {
 
 /* ============================================================
    底部选择器（轻量，无依赖）。opts = [{v, label, hint, on}]
-   点的位置：应用行的「Scene 模式」标签 / 「线程模板」标签。
+   点的位置：应用行的「Scene 模式」标签 / 「线程档位」标签。
    ============================================================ */
+/* 底部选择器的「取消」哨兵值。
+   ⚠ 原来用的是 NUL 开头那串 —— NUL 一旦进 HTML 属性（innerHTML 后再解析），
+     按 HTML 规范会被替换成 U+FFFD，于是 getAttribute() 拿回的是 "\uFFFDcancel"，
+     跟哨兵**永远不相等** → 点「取消」会把这个乱码值当成档位/模式回调下去。
+     实测后果：点应用行线程档位的「取消」→ app_assign.tsv 被写成 "pkg<TAB>\uFFFDcancel"；
+     点 Scene 模式选择器的「取消」同理会把乱码模式写进 Scene。
+     换成一个不与任何档位 id 冲突的普通字符串即可。 */
+const PICK_CANCEL = '__cancel__';
+
 function pickSheet(title, opts, cb) {
   let el = $('picksheet');
   if (!el) {
@@ -1124,14 +1142,14 @@ function pickSheet(title, opts, cb) {
     opts.map(o => '<button class="picki' + (o.on ? ' on' : '') + '" data-pv="' + esc(o.v) + '">' +
       esc(o.label) + (o.hint ? '<span class="pickh">' + esc(o.hint) + '</span>' : '') +
       '</button>').join('') +
-    '<button class="picki cancel" data-pv="\u0000cancel">取消</button></div>';
+    '<button class="picki cancel" data-pv="' + PICK_CANCEL + '">取消</button></div>';
   el.classList.add('on');
   el.onclick = e => {
     const b = e.target.closest ? e.target.closest('[data-pv]') : null;
     if (!b) { if (e.target === el) close(); return; }
     const v = b.getAttribute('data-pv');
     close();
-    if (v !== '\u0000cancel') cb(v);
+    if (v !== PICK_CANCEL) cb(v);
   };
 }
 
@@ -1140,7 +1158,7 @@ function pickSheet(title, opts, cb) {
    再在后台把改动写下去。这样点标签是**立刻**有反馈的，
    不会像以前那样弹个阻塞遮罩、等写盘 + 重建 + 落核全跑完才能动。 */
 
-/* 只改一个应用的线程模板 */
+/* 只改一个应用的线程档位 */
 async function setAppTpl(pkg, tplId) {
   const map = S.appTplAssign || (S.appTplAssign = {});
   if (tplId) map[pkg] = tplId; else delete map[pkg];
@@ -1152,12 +1170,12 @@ async function setAppTpl(pkg, tplId) {
     if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
     const r = await Api.syncmode();
     const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
-    logOp('setAppTpl ' + pkg + ' → ' + (tplId || '不接管') + '｜' + line.slice(0, 140));
+    logOp('setAppTpl ' + pkg + ' → ' + (tplId || '未设置') + '｜' + line.slice(0, 140));
     toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
   } catch (e) { toast('设置失败：' + e); }
 }
 
-/* 只改单个游戏的线程模板（与 setAppTpl 同款：乐观更新 + 后台写盘） */
+/* 只改单个游戏的线程档位（与 setAppTpl 同款：乐观更新 + 后台写盘） */
 async function setGameTpl(pkg, tplId) {
   const map = S.gameAssign || (S.gameAssign = {});
   if (tplId) map[pkg] = tplId; else delete map[pkg];
@@ -1169,7 +1187,7 @@ async function setGameTpl(pkg, tplId) {
     if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
     const r = await Api.syncmode();
     const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
-    logOp('setGameTpl ' + pkg + ' → ' + (tplId || '不接管') + '｜' + line.slice(0, 140));
+    logOp('setGameTpl ' + pkg + ' → ' + (tplId || '未设置') + '｜' + line.slice(0, 140));
     toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
   } catch (e) { toast('设置失败：' + e); }
 }
@@ -1239,7 +1257,7 @@ function mergeAppExtras() {
 async function loadApps() {
   // ⚠ 取「KSU 桥的包列表」∪「后端 cmd_apps 的包列表」：
   //   桥的口径可能比后端窄（少系统应用），只用桥会让「全部」漏掉应用，
-  //   用户就没法给它们套线程模板了。
+  //   用户就没法给它们套线程档位了。
   let pkgs = Bridge.listPackages('all') || [];
   try {
     const o = await Api.run('apps');
@@ -1260,8 +1278,24 @@ async function loadApps() {
     return String(a.label).localeCompare(String(b.label), 'zh');
   });
   mergeAppExtras();
-  logOp('已载入 ' + S.apps.length + ' 个应用（带名称 ' + S.apps.filter(a => a.hasLabel).length + ' 个）');
+  // 拉一次「有前台界面」的包清单：应用页默认只显示这些（见 manualApps）。
+  // 失败/为空 → 置 null = 不筛选（老系统没有 query-activities 也不会让列表变空）。
+  try {
+    const t = String(await Api.launchables() || '').trim();
+    const ls = t.split('\n').map(s => s.trim()).filter(Boolean);
+    S.launchable = ls.length ? new Set(ls) : null;
+  } catch (e) { S.launchable = null; }
+  logOp('已载入 ' + S.apps.length + ' 个应用（带名称 ' + S.apps.filter(a => a.hasLabel).length + ' 个' +
+    (S.launchable ? '，其中有前台界面 ' + S.launchable.size + ' 个' : '，未能取到界面清单 → 不筛选') + '）');
   return S.apps;
+}
+
+/* 系统相机：线程**固定「系统接管」**、用户不允许调整
+   → 干脆整块配置入口都隐藏：列表、筛选项计数、批量套用、全选一律不含它。
+   ⚠ 前缀与 util.sh 的 CAMERA_GLOB / CAMERA_RE 一致；落核侧（enforce_threads.sh）
+     还有一道兜底，所以就算分配表里残留了相机条目也不会被绑核。 */
+function isCamera(pkg) {
+  return /^com\.android\.camera|^com\.xiaomi\.camera/.test(String(pkg || ''));
 }
 
 /* 游戏判断：Scene 标记为游戏的应用不进「应用」页 */
@@ -1294,9 +1328,6 @@ async function loadSceneGames() {
       // 不是已安装包，但 enforce_threads.sh 按进程名匹配，能真正生效。
       const t = line.slice(6).split('\t');
       if (t[0]) extras.push({ pkg: t[0], mode: t[1] || '' });
-    } else if (line.indexOf('MODE2TPL_') === 0) {
-      const t = line.slice(9).split('=');
-      if (t[0]) S.mode2tpl[t[0]] = t[1] || '';
     } else if (line.indexOf('CPU_ONLINE=') === 0) {
       sem.__online = line.slice(11);
     } else if (line.indexOf('SEM_') === 0) {
@@ -1305,7 +1336,7 @@ async function loadSceneGames() {
     }
   });
   S.games = games; S.gameAssign = assign; S.templates = templates; S.semCores = sem;
-  logOp('已载入 ' + games.length + ' 个 Scene 游戏，' + templates.length + ' 个线程模板');
+  logOp('已载入 ' + games.length + ' 个 Scene 游戏，' + templates.length + ' 个线程档位');
   return { games, assign, templates, sem };
 }
 
@@ -1316,7 +1347,7 @@ function resolveSem(s) {
     (S.semCores && S.semCores[m.slice(1, -1)]) || m);
 }
 
-/* 应用（非游戏）线程模板：频率跟随 Scene 对单应用的模式，线程由模板决定。
+/* 应用（非游戏）线程档位：频率跟随 Scene 对单应用的模式，线程由模板决定。
    解析后端 cmd_apps_tpl 输出：APP= / ASSIGN= / TPL= / SEM_= 四组行。 */
 async function loadAppsTpl() {
   const text = await Api.apps_tpl();
@@ -1344,7 +1375,7 @@ async function loadAppsTpl() {
   S.appTplAssign = assign; S.appTplLib = templates; S.semCores = sem;
   S.appExtras = extras;
   mergeAppExtras();
-  logOp('已载入应用线程模板：' + templates.length + ' 个，已分配 ' + Object.keys(assign).length +
+  logOp('已载入应用线程档位：' + templates.length + ' 个，已分配 ' + Object.keys(assign).length +
     ' 个应用，进程级条目 ' + extras.length + ' 个');
   return { assign, templates, sem };
 }
@@ -1360,13 +1391,13 @@ async function saveAppAssign(tsv) {
   logOp('保存耗时 ' + (Date.now() - t0) + 'ms');
   S.appTplAssign = {};
   String(tsv).split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.appTplAssign[f[0]] = f[1]; });
-  logOp('✅ 应用线程模板已保存：' + String(r || '').slice(0, 80));
+  logOp('✅ 应用线程档位已保存：' + String(r || '').slice(0, 80));
   toast(/ERR/.test(String(r || '')) ? String(r).slice(0, 90) : '已保存并重建');
   // ⚠ 不再 refreshAll()：那会重读 status / apps_tpl / appmodes（数秒）并整页重渲染，
   //   是「套用模板很卡」的主因。分配状态已在本地，直接重渲染即可。
   render();
 }
-/* 把「已选」套到某个模板（kind='app'|'game'）；tplId 为空 = 改为不接管。
+/* 把「已选」套到某个档位（kind='app'|'game'）；tplId 为空 = 取消分配。
    应用页与游戏页共用这一条路径：勾选在列表里做，模板在模板卡上点。 */
 async function applySelected(kind, tplId) {
   if (!S.sel.size) { toast('先在下面勾选应用'); return; }
@@ -1377,7 +1408,7 @@ async function applySelected(kind, tplId) {
   S.sel.clear();
   if (isGameKind) { await actGameAssignSave('mem'); return; }
   await saveAppAssign(Object.keys(map).map(p => p + '\t' + map[p]).join('\n'));
-  toast('已' + (tplId ? '套用模板' : '改为不接管') + '：' + n + ' 个应用');
+  toast('已' + (tplId ? '套用档位' : '取消分配') + '：' + n + ' 个应用');
 }
 
 /* 标题行右侧的「套用到所选」：
@@ -1390,7 +1421,7 @@ function applyPickedBySheet() {
   const lib = isGame ? (S.templates || []) : (S.appTplLib || []);
   pickSheet('套用到 ' + S.sel.size + ' 个已选',
     lib.map(t => ({ v: t.id, label: t.friendly, hint: t.id }))
-      .concat([{ v: '', label: '不接管', hint: '清空这些包的模板' }]),
+      .concat([{ v: '', label: '取消分配', hint: '清空这些包的档位' }]),
     v => applySelected(isGame ? 'game' : 'app', v));
 }
 
@@ -1450,8 +1481,8 @@ function viewOverview() {
     ${stRow('线程分配服务', st.DAEMON === '1' ? '运行中' : '未运行', st.DAEMON === '1' ? 'ok' : 'bad')}
     ${stRow('无障碍辅助服务', st.ACC === '1' ? '已绑定' : '未绑定', st.ACC === '1' ? 'ok' : 'bad')}
     ${stRow('配置守护', st.GUARD === '1' ? '运行中' : '未运行', st.GUARD === '1' ? 'ok' : 'warn')}
-    ${stRow('自动切换线程', st.MODE_SYNC === '1' ? '已开启' : '已关闭', st.MODE_SYNC === '1' ? 'ok' : '')}
-    ${stRow('CPU 调频', 'Scene 接管', 'ok')}
+    ${stRow('线程分配', '模块落核 · 逐线程', 'ok')}
+    ${stRow('CPU 调频', 'Scene 接管 · 模式页可调', 'ok')}
     ${stRow('模块日志', st.DEBUG === '1' ? '已开启' : '已关闭', st.DEBUG === '1' ? '' : 'ok')}
   </div>
 </div>
@@ -1546,9 +1577,19 @@ function viewModes() {
 
   const cell = (k, st, c) => {
     const arr = arrOf(c), v = m[k][st][c];
-    // CPU 调频已交回 Scene 接管 → 只读展示 Scene 当前下发的值，不再提供编辑。
-    return '<span class="mono" style="font-size:12px;white-space:nowrap">' +
-      fmtMHz(v[0]) + ' <i class="tild">~</i> ' + fmtMHz(v[1]) + '</span>';
+    if (!arr.length) {   // 拿不到该簇可用频率表时退回只读展示
+      return '<span class="mono" style="font-size:12px;white-space:nowrap">' +
+        fmtMHz(v[0]) + ' <i class="tild">~</i> ' + fmtMHz(v[1]) + '</span>';
+    }
+    const opts = sel => arr.map(x =>
+      '<option value="' + x + '"' + (Number(x) === Number(sel) ? ' selected' : '') + '>' +
+      fmtMHz(x) + '</option>').join('');
+    // data-mf = 模式:状态:簇:0(min)|1(max)，由 app.views.js 的 INPUT_HANDLER 处理
+    return '<span class="fcell">' +
+      '<select class="fsel" data-mf="' + k + ':' + st + ':' + c + ':0">' + opts(v[0]) + '</select>' +
+      '<i class="tild">~</i>' +
+      '<select class="fsel" data-mf="' + k + ':' + st + ':' + c + ':1">' + opts(v[1]) + '</select>' +
+      '</span>';
   };
 
   const head = '<tr><th>模式</th><th>L 前台</th><th>L 后台</th><th>M 前台</th><th>M 后台</th><th>P 前台</th><th>P 后台</th></tr>';
@@ -1563,7 +1604,11 @@ function viewModes() {
 
   return `
 <div class="group">
-  <div class="g-title">模式 → 频率（Scene 接管）</div>
+  <div class="g-title">模式 → 频率</div>
+  <div class="mono" style="font-size:11px;opacity:.65;padding:0 0 6px">
+    每格选 min ~ max（L=Pro / M=Premium / P=Ultra）。改动会写进 Scene 的 profile.json，
+    在 Scene 里把应用切成对应模式时生效。
+  </div>
   <div class="card" style="padding:0;overflow:auto">
     <table class="modetbl">
       <thead>${head}</thead>
@@ -1572,6 +1617,7 @@ function viewModes() {
   </div>
   <div class="btn-row" style="padding:6px 0 0">
     <button class="btn primary" data-act="savemodes">保存并下发</button>
+    <button class="btn" data-act="freqdefaults">恢复模块默认</button>
     <button class="btn" data-act="reload">丢弃改动</button>
   </div>
 </div>`;
@@ -1589,59 +1635,69 @@ function viewModes() {
    它们只是多显示一个「Scene 模式」标记，套用模板时没有任何特殊待遇。
    ⚠ hasOwnMode 用 ownMode（Scene 里**显式设过**的条目）而不是 appMode：
      appMode 是「生效模式」，后端会给每个已安装应用都填上（没单独设的填全局默认）。
-   游戏单独在「游戏」页。 */
-function modeSyncOn() { return String(S.modeSync) === '1'; }
+   游戏单独在「游戏」页。
+   ⚠ v10：`ownMode` 只用于**展示**「Scene 省电」这样的标记，不再参与档位推导。 */
 function hasOwnMode(pkg) { return !!(S.ownMode && (pkg in S.ownMode)); }
-function manualApps() { return (S.apps || []).filter(a => !isGame(a.pkg)); }
+function manualApps() {
+  // 游戏去「游戏」页；相机固定「系统接管」、不给配置入口 —— 两者都不出现在应用页
+  let list = (S.apps || []).filter(a => !isGame(a.pkg) && !isCamera(a.pkg));
+  // ★ 默认只留「有前台界面」的应用（启动器里能点开的）。
+  //   本机 487 个已装包里只有 169 个能点开，其余多是 xxx.provider / xxx.service 这类
+  //   没界面的系统服务 —— 给它们绑核既没意义，还可能把系统服务限制坏（用户要求）。
+  //   · S.launchable 为 null（后端拿不到清单）→ 不筛，宁可多显示，不能让列表变空
+  //   · 已经设过档位的包**照常显示** —— 否则老分配会变成「看不见但还在生效」，没法撤
+  if (S.launchable && !S.showHeadless) {
+    list = list.filter(a => S.launchable.has(a.pkg) || !!effTpl(a.pkg));
+  }
+  return list;
+}
 
-/* 模式 → 线程模板 id（映射由后端下发，前后端只有一份常量） */
-function tplOfMode(mode) { const t = (S.mode2tpl || {})[mode]; return t === undefined ? '' : t; }
-/* 模板显示名。空 id 在两种语境下含义不同：
-     · 模板卡 / 选择器  → 「不接管」（确实不生成任何线程规则）
-     · 模式映射那一行   → 「不覆盖」（极速档不覆盖你手动套的模板）
-   所以拆成两个函数，别混用。 */
+/* 被「无界面」规则挡掉的包数（给标题行显示用，避免用户以为应用丢了） */
+function headlessHiddenCount() {
+  if (!S.launchable || S.showHeadless) return 0;
+  return (S.apps || []).filter(a =>
+    !isGame(a.pkg) && !isCamera(a.pkg) && !S.launchable.has(a.pkg) && !effTpl(a.pkg)).length;
+}
+
+/* 档位显示名。档位 id 与模式同名，显示名直接用模式的中文名（省电/均衡/性能/极速）。 */
 function tplName(id) {
-  if (!id) return '不接管';
+  if (!id) return '未设置';
   const t = (S.appTplLib || []).find(x => x.id === id) ||
             (S.templates || []).find(x => x.id === id);
-  return t ? t.friendly : id;
-}
-function tplLabel(id) { return id ? tplName(id) : '不覆盖'; }
-
-/* 某个包**实际生效**的线程模板。
-   「模式同步线程」开着时，Scene 里显式设过模式的包由模式决定模板，
-   优先级高于手动「套用」（与后端 build_app_assign_merged 的规则一致）。
-   手动表里那份仍在，关掉开关就恢复 —— 所以这里只是「显示/统计用哪一份」。 */
-function effTpl(pkg) {
-  // ⚠ 只有「Scene 模式确实映射到某个模板」时才覆盖手动值。
-  //   极速（fast）的映射是空串 = **不覆盖**（保守：让用户手动套的模板生效），
-  //   而不是「不接管」。后端 mode_sync_assign() 也是这么跳过的，两边必须一致。
-  if (modeSyncOn() && hasOwnMode(pkg)) {
-    const t = tplOfMode(S.ownMode[pkg]);
-    if (t) return t;
-  }
-  return (S.appTplAssign || {})[pkg] || '';
+  if (t) return t.friendly;
+  return MODE_CN[id] || id;
 }
 
-/* 非游戏应用「实际生效」的模板表 pkg → 模板id（模板卡统计要用它，
-   否则 Scene 里改成性能的应用不会计入「高性能」，看起来还留在旧模板里） */
+/* 档位 → 「核位摘要」，给档位选择器和档位卡当副标题用。
+   resolveSem 把 {p1_core} 这类占位符展开成真实核号（如 4-7）。
+   目的：让用户在**手动选档位**时一眼看清这个档位会怎么绑，而不是只看到一个名字。 */
+function tplHint(t) {
+  const oc = resolveSem(t.other);
+  const hc = resolveSem(t.heaviest_cores);
+  const ec = resolveSem(t.heavy_cores);
+  // 核位 + comm 全空 = 「系统接管」档：不写任何亲和性
+  if (!oc && !hc && !ec && !t.comm) return '不写线程亲和性 · 交回系统调度器';
+  const parts = [];
+  if (hc) parts.push('主线程 ' + hc);
+  if (ec) parts.push((t.heavy_thread || '重载线程') + ' ' + ec);
+  if (oc) parts.push('其余 ' + oc);
+  if (t.comm) parts.push(t.comm.replace(/;/g, '，'));
+  return parts.join(' · ');
+}
+
+/* 某个包**实际生效**的线程档位。
+   v10：档位就是 app_assign.tsv / game_assign.tsv 里的值 —— **模块自持**。
+   旧版有个「Scene 模式 → 模板」的实时覆盖，副作用很大：Scene 把
+   com.android.camera 这类包设成 fast 后映射为空，那些包会从落核目标表里
+   彻底消失，界面上却仍显示「已套高性能」，实际一条 taskset 都没发。
+   现在要跟 Scene 对齐只能显式点「从 Scene 导入一次」。 */
+function effTpl(pkg) { return (S.appTplAssign || {})[pkg] || ''; }
+
+/* 非游戏应用「实际生效」的档位表 pkg → 档位id（档位卡统计要用） */
 function effAssignMap() {
   const m = {};
   manualApps().forEach(a => { const t = effTpl(a.pkg); if (t) m[a.pkg] = t; });
   return m;
-}
-
-/* 有多少个应用的模板是「由 Scene 模式决定」的（用于模板卡补充说明） */
-function byModeCount(tplId) {
-  let n = 0;
-  manualApps().forEach(a => { if (tplByMode(a.pkg) && effTpl(a.pkg) === tplId) n++; });
-  return n;
-}
-
-/* 该包是否正被 Scene 模式覆盖（用于行内标记） */
-function tplByMode(pkg) {
-  if (!modeSyncOn() || !hasOwnMode(pkg)) return false;
-  return !!tplOfMode(S.ownMode[pkg]);
 }
 
 /* 按模板筛选：S.filter = 'all' | 'tpl:<id>' | 'none' */
@@ -1668,29 +1724,22 @@ function tplAssignedCount() {
   manualApps().forEach(a => { if (effTpl(a.pkg)) n++; });
   return n;
 }
-/* 自定义列表里各模式的数量 */
-
-
 /* 紧凑单行：勾选 + 图标 + 名称/包名 + 当前模板（一屏显示更多应用）。
    ⚠ 这里刻意不放任何下拉：模板在「模板卡」上选，应用只负责被勾选。 */
 function appRowHtml(a) {
   const tpl = effTpl(a.pkg);
-  const byMode = tplByMode(a.pkg);
   const sel = S.sel.has(a.pkg);
   const ico = Bridge.iconOk
     ? '<img class="app-ico" data-ico="' + esc(a.pkg) + '" alt="">'
     : '<div class="app-ico ph" style="background:' + avatarColor(a.pkg) + '">' + esc((a.label || '?').slice(0, 1)) + '</div>';
-  // Scene 里单独设过模式的加一个只读标记，方便对照。
-  // ⚠ 这是「为什么我的应用没跟着 Scene 变」的答案就在这一格：
-  //   标了「· 不覆盖」说明该模式在映射表里是空的（目前只有极速），
-  //   此时**保留你手动套的模板**，不会移组。
+  // Scene 里单独设过模式的加一个展示标记，方便对照。★ 可点 → 直接改 Scene 的模式。
+  // ⚠ v10：这一格**只管 Scene 的频率**，与右边那格的线程档位无关 ——
+  //   两者同名（省电/均衡/性能/极速）但各自独立维护，互不联动。
   const om = hasOwnMode(a.pkg) ? S.ownMode[a.pkg] : '';
   const omCn = om ? (MODE_CN[om] || om) : '';
-  const noMap = !!om && !tplOfMode(om);
-  // ★ 可点：直接改这个应用在 Scene 里的模式（性能 / 均衡 / 省电 / 极速）
   const sc = '<span class="app-tier' + (om ? ' set' : '') + '" data-act="pickmode" data-arg="' +
-    esc(a.pkg) + '" title="修改 Scene 模式">' +
-    (om ? 'Scene ' + esc(omCn) + (noMap ? ' · 不覆盖' : '') : 'Scene 跟随全局') + '</span>';
+    esc(a.pkg) + '" title="修改 Scene 的模式（只影响频率）">' +
+    (om ? 'Scene ' + esc(omCn) : 'Scene 跟随全局') + '</span>';
   return '<label class="app-row pick' + (sel ? ' sel' : '') + '" data-pkg="' + esc(a.pkg) + '">' +
     '<input type="checkbox" class="app-sel" data-sel="' + esc(a.pkg) + '"' + (sel ? ' checked' : '') + '>' +
     ico +
@@ -1698,8 +1747,8 @@ function appRowHtml(a) {
     '<span class="app-pkg">' + esc(shortName(a.pkg, 34)) + '</span></div>' +
     sc +
     '<span class="app-tier' + (tpl ? ' set' : ' none') + '" data-act="picktpl" data-arg="' +
-    esc(a.pkg) + '" title="修改线程模板">' +
-    esc(tplName(tpl)) + (byMode && tpl ? ' · 自动' : '') + '</span>' +
+    esc(a.pkg) + '" title="修改线程档位">' +
+    esc(tplName(tpl)) + '</span>' +
     '</label>';
 }
 
@@ -1722,7 +1771,7 @@ function gameRowHtml(g) {
     esc(g.pkg) + '" title="修改 Scene 模式">Scene ' +
     esc(MODE_CN[mode] || mode || '全局') + '</span>' +
     '<span class="app-tier' + (tpl ? ' set' : ' none') + '" data-act="pickgtpl" data-arg="' +
-    esc(g.pkg) + '" title="修改线程模板">' + esc(tplName(tpl)) + '</span>' +
+    esc(g.pkg) + '" title="修改线程档位">' + esc(tplName(tpl)) + '</span>' +
     '</label>';
 }
 
@@ -1746,34 +1795,34 @@ function pickToolbar() {
   </div>`;
 }
 
-/* 模板卡：模板信息 + 「套用到所选 / 改为不接管」。
+/* 档位卡：档位信息 + 「套用到所选」。
    kind = app | game，决定动作名（appapply / gameapply）与「已配 N」的统计源。 */
 /* 模板卡。
    · kind = app | game（决定动作名 appapply / gameapply 与统计源）
-   · 「不接管」也是一张**平行**的卡（id 为空），不再是按钮 —— 用户要求统一入口。
+   · v12 起**没有「不接管」伪卡**（用户要求删除）；未设置的包只在筛选条里计数。
    · 详情（其余/最重/次重/comm）默认**不显示**，点模板名才弹小窗，点空白处收起。 */
 function tplCardHtml(t, kind, map, countMap) {
-  const isNone = !t.id;
-  const oc = isNone ? '' : resolveSem(t.other);
-  const hc = isNone ? '' : resolveSem(t.heaviest_cores);
-  const ec = isNone ? '' : resolveSem(t.heavy_cores);
+  const oc = resolveSem(t.other);
+  const hc = resolveSem(t.heaviest_cores);
+  const ec = resolveSem(t.heavy_cores);
+  /* 「系统接管」档：核位全空 = 不写任何线程亲和性。
+     它没有核位可展示，但 ⓘ 必须仍能弹出说明（否则点了没反应）→ 单独给一段文案。 */
+  const isFree = !oc && !hc && !ec && !t.comm;
   // countMap = 实际生效表（应用页传 effAssignMap()）；不传就退回手动表（游戏页）
   const src = countMap || map;
-  // 「不接管」没法在生效表里数（表里只有非空值）→ 由调用方算好传进来
   const n = (typeof t.count === 'number')
     ? t.count
     : Object.keys(src).filter(p => src[p] === t.id).length;
-  const bym = (!isNone && countMap) ? byModeCount(t.id) : 0;
   const detail =
     (oc ? '<span class="tpl-p">其余 → ' + esc(oc) + '</span>' : '') +
     (hc ? '<span class="tpl-p">最重 ' + esc(t.heaviest_thread) + ' → ' + esc(hc) + '</span>' : '') +
-    (ec ? '<span class="tpl-p">次重 ' + esc(t.heavy_thread) + ' → ' + esc(ec) + '</span>' : '') +
+    (ec ? '<span class="tpl-p">次重 → ' + esc(ec) + '</span>' : '') +
     (t.comm ? '<span class="tpl-p">comm → ' + esc(resolveSem(t.comm).replace(/;/g, '，')) + '</span>' : '') +
-    /* 「不接管」卡原本没有详情 → 它的 ⓘ 点了没反应。补上说明，
-       顺便把「Scene 极速不覆盖」这条容易误读的规则讲清楚。 */
-    (isNone
-      ? '<span class="tpl-p">不生成线程规则，进程线程全核自由调度</span>' +
-        '<span class="tpl-p">Scene 里单独设过模式的应用仍按模式档位接管</span>'
+    (isFree
+      ? '<span class="tpl-p">不写入任何线程亲和性 —— 全部线程交回系统调度器</span>' +
+        '<span class="tpl-p">主线程 / 渲染 / 其余线程都不绑，新起的线程、新进程也不干预</span>' +
+        '<span class="tpl-p">由内核 core_ctl 与厂商 power HAL 自行决定何时上超大核</span>' +
+        '<span class="tpl-p">从其它档位切到本档时，会主动解绑一次旧绑定</span>'
       : '');
 
   /* 标题行 = [模板名 ⓘ] + id 徽标 + 已配计数 +「套用」按钮，全部一行。
@@ -1789,10 +1838,8 @@ function tplCardHtml(t, kind, map, countMap) {
     '<span class="n" data-act="tpltips">' + esc(t.friendly) + '</span>' +
     '<span class="tpl-i" data-act="tpltips" title="查看模板说明">i</span>' +
     '</span>' +
-    (isNone ? '' : '<span class="pill">' + esc(t.id) + '</span>') +
-    '<span class="pill' + (n ? ' accent' : '') + '"' +
-    (bym ? ' title="其中 ' + bym + ' 个由 Scene 模式自动决定"' : '') + '>已配 ' + n +
-    (bym ? ' <span style="color:var(--sub)">(模式 ' + bym + ')</span>' : '') + '</span>' +
+    '<span class="pill">' + esc(t.id) + '</span>' +
+    '<span class="pill' + (n ? ' accent' : '') + '">已配 ' + n + '</span>' +
     '<button class="btn primary btn-xs tpl-apply" data-act="' + kind + 'apply" data-arg="' +
     esc(t.id) + '">套用</button>' +
     '</div>';
@@ -1801,7 +1848,7 @@ function tplCardHtml(t, kind, map, countMap) {
      原来是 position:absolute + top:41px，内容一多就超出卡片下边界被 .card 的
      overflow:hidden 裁掉（用户报「超出部分看不见」）。
      改成普通流式块后由卡片自己撑高，不再有裁切问题。 */
-  return '<div class="tpl' + (isNone ? ' plain' : '') + '" data-tpl="' + esc(t.id || '-') + '">' +
+  return '<div class="tpl" data-tpl="' + esc(t.id) + '">' +
     head +
     (detail ? '<div class="tpl-b">' + detail + '</div>' : '') +
     '</div>';
@@ -1846,7 +1893,7 @@ function updateFilterChips() {
     const k = b.getAttribute('data-filter');
     b.classList.toggle('on', k === S.filter);
     if (k === 'all') b.textContent = '全部 ' + appTotalCount();
-    else if (k === 'none') b.textContent = '不接管 ' + (appTotalCount() - tplAssignedCount());
+    else if (k === 'none') b.textContent = '未设置 ' + (appTotalCount() - tplAssignedCount());
     else if (k.indexOf('tpl:') === 0) {
       const id = k.slice(4), t = (S.appTplLib || []).find(x => x.id === id);
       const n = manualApps().filter(a => (S.appTplAssign || {})[a.pkg] === id).length;
@@ -1854,7 +1901,12 @@ function updateFilterChips() {
     }
   });
   const c = $('appcount');
-  if (c) c.textContent = filterApps().length + ' 个应用' + (S.query ? ' · 搜索「' + S.query + '」' : '');
+  if (c) {
+    const hid = headlessHiddenCount();
+    c.textContent = filterApps().length + ' 个应用' +
+      (S.query ? ' · 搜索「' + S.query + '」' : '') +
+      (hid ? ' · 已隐藏 ' + hid + ' 个无界面' : '');
+  }
 }
 
 /* 增量重渲染应用列表（不动搜索框/工具条 → 不丢焦点、不重载无关图标） */
@@ -1877,36 +1929,42 @@ function afterAppsRender() {
 function viewApps() {
   const appTotal = appTotalCount();
   const assignedCount = tplAssignedCount();
+  /* v12：删掉「不接管」伪卡（用户要求）—— 档位卡只剩模块定义的 4 档。
+     未设置的包不再单独成卡，但筛选条里仍留一个「未设置」入口，方便批量补配。 */
   const cards = (S.appTplLib || []).map(t =>
-      tplCardHtml(t, 'app', S.appTplAssign || {}, effAssignMap()))
-    .concat([tplCardHtml({ id: '', friendly: '不接管', count: appTotal - assignedCount },
-      'app', S.appTplAssign || {}, effAssignMap())]).join('');
+      tplCardHtml(t, 'app', S.appTplAssign || {}, effAssignMap())).join('');
   const assignTsv = Object.keys(S.appTplAssign || {}).map(p => p + '\t' + S.appTplAssign[p]).join('\n');
-  const on = modeSyncOn();
 
   return `
 <div class="group">
-  <div class="g-title">模式同步线程</div>
+  <div class="g-title">从 Scene 导入档位</div>
   <div class="card" style="padding:12px">
-    <label class="swrow"><input type="checkbox" id="msync"${on ? ' checked' : ''}><span class="sw"></span>
-      <span class="swtxt"><b>自动切换</b></span>
-    </label>
+    <div class="mono" style="font-size:11.5px;opacity:.75;line-height:1.7">
+      档位与 Scene 模式同名：<b>省电 / 均衡 / 性能 / 系统接管</b>。<br>
+      这里的分配是<b>模块自己的数据</b>，不会随 Scene 变动而漂移 ——
+      想让两边对齐时点下面的按钮跑一次（覆盖 Scene 里显式设过模式的那几条，其余保留）。<br>
+      <b>默认不预设任何分配</b> —— 全部靠「从 Scene 导入」或逐条手动设置产生。<br>
+      系统相机固定为 <b>系统接管</b>，不可调整 → 不在下面的列表里。
+    </div>
     <div class="btn-row" style="padding:12px 0 0">
-      <button class="btn primary" data-act="syncfromscene">立即按 Scene 模式同步</button>
+      <button class="btn primary" data-act="importscene">从 Scene 导入一次</button>
     </div>
   </div>
 </div>
 
 <div class="group">
   <div class="g-title rowhead">
-    <span class="rh-t">线程模板<span class="tpl-i" data-act="tpltipsall" title="查看模板说明">i</span></span>
+    <span class="rh-t">线程档位<span class="tpl-i" data-act="tpltipsall" title="查看档位说明">i</span></span>
     <button class="btn btn-xs" data-act="tplall">套用到所选</button>
   </div>
   <div class="card" style="padding:12px">${cards || '<div class="empty">未找到模板</div>'}</div>
 </div>
 
 <div class="group">
-  <div class="g-title"><span id="appcount"></span></div>
+  <div class="g-title rowhead">
+    <span class="rh-t"><span id="appcount"></span></span>
+    <button class="btn btn-xs${S.showHeadless ? ' primary' : ''}" data-act="toggleheadless">${S.showHeadless ? '隐藏无界面' : '含无界面'}</button>
+  </div>
   ${pickToolbar()}
   <div class="filters" style="margin-top:8px">
     <button class="${S.filter === 'all' ? 'on' : ''}" data-filter="all">全部 ${appTotal}</button>
@@ -1915,7 +1973,7 @@ function viewApps() {
       return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
         esc(t.friendly) + ' ' + n + '</button>';
     }).join('')}
-    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">不接管 ${appTotal - assignedCount}</button>
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">未设置 ${appTotal - assignedCount}</button>
   </div>
   <div class="card" style="margin-top:8px"><div class="listbox" id="applist">${appListHtml()}</div></div>
 </div>
@@ -1952,15 +2010,36 @@ function viewGames() {
   const gmap = S.gameAssign || {};
   const glist = list.filter(g => tplMatch(gmap, g.pkg));
   const rows = glist.map(gameRowHtml).join('');
-  const cards = (S.templates || []).map(t => tplCardHtml(t, 'game', S.gameAssign || {}))
-    .concat([tplCardHtml({ id: '', friendly: '不接管', count: games.filter(g => !gmap[g.pkg]).length },
-      'game', S.gameAssign || {})]).join('');
+  /* v12：删掉「不接管」伪卡，档位卡只剩模块定义的 4 档 */
+  const cards = (S.templates || []).map(t => tplCardHtml(t, 'game', S.gameAssign || {})).join('');
   const assignTsv = Object.keys(S.gameAssign || {}).map(p => p + '\t' + S.gameAssign[p]).join('\n');
+  /* Scene 的 FAS 调速器（features/fas.conf 三簇）—— 游戏页顶部那个按钮的状态显示 */
+  const fg = S.fasGov || {};
+  const gov = [fg.l, fg.m, fg.p].map(v => v || '?');
+  const govKnown = !!(fg.l || fg.m || fg.p);
+  const allX = fg.l === 'xres' && fg.m === 'xres' && fg.p === 'xres';
 
   return `
 <div class="group">
   <div class="g-title rowhead">
-    <span class="rh-t">线程模板<span class="tpl-i" data-act="tpltipsall" title="查看模板说明">i</span></span>
+    <span class="rh-t">Scene · FAS 调速器</span>
+    <button class="btn btn-xs${allX ? '' : ' primary'}" data-act="fasxres">设为 xres</button>
+  </div>
+  <div class="card" style="padding:12px">
+    <div style="font-size:12px;line-height:1.75;color:var(--sub)">
+      当前：<b style="color:var(--text)">${esc(govKnown ? gov.join(' / ') : '未知')}</b>
+      ${allX ? '<span class="dot d-ok" style="margin-left:6px"></span>已统一' : ''}<br>
+      小核 / 中核 / 大核，<b>FAS / FEAS 工作期间</b>使用的调速器。
+      O3 上 Scene 的下拉候选是它写死的（auto / performance / conservative，<b>没有 xres</b>），
+      所以这里直接改 Scene 的 <code>features/fas.conf</code>，与「CPU 控制」页和模式预设置保持一致；
+      写好后会重启 scene-daemon（这几个键它只在启动时读一次）。
+    </div>
+  </div>
+</div>
+
+<div class="group">
+  <div class="g-title rowhead">
+    <span class="rh-t">线程档位<span class="tpl-i" data-act="tpltipsall" title="查看档位说明">i</span></span>
     <button class="btn btn-xs" data-act="tplall">套用到所选</button>
   </div>
   <div class="card" style="padding:12px">${cards || '<div class="empty">未找到模板</div>'}</div>
@@ -1976,7 +2055,7 @@ function viewGames() {
       return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
         esc(t.friendly) + ' ' + n + '</button>';
     }).join('')}
-    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">不接管 ${games.filter(g => !gmap[g.pkg]).length}</button>
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">未设置 ${games.filter(g => !gmap[g.pkg]).length}</button>
   </div>
   <div class="card" style="margin-top:8px"><div class="listbox">${rows || '<div class="empty">没有匹配的游戏</div>'}</div></div>
 </div>
@@ -2049,7 +2128,7 @@ async function actSaveModes() {
   await refreshStatus(); render();
 }
 
-/* 游戏线程分配：下拉或 TSV 直编，写入 game_assign.tsv 后按 Scene 重建 threads.json */
+/* 游戏档位分配：下拉或 TSV 直编，写入 game_assign.tsv 后重建 threads.json 并落核 */
 async function actGameAssignSave(src) {
   let tsv;
   if (src === 'tsv') {
@@ -2144,6 +2223,33 @@ const ACTIONS = {
   // 「立即生效」按钮（dirty bar）用：把改动下发到 Scene
   live: async () => { const o = await doApply(false); if (/^OK/m.test(String(o || ''))) { await refreshStatus(); render(); } },
   savemodes: actSaveModes,
+
+  /* 恢复模块内置默认频率。
+     数据源是后端 cmd_mode 下发的 DEF_<mode>_<state>，
+     格式：L.min L.max M.min M.max P.min P.max（6 个数）。
+     只改前端 model，仍需点「保存并下发」才写进 Scene 的 profile.json。 */
+  freqdefaults: () => {
+    const src = S.mode || {};
+    let n = 0;
+    MODE_ORDER.forEach(md => {
+      const t = S.model && S.model.modes && S.model.modes[md];
+      if (!t) return;
+      ['active', 'inactive'].forEach(st => {
+        const raw = src['DEF_' + md + '_' + st];
+        if (!raw) return;
+        const a = String(raw).trim().split(/\s+/).map(Number);
+        if (a.length < 6 || a.some(x => !isFinite(x))) return;
+        t[st].L = [a[0], a[1]];
+        t[st].M = [a[2], a[3]];
+        t[st].P = [a[4], a[5]];
+        n++;
+      });
+    });
+    if (!n) { toast('拿不到模块默认频率，请先刷新一次'); return; }
+    markDirty();
+    toast('已填入模块默认频率（' + n + ' 组），点「保存并下发」生效');
+    render();
+  },
   gameasssave: () => actGameAssignSave('tsv'),
   // 右上角小按钮：重新读取（列表页只增量刷列表，不重建输入框）
   reload: async () => {
@@ -2169,12 +2275,13 @@ const ACTIONS = {
     const sc = $('selcount'); if (sc) sc.textContent = '0';
   },
   appapply: t => applySelected('app', t),
-  // 立即按 Scene 模式把线程模板改成对应档（后端会落盘 app_assign.tsv + 重建 + 落核）
-  syncfromscene: async () => {
-    const r = await busy('正在按 Scene 模式同步…', () => Api.applyModes());
+  // 从 Scene **一次性**导入档位（覆盖 Scene 里显式设过模式的那几条，其余保留）。
+  // v10 起不再是「实时跟随」—— 旧版 Scene 一改模式线程就跟着漂，还会和手动套用打架。
+  importscene: async () => {
+    const r = await busy('正在从 Scene 导入…', () => Api.importScene());
     const lines = String(r || '').trim().split('\n').filter(Boolean);
     const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || lines[lines.length - 1] || '';
-    logOp('applymodes → ' + lines.join(' | ').slice(0, 200));
+    logOp('importscene → ' + lines.join(' | ').slice(0, 200));
     toast(/^OK/.test(verdict) ? verdict.slice(3, 120) : verdict.slice(0, 120));
     await loadSceneModes();
     try { await loadAppsTpl(); } catch (e) { }
@@ -2184,32 +2291,57 @@ const ACTIONS = {
   tpltips: (a, el) => toggleTplTips(el),
   // 标题上的 ⓘ：把每一张模板卡的详情全部展开（再点收起）
   tpltipsall: () => toggleAllTplTips(),
+  /* ---- 应用页：「含无界面」开关（默认只显示有前台界面的应用）---- */
+  toggleheadless: () => {
+    S.showHeadless = !S.showHeadless;
+    logOp(S.showHeadless
+      ? '应用页：已显示无界面应用（含系统服务）—— 只应临时查看'
+      : '应用页：已隐藏无界面应用（只显示启动器能打开的）');
+    render();
+  },
+  /* ---- 游戏页：把 Scene 的 FAS 调速器（features/fas.conf 三簇）统一为 xres ---- */
+  fasxres: async () => {
+    const r = await busy('正在把 FAS 调速器设为 xres…', () => Api.fasxres());
+    const lines = String(r || '').trim().split('\n').filter(Boolean);
+    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || (lines[lines.length - 1] || '');
+    logOp(lines.join(' | ').slice(0, 200));
+    if (/^OK/.test(verdict)) {
+      toast(verdict.slice(3, 130) || '已设为 xres');
+      await loadGames();      // 重新读一次当前值，卡片跟着更新
+      render();
+    } else {
+      toast('设置失败：' + verdict.slice(0, 90));
+    }
+  },
   // 标题行右侧「套用到所选」：给已勾选的包逐个弹模板选择器
   tplall: () => applyPickedBySheet(),
   // 游戏行的模板标签
   pickgtpl: pkg => {
     const cur = (S.gameAssign || {})[pkg] || '';
-    pickSheet('线程模板 · ' + appLabel(pkg),
-      (S.templates || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur, hint: t.id }))
-        .concat([{ v: '', label: '不接管', on: !cur }]),
+    pickSheet('线程档位 · ' + appLabel(pkg),
+      (S.templates || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur, hint: tplHint(t) }))
+        .concat([{ v: '', label: '取消分配', on: !cur, hint: '不写线程规则 · 交回系统' }]),
       v => setGameTpl(pkg, v));
   },
   // 应用行的两个标签：点开底部选择器直接改
+  // ⚠ 这里曾经引用 `tplByMode()` —— 那个函数在 v10「档位改为模块自持」时已被删除，
+  //   于是点这一格会抛 ReferenceError → 选择器根本弹不出来（用户反馈「线程方案改不了」）。
+  //   v13 修掉，并顺手把每个档位的**核位摘要**当副标题显示，让它成为真正可用的手动修改入口。
   picktpl: pkg => {
     const cur = effTpl(pkg);
-    const yes = !tplByMode(pkg);
-    pickSheet('线程模板 · ' + appLabel(pkg),
-      (S.appTplLib || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur && yes, hint: t.id }))
-        .concat([{ v: '', label: '不接管', on: !cur }]),
+    pickSheet('线程档位 · ' + appLabel(pkg),
+      (S.appTplLib || []).map(t => ({ v: t.id, label: t.friendly, on: t.id === cur, hint: tplHint(t) }))
+        .concat([{ v: '', label: '取消分配', on: !cur, hint: '不写线程规则 · 交回系统' }]),
       v => setAppTpl(pkg, v));
   },
   pickmode: pkg => {
+    // 这一格改的是 **Scene 的模式**（决定频率），不是模块的线程档位。
+    // v10 起两者同名（省电/均衡/性能/极速）但各自独立 —— 所以 hint 里说明去哪改线程。
     const cur = hasOwnMode(pkg) ? S.ownMode[pkg] : '';
     const opts = MODE_ORDER.map(m => ({ v: m, label: MODE_CN[m], on: m === cur,
-      hint: m + '  →  线程模板 ' + (tplLabel(tplOfMode(m)) || '不覆盖（保留手动）')
-        + (tplOfMode(m) ? '' : '') }));
+      hint: '线程档位要单独设（在「线程档位」卡上点「套用」）' }));
     opts.push({ v: '*', label: '跟随全局', on: !cur });
-    pickSheet('Scene 模式 · ' + appLabel(pkg), opts, v => {
+    pickSheet('Scene 模式 · ' + appLabel(pkg) + '（只影响频率）', opts, v => {
       if (v === '*') { toast('要清除单应用设置，请到 Scene 里操作'); return; }
       setSceneMode(pkg, v);
     });
@@ -2239,7 +2371,7 @@ function switchTab(a) {
   render();
   window.scrollTo(0, 0);
   // 兜底：应用页依赖 apps_tpl（模板卡 + 筛选项计数）。若还没到就补拉一次再重渲染，
-  // 否则会出现「模板卡空白、筛选项只有『全部 0 / 不接管 0』」。
+  // 否则会出现「档位卡空白、筛选项只有『全部 0 / 未设置 0』」。
   if (a === 'apps' && !(S.appTplLib || []).length) {
     loadAppsTpl().then(() => { if (S.tab === 'apps') render(); }).catch(() => { });
   }
@@ -2251,7 +2383,7 @@ function switchTab(a) {
   }
 }
 
-/* 三个开关共用 settings.conf：改写一个时必须带上另外两个的现值，否则会被清掉 */
+/* 开关共用 settings.conf：改写一个时必须带上另一个的现值，否则会被清掉 */
 async function settingsText(key, val) {
   const cur = await Api.readText('settings');
   const kv = {};
@@ -2259,11 +2391,14 @@ async function settingsText(key, val) {
     const i = l.indexOf('='); if (i > 0) kv[l.slice(0, i).trim()] = l.slice(i + 1).trim();
   });
   // 缺省值：与 util.sh settings_load 的默认保持一致
-  if (!('mode_sync' in kv)) kv.mode_sync = '0';
   if (!('debug' in kv)) kv.debug = '1';
   kv[key] = String(val);
-  // freq_sync 开关已按用户要求删除：频率同步常开，不再写这个键。
-  return ['mode_sync', 'debug'].map(k => k + '=' + kv[k]).join('\n') + '\n';
+  // v10 起 settings.conf 只有 debug 一个键：
+  //   · freq_sync —— 频率恒由 Scene 下发，模块不写任何频率节点
+  //   · mode_sync —— 档位改为模块自持，只在用户点「从 Scene 导入」时对齐一次
+  // 历史文件里残留的这两个键会被 util.sh 的 settings_load 忽略；这里也不再写回，
+  // 写了只会让「模块描述」和界面状态互相矛盾。
+  return ['debug'].map(k => k + '=' + kv[k]).join('\n') + '\n';
 }
 
 function clickHandler(ev) {
@@ -2292,7 +2427,26 @@ const INPUT_HANDLER = async ev => {
     return;
   }
 
-  // 模式页：频率
+  // 模式页：频率 min/max 下拉（data-mf = 模式:状态:簇:0=min|1=max）
+  // v9：重新开放编辑 —— 改完点「保存并下发」会写进 Scene 的 profile.json preset。
+  if (t.dataset && t.dataset.mf) {
+    const p = String(t.dataset.mf).split(':');
+    const md = S.model && S.model.modes && S.model.modes[p[0]];
+    const row = md && md[p[1]];
+    if (!row || !row[p[2]]) return;
+    const v = row[p[2]];
+    const i = p[3] === '1' ? 1 : 0;
+    const nv = parseInt(t.value, 10);
+    if (!isFinite(nv)) return;
+    v[i] = nv;
+    if (v[0] > v[1]) {          // min > max 时把另一端顶过去，避免下发非法区间
+      if (i === 0) v[1] = v[0]; else v[0] = v[1];
+      render();
+    }
+    markDirty();
+    return;
+  }
+
   // 日志页：模块日志开关（控功耗）
   if (t.id === 'dbg') {
     const on = t.checked ? 1 : 0;
@@ -2304,22 +2458,6 @@ const INPUT_HANDLER = async ev => {
     });
     logOp(on ? '✅ 已开启模块日志' : '✅ 已关闭模块日志（省功耗）');
     toast(on ? '已开启：守护会写日志' : '已关闭：守护不再写盘');
-    render();
-    return;
-  }
-  // 应用页：模式同步线程开关
-  if (t.id === 'msync') {
-    const on = t.checked ? 1 : 0;
-    const r = await busy(on ? '正在开启…' : '正在关闭…', async () => {
-      const w = await Api.saveSettings(await settingsText('mode_sync', on));
-      if (!/^OK/m.test(String(w))) return 'ERR 写入失败：' + w;
-      S.modeSync = on;
-      const e = await Api.run('enforce');   // 立刻按新规则重落一次
-      await refreshStatus();
-      return e;
-    });
-    logOp((on ? '✅ 已开启' : '✅ 已关闭') + '「自动切换」｜' + String(r || '').slice(0, 60));
-    toast(on ? '已开启：单独设过模式的应用改由模式自动绑定线程' : '已关闭：全部应用回到手动模板');
     render();
     return;
   }
@@ -2496,7 +2634,6 @@ async function loadFreqs() {
 
 async function refreshStatus() {
   S.status = await Api.status();
-  S.modeSync = String(S.status.MODE_SYNC) === '1' ? 1 : 0;
   S.debug = String(S.status.DEBUG) === '1' ? 1 : 0;   // 日志开关（影响守护写盘）
   S.mode = await Api.modes();
   const sv = $('saved');
@@ -2522,7 +2659,18 @@ async function loadSceneModes() {
 
 async function loadGames() {
   // 游戏列表 / 模板 / 分配全部来自 Scene（cmd_games），不再读旧版 gamesjson
-  return await loadSceneGames();
+  const r = await loadSceneGames();
+  // 顺带读一次 Scene 的 FAS 调速器 —— 游戏页那个「设为 xres」按钮要显示当前值
+  // （读不到就置 null，卡片上显示「未知」，不影响别的）
+  try {
+    const kv = Api._kv(await Api.conf('fas'));
+    S.fasGov = {
+      l: String(kv.governor_little || '').trim(),
+      m: String(kv.governor_middle || '').trim(),
+      p: String(kv.governor_prime || '').trim()
+    };
+  } catch (e) { S.fasGov = null; }
+  return r;
 }
 
 async function refreshAll() {
@@ -2618,16 +2766,20 @@ const Demo = {
     // ⚠ apps_tpl 必须排在 apps 之前：/^apps/ 会前缀命中 apps_tpl，把模板当包名列表返回
     if (/^apps_tpl/.test(c)) return { code: 0, out: this.apps_tpl() };
     if (/^apps/.test(c)) return { code: 0, out: DEMO_APP_PKGS.join('\n') };
+    // 演示模式：假装「本地备份」没有前台界面（其余都能从启动器点开）→ 让过滤与开关看得出来
+    if (/^launchables/.test(c)) return { code: 0, out: DEMO_APP_PKGS.filter(p => p !== 'com.miui.backup').join('\n') };
     if (/^appmodes/.test(c)) return { code: 0, out: this.appmodes() };
     if (/^games/.test(c)) return { code: 0, out: this.games() };
-    if (/^conf /.test(c)) return { code: 0, out: 'gold_first=0\nuse_presets=1\nin_apps=1\nin_games=1\nperf_notify=1\n' };
+    if (/^fasxres/.test(c)) return { code: 0, out: 'OK FAS 调速器已设为 xres/xres/xres（原 auto/auto/auto）· scene-daemon 已重启' };
+    if (/^conf fas/.test(c)) return { code: 0, out: 'governor_little=xres\ngovernor_middle=xres\ngovernor_prime=xres\n' };
+    if (/^conf /.test(c)) return { code: 0, out: 'gold_first=0\nuse_presets=0\nin_apps=0\nin_games=0\nperf_notify=1\n' };
     if (/^b64len/.test(c)) return { code: 0, out: String(b64enc(this.file(c.split(/\s+/)[1])).length) };
     if (/^b64 /.test(c)) {
       const p = c.split(/\s+/); const t = b64enc(this.file(p[1]));
       const s = parseInt(p[2] || '1', 10), n = parseInt(p[3] || '40000', 10);
       return { code: 0, out: t.slice(s - 1, s - 1 + n) };
     }
-    if (/^(live|modeset|scheme|enforce)/.test(c)) return { code: 0, out: 'OK 演示模式' };
+    if (/^(live|modeset|scheme|enforce|importscene|unbindfast)/.test(c)) return { code: 0, out: 'OK 演示模式' };
     if (/^log/.test(c)) return { code: 0, out: '[演示模式] 未真正执行任何命令' };
     if (/^(wbegin|wappend)/.test(c)) return { code: 0, out: 'OK' };
     if (/^wcommit/.test(c)) return { code: 0, out: 'OK 0（演示模式不会真写）' };
@@ -2637,7 +2789,7 @@ const Demo = {
     if (id === 'model') return '';
     if (id === 'threads') return JSON.stringify(DEMO_THREADS, null, 2);
     if (id === 'profile') return '';
-    if (id === 'settings') return 'mode_sync=0\n';
+    if (id === 'settings') return 'debug=1\n';
     return '';
   },
   modeCmd() {
@@ -2654,7 +2806,7 @@ const Demo = {
   status() {
     return [
       'VER=3.0 (2026-09-15)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
-      'SCHEME=sweet_bal', 'SCHEME_CN=日常均衡', 'MODE_SYNC=0', 'FREQ_SYNC=0', 'DEBUG=1', 'DAEMON=1', 'ACC=1',
+      'SCHEME=sweet_bal', 'SCHEME_CN=日常均衡', 'DEBUG=1', 'DAEMON=1', 'ACC=1',
       'GUARD=1', 'CONF_OK=1', 'MODE=balance', 'MODE_CN=均衡', 'PRESET_OK=1',
       'SCUR_L=912000', 'SCUR_M=1468800', 'SCUR_P=2044800',
       'QMAX_L=1939200', 'QMAX_M=1968000', 'QMAX_P=2371200',
@@ -2679,10 +2831,12 @@ const Demo = {
     return [
       'GAME=com.tencent.tmgp.sgame\tfast',
       'GAME=com.tencent.jkchess\tfast',
-      'ASSIGN=com.tencent.tmgp.sgame\tunity',
-      'ASSIGN=com.tencent.jkchess\tunity',
-      tpl('unity', 'Unity 游戏', '{p1_core}', 'UnityMain', '{p2_core}', 'UnityGfx', '{p1_core}', '4-7:RenderThread,Job.;0-3:Audio'),
-      tpl('default', '通用游戏', '{p1_core}', 'main', '{p2_core}', 'render', '{p1_core}', '0-3:bg'),
+      'ASSIGN=com.tencent.tmgp.sgame\tbalance',
+      'ASSIGN=com.tencent.jkchess\tbalance',
+      tpl('powersave',   '省电', '{e_core}',  '', '{e_core}',  '',          '',           ''),
+      tpl('balance',     '均衡', '{e_core}',  '', '{p1_core}', 'UnityGfx',  '{p1_core}',  '{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan'),
+      tpl('performance', '性能', '{p1_core}', '', '{p1_core}', 'UnityGfx',  '{p1_core}',  '{e_core}=Audio,FMOD,Http'),
+      tpl('fast',        '系统接管', '',          '', '',          '',          '',           ''),
       'CPU_ONLINE=0-9',
       'SEM_e_core=0-3', 'SEM_p1_core=4-7', 'SEM_p2_core=8-9',
       'SEM_p_core=4-9', 'SEM_hp_core=8-9', 'SEM_all_core=0-9'
@@ -2695,15 +2849,14 @@ const Demo = {
       'APP=com.tencent.mm\tperformance',
       'APP=com.taobao.taobao\tpowersave',
       'APP=com.android.camera\tfast',
-      'ASSIGN=com.tencent.mm\tsmooth',
-      tpl('light', '轻量·省电', '{e_core}', 'main', '{p1_core}', '', '', '{e_core}=IO,Network,Http,Binder,Pool;{p1_core}=Worker,Job,Async'),
-      tpl('smooth', '流畅日常', '{p1_core}', 'main', '{p1_core}', 'render', '{hp_core}', '{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async;{e_core}=IO,Network,Audio,Binder'),
-      tpl('perf', '高性能', '{p_core}', 'main', '{hp_core}', 'heavy', '{hp_core}', '{hp_core}=RenderThread,GLThread,Vulkan;{p1_core}=Worker,Job,Async,Compute;{e_core}=IO,Network'),
+      'ASSIGN=com.tencent.mm\tbalance',
+      tpl('powersave',   '省电', '{e_core}',  '', '{e_core}',  '',             '{e_core}',  ''),
+      tpl('balance',     '均衡', '{e_core}',  '', '{p1_core}', 'RenderThread', '{p1_core}', '{e_core}=Worker,Job,Async,Pool'),
+      tpl('performance', '性能', '{p1_core}', '', '{p1_core}', 'RenderThread', '{p1_core}', ''),
+      tpl('fast',        '系统接管', '',          '', '',          '',             '',          ''),
       'CPU_ONLINE=0-9',
       'SEM_e_core=0-3', 'SEM_p1_core=4-7', 'SEM_p2_core=8-9',
       'SEM_p_core=4-9', 'SEM_hp_core=8-9', 'SEM_all_core=0-9',
-      'MODE2TPL_powersave=light', 'MODE2TPL_balance=smooth',
-      'MODE2TPL_performance=perf', 'MODE2TPL_fast=',
       'APP_TPL_HAS=1', 'APP_ASSIGNED=1'
     ].join('\n');
   }

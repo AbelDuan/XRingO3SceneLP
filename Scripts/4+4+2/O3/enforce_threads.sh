@@ -2,10 +2,20 @@
 # ============================================================
 #  线程绑核「落地」器 v3（2026-09-15）
 # ------------------------------------------------------------
-#  【为什么必须自己做】Scene **不会**应用我们写进 threads.json 的规则：
-#    把 com.tencent.mm 设成「轻量·省电」(0-3)，app_cpuset / cpuset 两种形状都写过
-#    + 重启 scene-daemon，冷启动微信 60 秒内线程仍在 0-9。用户看到的
-#    「先跑 4-9、过一阵才变 0-3」是 Scene 自己的前台/后台默认策略。
+#  【为什么必须自己做】
+#    2026-09-17 实测修正（此前"Scene 不会应用 threads.json"的结论**已被推翻**）：
+#    Scene 的「核心分配」**会**读 files/threads.json 的 app_cpuset，并在**触摸时**
+#    把值写进 /dev/cpuset/top-app/{main,render,other}/cpus（真实手指或内核级
+#    sendevent 都能触发；input swipe 注入的是 InputManager 事件，不经过 /dev/input，
+#    所以触发不了）。而且它的 @cpuset 预算是**按 Scene 全局模式**给的，写子组时
+#    还会自己裁到预算内 —— 结果是「省电」这类窄预算把所有档位压平成同一核位，
+#    per-app 差异全部消失（用户实测：效果很差）。
+#
+#    所以 v10 的取舍是：
+#      · Scene 侧关闭核心分配（Config/*/features/cpuset.conf: in_apps/in_games=0），
+#        它只负责它擅长的部分 —— 按模式下发 CPU 频率；
+#      · 线程由本脚本逐线程落核（sched_setaffinity），能精确到 UnityMain /
+#        RenderThread / 任意 comm 名字，这是 Scene 做不到的。
 #
 #  【v3 的关键发现：cgroup 预算】
 #    本机是 cgroup v1 cpuset（挂载在 /dev/cpuset，cpuset_v2_mode），
@@ -13,7 +23,9 @@
 #        /dev/cpuset/background      cpus = 0-3
 #        /dev/cpuset/foreground      cpus = 0-9
 #        /dev/cpuset/top-app         cpus = 0-9
-#        /dev/cpuset/top-app/0-5     ← Scene 就是靠建这种子组做「应用核心分配」
+#        /dev/cpuset/top-app/main    ← Scene 的「核心分配」写的就是这几个子组
+#        /dev/cpuset/top-app/render     （实测 2026-09-17；main/render/other 三个
+#        /dev/cpuset/top-app/other      子组由 Scene 自己创建，task_profiles.json 里没有）
 #    sched_setaffinity 只能在预算**之内**收窄：对 background 组里的进程
 #    `taskset -p f0`（4-7）会直接 EINVAL（实测）。
 #    所以本脚本把目标核与当前组的预算取交集：
@@ -31,15 +43,17 @@
 #      ⚠ 本机 `printf` **不是内建**（/system/bin/printf），循环里逐行 printf
 #        等于每行 fork 一次（72 行就要 1 秒，还会打断 read 缓冲）→ 必须攒好再一次写。
 #
-#  目标解析优先级（与前端 / threads.json 完全一致）：
-#    ① Scene 游戏名单里的包        → game_assign.tsv 的手动模板
-#    ② 在 Scene 里单独设过模式的包 → 开关开启时按模式自动映射
-#         省电→light / 均衡→smooth / 性能→perf / 极速→**不覆盖**（保留手动模板）
-#         ⚠ 不覆盖 ≠ 删除。空映射必须回落 ③，否则被 Scene 设成 fast 的包会彻底
-#           失去线程管理（com.android.camera 就是这么被"吃掉"的）。
-#         开关关闭时 → 回落 ③
-#    ③ 其余包                      → app_assign.tsv 的手动模板
-#
+#  目标解析优先级（v10）：
+#    ① Scene 游戏名单（games.xml）里的包 → game_assign.tsv 的档位
+#    ② 其余包                            → app_assign.tsv 的档位
+#    ⚠ v10 起**不再**从 Scene 的 powercfg.xml 实时推导档位。档位（powersave/
+#      balance/performance/fast）是模块自持数据，只在用户点「从 Scene 导入」时
+#      被覆盖一次。旧版那条实时分支的副作用很实在：Scene 把 com.android.camera
+#      等包设成 fast 后映射为空，这些包会从目标表里彻底消失，界面上却仍显示
+#      「已套高性能」，实际一条 taskset 都没发。
+#    核位全空（fast 档）= 该包一条 taskset 都不发 → 不绑核，交回系统。
+#    历史残留由 unbind_fast.sh 在档位变更时清一次（cgroup 预算是它的还原目标）。
+
 #  幂等：逐线程比对「目标∩预算」与当前值，一致就一条命令都不发。
 #  用法: enforce_threads.sh [pkg...]      不带参数 = 全部目标
 # ============================================================
@@ -51,7 +65,6 @@ CG_ROOT="/dev/cpuset"
 TMP="${TMPD:-/data/adb/SceneO3Tuner/tmp}"
 mkdir -p "$TMP" 2>/dev/null
 
-SET="${WEBUI_DIR}/settings.conf"
 TGT="$TMP/t.targets"; PSF="$TMP/t.ps"; RUN="$TMP/t.run"; TIDS="$TMP/t.tids"; CMDS="$TMP/t.cmds"
 SIGF="$TMP/t.sig"
 # 已落核缓存 + 本轮待办（省功耗的关键，见下面 3.5 的说明）
@@ -61,13 +74,29 @@ APL="$TMP/t.applied"; KEEP="$TMP/t.keep"; TODO="$TMP/t.todo"
 APL_TTL="${APL_TTL:-180}"
 rm -f "$KEEP" "$TODO" 2>/dev/null
 
+# ============================================================
+#  落核模式（v12）
+# ------------------------------------------------------------
+#  group  = 艇长式 cgroup 分组（默认）：整进程放进 cgroup 子组，
+#           新线程自动继承 → 「新建线程」不再需要靠轮询去追。
+#  taskset= 老路径：逐线程 sched_setaffinity。保留作回退 ——
+#           建不了 cgroup 的环境（内核没挂 cpuset）会走它。
+#  应急回退：touch $STATE_DIR/pin_taskset（重装即失效）。
+# ============================================================
+PIN_MODE="${PIN_MODE:-group}"
+[ -f "${STATE_DIR}/pin_taskset" ] && PIN_MODE="taskset"
+CG_PIN="$MODDIR/Scripts/4+4+2/O3/pin_cgroup.sh"
+
 # 输入是否变了：用**文件 mtime** 与 $SIGF 比较（shell 内建 -nt，0 子进程）。
 #   ⚠ 原来用 md5sum + awk 算签名，两个子进程 ≈ 30~80ms；而本脚本前台一变就会被调用，
 #     这笔开销是亮屏功耗的固定部分。mtime 判据同样可靠（输入都是整体重写的配置文件）。
 sig_inputs_newer() {   # 0 = 有输入比标记新（需要重算）
     local f
+    # ⚠ v10：Scene 的 powercfg.xml / settings.conf 已**不再是输入**
+    #   （档位改由 app_assign.tsv 自持，详见 util.sh 的 import_scene_apply）——
+    #   继续拿它们当 mtime 判据只会让守护白重算一遍目标表。
     for f in "$APP_TPL_FILE" "$APP_ASSIGN_FILE" "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE" \
-             "$SCENE_POWERCFG" "$SCENE_GAMES_XML" "$SET"; do
+             "$SCENE_GAMES_XML"; do
         [ -f "$f" ] && [ "$f" -nt "$SIGF" ] && return 0
     done
     return 1
@@ -95,9 +124,10 @@ ONLINE="$CPU_LIST"
 if [ ! -s "$TGT" ] || [ ! -s "$SIGF" ] || sig_inputs_newer; then
 awk \
     -v TAB="$(printf '\t')" \
-    -v SET="$SET" -v APPTPL="$APP_TPL_FILE" -v APPASG="$APP_ASSIGN_FILE" \
+    -v APPTPL="$APP_TPL_FILE" -v APPASG="$APP_ASSIGN_FILE" \
     -v GTPL="$GAME_TPL_FILE" -v GASG="$GAME_ASSIGN_FILE" -v GAMEXML="$SCENE_GAMES_XML" \
-    -v PCFG="$SCENE_POWERCFG" -v ONL="$ONLINE" \
+    -v ONL="$ONLINE" \
+    -v CAMRE="$CAMERA_RE" \
     -v SE="$SEM_e" -v SP1="$SEM_p1" -v SP2="$SEM_p2" \
     -v SP="$SEM_p" -v SHP="$SEM_hp" -v SALL="$SEM_all" '
 function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
@@ -162,12 +192,6 @@ BEGIN {
     SEM["p_core"]=SP; SEM["hp_core"]=SHP; SEM["all_core"]=SALL
     m = split(ONL, oa, " "); for (i = 1; i <= m; i++) if (oa[i] != "") ON[oa[i]] = 1
 
-    # 「模式同步线程」开关
-    while ((getline l < SET) > 0) {
-        if (l ~ /^[ \t]*mode_sync[ \t]*=/) { v = l; sub(/^[^=]*=/, "", v); gsub(/[ \t\r]/, "", v); if (v == "1") MS = 1 }
-    }
-    close(SET)
-
     load_tpl(APPTPL, T, "A")
     load_tpl(GTPL,    T, "G")
     while ((getline l < APPASG) > 0) { if (l == "" || l ~ /^#/) continue; split(l, f, TAB); if (f[1] != "" && f[2] != "") ASGA[f[1]] = f[2] }
@@ -185,39 +209,24 @@ BEGIN {
     }
     close(GAMEXML)
 
-    # Scene 单应用模式（powercfg.xml）
-    while ((getline l < PCFG) > 0) {
-        if (match(l, /<string name="[^"]*">[^<]*<\/string>/)) {
-            snm = l; sub(/^.*<string name="[^"]*">/, "", snm); sub(/<\/string>.*$/, "", snm)
-            key = l; sub(/^.*<string name=/, "", key); sub(/">.*/, "", key); gsub(/"/, "", key)
-            if (key != "" && key != "*") OWN[key] = trim(snm)
-        }
+    # ⚠ 相机固定「极速（不接管）」→ 下面两个循环都强制跳过，任何档位都绑不上它。
+    #   用 CAMRE != "" 兜底：-v 传空串时 p ~ "" 恒真，会把整张目标表清空。
+    # ① 游戏：game_assign.tsv 的档位
+    for (p in GSET) {
+        if (CAMRE != "" && p ~ CAMRE) continue
+        if (p in ASGG) { s = T["G" ASGG[p]]; if (s != "") pick[p] = s }
     }
-    close(PCFG)
-
-    M2T["powersave"]="light"; M2T["balance"]="smooth"; M2T["performance"]="perf"; M2T["fast"]=""
-
-    # ① 游戏：只用 game_assign 的手动模板
-    for (p in GSET) if (p in ASGG) { s = T["G" ASGG[p]]; if (s != "") pick[p] = s }
-    # ② 普通应用的手动模板
-    for (p in ASGA) { if (p in GSET) continue; s = T["A" ASGA[p]]; if (s != "") pick[p] = s }
-    # ③ 开关开启时：Scene 里单独设过模式的包改由模式自动映射（优先于手动模板）
-    #   ⚠ 映射为空（极速 / igoned / 认不得的档）时必须**保留手动模板**，绝不能 delete：
-    #     实测 Scene 把 com.android.camera、me.weishu.kernelsu 等 7 个包设成了 fast，
-    #     旧代码 delete 掉它们的 pick[] → 目标表里彻底消失 → 界面上显示「已套高性能」，
-    #     实际一条 taskset 都没发。用户看到的「Scene 限制了对相机的调度」就是这个。
-    #     语义与前端 effTpl() 一致：只有映射**非空**时才覆盖手动模板。
-    if (MS) {
-        for (p in OWN) {
-            if (p in GSET) continue
-            t = M2T[OWN[p]]
-            if (t == "") continue
-            s = T["A" t]
-            if (s == "") continue
-            pick[p] = s
-        }
+    # ② 其余：app_assign.tsv 的档位
+    #   ⚠ v10 起**不再**从 Scene 的 powercfg.xml 实时推导档位（原 ③ 分支已删除）。
+    #     它的副作用很实在：Scene 把 com.android.camera 等包设成 fast 时映射为空，
+    #     那些包会从目标表里彻底消失，界面上却仍显示「已套高性能」，
+    #     实际一条 taskset 都没发。现在档位是模块自持数据，只在用户点
+    #     「从 Scene 导入」时才会被覆盖一次（import_scene_apply）。
+    for (p in ASGA) {
+        if (p in GSET) continue
+        if (CAMRE != "" && p ~ CAMRE) continue
+        s = T["A" ASGA[p]]; if (s != "") pick[p] = s
     }
-
     for (p in pick) {
         split(pick[p], c, "|")
         ao = normm(c[1]); am = normm(c[3]); ah = normm(c[5])
@@ -283,7 +292,7 @@ BEGIN {
     if (!(p in PID)) next
     n = split(PID[p], a, " ")
     for (i = 1; i <= n; i++)
-        printf "%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8, $1
 }
 ' "$TGT" > "$RUN" 2>/dev/null
 
@@ -306,7 +315,10 @@ BEGIN {
 #    同一个模板在 top-app(0-9) 与 background(0-3) 下算出来的目标完全不同。
 # ============================================================
 if [ -s "$APL" ]; then :; else : > "$APL"; fi
-if [ -s "$RUN" ]; then
+# 注意 cgroup 模式下不用这个缓存：它的粒度是「这个 pid 已核对过」，
+#   而 cgroup 路径的核对本来就便宜（每进程读一次 /proc/<pid>/cpuset）；
+#   缓存反而会挡住「进程被 framework 挪回标准组」这种要立刻纠正的情况。
+if [ -s "$RUN" ] && [ "$PIN_MODE" != "group" ]; then
     NOW=$(date +%s)
     # ⚠ 缓存行字段用**制表符**分隔，不能用 |：spec 本身就是用 | 拼起来的，
     #   拿 | 当字段分隔符会把 spec 拆碎，回读时拼不回原键 → 缓存永远命中不了
@@ -344,20 +356,31 @@ fi
 #     ⚠ printf 不是内建，循环里不能用；这里攒到一个变量后一次写出。
 # ============================================================
 buf=""
-while IFS='|' read -r p o m h ht hr cm uni; do
+while IFS='|' read -r p o m h ht hr cm uni pkg; do
     [ -n "$p" ] || continue
     [ -d "/proc/$p" ] || continue
     tl=""
-    if [ "$uni" != "1" ]; then
+    # cgroup 模式必须拿到全部 tid：pin_cgroup.sh 要判断「哪些线程得从默认组
+    # 提到大核组」，靠继承进来的线程不会自己报上来。glob 是 shell 内建，不 fork。
+    if [ "$PIN_MODE" = "group" ] || [ "$uni" != "1" ]; then
         for t in "/proc/$p/task"/*; do tl="$tl ${t##*/}"; done
     fi
-    buf="$buf$p|$o|$m|$h|$ht|$hr|$cm|$uni|$tl
+    buf="$buf$p|$o|$m|$h|$ht|$hr|$cm|$uni|$tl|$pkg
 "
 done < "$RUN"
 printf '%s' "$buf" > "$TIDS"
 
 # ============================================================
-#  5) 决策：目标 ∩ cgroup 预算 → 与当前值比对 → 只写「确实要改」的 taskset
+#  5a) cgroup 分组落核（首选）—— 原理见 pin_cgroup.sh 头部
+# ============================================================
+CG_OK=0
+if [ "$PIN_MODE" = "group" ]; then
+    sh "$CG_PIN" --apply "$TIDS" >/dev/null 2>&1 && CG_OK=1
+fi
+
+if [ "$CG_OK" != "1" ]; then
+# ============================================================
+#  5b) 回退：逐线程 taskset（目标 ∩ cgroup 预算 → 只写确实要改的）
 #     awk 内部 getline 读 /proc 与 /dev/cpuset，不 fork。
 # ============================================================
 awk -F'[|]' -v CGROOT="$CG_ROOT" '
@@ -531,6 +554,7 @@ function matchsub(s, n) { return index(s, n) > 0 }
 if [ -s "$CMDS" ]; then
     sh "$CMDS" >/dev/null 2>&1
 fi
+fi   # end of 5b
 
 # 7) 落缓存：本轮核对过的（KEEP 里未过期的 + TODO 里本轮的）记下来，
 #    下一轮同 pid + 同规格 + 同 cgroup 就直接跳过，不再重扫线程。

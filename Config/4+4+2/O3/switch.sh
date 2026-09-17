@@ -1,10 +1,12 @@
 #!/system/bin/sh
 # ============================================================
 #  Scene「自定义命令」入口 —— 在 Scene 里点一下即可切换方案
-#    · 不带参数：循环切到下一档（甜点能效 → 日常均衡 → 性能甜点 → …）
+#    · 不带参数：切到下一档（极致能效 → 日常均衡 → 性能甜点 → 回到第一档）
 #    · 带参数：switch.sh sweet_eco|sweet_bal|sweet_perf
-#    · switch.sh lock / unlock
-#  说明：Scene 的自定义命令不方便按键交互，所以这里做成「点一次切一档」。
+#  说明：Scene 的自定义命令不方便按键交互，所以做成「点一次切一档」。
+#
+#  ⚠ 早期版本还支持 switch.sh lock / unlock。锁定机制已废除（见 action.sh
+#    头部说明），入口一并删除 —— 留着只会让人以为配置会被云端替换。
 # ============================================================
 MODDIR="/data/adb/modules/SceneO3Tuner"
 . "$MODDIR/lib/util.sh"
@@ -12,19 +14,7 @@ MODDIR="/data/adb/modules/SceneO3Tuner"
 LIST="sweet_eco sweet_bal sweet_perf"
 ARG="$1"
 
-label() {
-    case "$1" in
-      lock)   echo "锁定" ;;
-      unlock) echo "解锁" ;;
-      *)      scheme_name_cn "$1" ;;
-    esac
-}
-
-if [ "$ARG" = "lock" ] || [ "$ARG" = "unlock" ]; then
-    sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" "$ARG"
-    echo "[O3调度] $(label "$ARG") 完成"
-    exit 0
-fi
+label() { scheme_name_cn "$1"; }
 
 # 指定方案
 case " $LIST " in
@@ -54,10 +44,5 @@ echo "────────────────────────�
 sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" "$NEXT"
 
 echo "────────────────────────────────"
-if is_unlocked; then
-    echo "锁定状态: 🔓 已解锁"
-else
-    echo "锁定状态: 🔒 已锁定"
-fi
 echo "再点一次 = 切到下一档"
 echo "════════════════════════════════"

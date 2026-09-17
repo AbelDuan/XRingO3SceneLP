@@ -1,13 +1,19 @@
 #!/system/bin/sh
 # ============================================================
-#  开机自启（v3）
+#  开机自启（v9 · 模块接管线程落核）
 #    · 确保 Scene 数据目录可进入、配置可写
-#    · 按 Scene 的「应用→模式」表生成线程分配
+#    · 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 #    · 跑平台调优脚本（sysfs，与方案包内 powercfg.sh 同源）
-#    · 启动配置守护
+#    · 启动 guard.sh（逐线程落核）
 #
-#  ⚠ 不再「把模块里的配置覆盖进 Scene」（v2 会做，于是每次开机都把用户在 Scene
-#    里做的调整冲掉）。现在 Scene 侧是唯一真源，模块只负责线程分配与调优脚本。
+#  v8→v9 的回调原因（2026-09-17 实测，设备 lhasa）：
+#    v8 曾把线程落核交给 Scene 的「核心分配」（它确实会读 threads.json 的
+#    app_cpuset 并写 /dev/cpuset/top-app/{main,render,other}/cpus），但——
+#      · 它的 @cpuset 预算由 **Scene 全局模式** 决定，不是单应用模式；
+#      · 它写子组时会**自己裁到预算内**（省电预算 0-3 → main 也只能 0-3）；
+#    ⇒ 窄预算把所有档位压平成同一核位，per-app 差异消失，实测体验差。
+#    故 v9 关闭 Scene 核心分配（见 Config/*/features/cpuset.conf 的 in_apps/in_games=0），
+#    改回本模块 enforce_threads.sh 逐线程落核 —— 可精确到 UnityMain / RenderThread / comm。
 # ============================================================
 MODDIR="${0%/*}"
 export MODDIR
@@ -43,7 +49,12 @@ if [ -f "$PC" ]; then
     log "· powercfg.sh 已执行"
 fi
 
-# 2) 按 Scene 的「应用→模式」表生成线程分配
+# 2) 档位表迁移（v10 同名 + v11 清空默认分配 + v12 显示名改「系统接管」；幂等）
+migrate_templates_v10
+migrate_templates_v11
+migrate_templates_v12
+
+# 3) 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 if [ -f "$SCENE_POWERCFG" ]; then
     out=$(gen_threads_from_scene 2>&1)
     log "· 线程分配: $out"
@@ -52,31 +63,28 @@ else
     log "· 未发现 Scene 的模式表，跳过线程分配生成"
 fi
 
-# 3) 启动守护
+# 4) 启动调度守护 —— v9：模块重新接管线程落核
+#    背景（2026-09-17 实测）：Scene「核心分配」的 @cpuset 预算由 **全局模式** 决定，
+#    且 Scene 写子组时会**自己裁到预算内**。窄预算会把所有档位压平成同一核位
+#    （省电 0-3 时连「性能」档也只剩 0-3），per-app 差异消失 —— 实测体验差。
+#    故 v9 关闭 Scene 的核心分配，改回本模块 enforce_threads.sh 逐线程落核
+#    （per-thread sched_setaffinity，可精确到 UnityMain / RenderThread / comm）。
 pkill -f "O3/guard\.sh" 2>/dev/null
 sleep 1
-# 间隔 5s：守护每轮都会「按模板落核」（enforce_threads.sh），
-# 间隔越小，「应用刚打开就绑好核」越快；脚本内部一致即跳过，开销可忽略。
+# 间隔 5s：守护每轮按模板落核（幂等，值一致时一条命令都不发，开销可忽略）
 nohup sh "$MODDIR/Scripts/4+4+2/O3/guard.sh" "${GUARD_INTERVAL:-5}" >> "$LOG_FILE" 2>&1 &
 log "· guard 已启动 (pid $!，间隔 ${GUARD_INTERVAL:-5}s)"
 
-# 3.1) 相机频率守护
-#  Scene 的 _Camera.json 在本机有 @cpu_freq 签名错误 + @cpu_freq 只落实 max 两个问题，
-#  导致相机态 min==max==最低档（区间塌缩、频率钉死）。
-#  另外 guard.sh 每次亮/息屏切换会跑 apply_freq.sh，把 QoS 上限清成
-#  cpuinfo_max_freq —— 而它会随 thermal + 光感变化，等于把相机正在用的区间掀掉。
-#
-#  v7 两道修复（详见 camera_freq_guard.sh 头部）：
-#    · guard.sh 只在进相机那一刻看护（常驻轮询没必要）
-#    · camera_freq_guard.sh 降为兜底，间隔 2s 且**亮屏稳态 0 子进程**
-#  可用 $STATE_DIR/camera_freq_guard.off 关闭。
-if [ -f "$STATE_DIR/camera_freq_guard.off" ]; then
-    log "· 相机频率守护：已被关闭标志禁用"
-else
+# 4.1) 相机频率守护作为**可选兜底**（v9 默认不开）
+#    Scene 侧 _Camera.json 已改为 modes 结构（跟随模式，含 min+max 配对），
+#    正常情况不再需要它。若实测发现相机频率仍塌缩，删除下面这个判断即可启用。
+if [ -f "$STATE_DIR/camera_freq_guard.on" ]; then
     pkill -f "O3/camera_freq_guard\.sh" 2>/dev/null
     sleep 1
     nohup sh "$MODDIR/Scripts/4+4+2/O3/camera_freq_guard.sh" "${CAM_FREQ_INTERVAL:-2}" >> "$LOG_FILE" 2>&1 &
-    log "· 相机频率守护已启动 (pid $!，间隔 ${CAM_FREQ_INTERVAL:-2}s)"
+    log "· 相机频率守护已启动（$STATE_DIR/camera_freq_guard.on 存在）"
+else
+    log "· 相机频率守护：未启用（如需启用：touch $STATE_DIR/camera_freq_guard.on）"
 fi
 
 # 4) 模块卡片描述 = 当前功能启用状态
