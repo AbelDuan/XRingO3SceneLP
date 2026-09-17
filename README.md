@@ -81,7 +81,7 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 | **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
 | **配置完整性审计 + 一键还原** | `Scripts/…/integrity.sh` | 7 个维度核对，输出「注错文件清单」 |
 | **升级即覆盖（v15）** | `customize.sh` + `lib/util.sh` `SYNC_SKIP` | 升级时**直接覆盖** `profile.json`/`powercfg.sh`/`features/*.conf` 等模块设计文件，只保留 `threads*.json`（应用/游戏的线程表）；覆盖前自动备份 |
-| **装完不用重启（v15.1）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**（本机 root 不允许重启） |
+| **装完不用重启（v15.1 / v16.1）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**；并且**主动清掉 `disable` 标记**（KSU 的启用状态就是 `/data/adb/modules/<id>/disable` 这个文件）—— 否则「管理器里模块是灰的」重装也修不好。安装收尾会自动 `ksud services` 把守护拉起来 |
 | **Scene · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | Scene 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
 | **应用页只显示有前台界面的应用（v16）** | `webui.sh launchables` + `manualApps()` | 按 `MAIN/LAUNCHER` 取「启动器能点开」的包（本机 487 → 169），避免把没有界面的系统服务也拉进来绑核；已配过档位的包仍显示；标题行有「含无界面」开关 |
 | **调度守护** | `Scripts/…/guard.sh` | 目录权限、配置可写性、threads 重建、落核 |
@@ -734,6 +734,32 @@ ksud services                                        # 让 service.sh 重新判�
 **Q：怎么恢复出厂频率？**
 A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_scheme.sh restore`。
 
+**Q：管理器里模块是灰的 / 启用了又变回去 / 重启也没用？**
+A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
+
+```sh
+/data/adb/modules/SceneO3Tuner/disable     # 存在 = 模块被禁用（管理器里显示灰色）
+/data/adb/modules/SceneO3Tuner/remove      # 存在 = 标记为「重启后卸载」
+/data/adb/modules/SceneO3Tuner/update      # 存在 = 标记为「重启后合并更新」
+```
+
+常见触发：① 管理器里误关；② **KSU 判定开机失败进入「安全模式」**（会把所有模块一起禁用，
+典型症状就是「一觉醒来模块全灰了」）；③ 曾经卡在 `modules_update` 待迁移状态。
+
+按这个顺序处理：
+
+1. 管理器里把开关**拨回来**（能拨动就等于删掉了 `disable`）；
+2. 拨不动就用带 root 的文件管理器（MT 管理器）删掉上面那个 `disable` 文件；
+3. **让守护起来（不用重启）**：终端里 `su -c /data/adb/ksu/bin/ksud services`；
+   > 被禁用的那一次开机里 `service.sh` 根本没执行过，所以这一步不能省 —— 否则模块「启用」了但守护是死的。
+4. 兜底：**重装本模块**（v16.1 起安装脚本会自动清 `disable`/`update`/`remove` 并补跑 `ksud services`）。
+
+> ✅ 放心清：本模块**没有 `post-fs-data.sh`**，只有 late_start 阶段的 `service.sh`，
+> 不挂载 `/system`、不影响开机流程 —— 重新启用它**不可能**导致开不了机。
+>
+> ⚠️ 顺带提醒：如果你的设备是**临时越狱 root**（重启即掉 root），遇到这种情况**千万不要靠重启去试**，
+> 按上面 1→4 处理即可。
+
 ---
 
 ## 9. 调参与排障
@@ -825,6 +851,7 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.1** | ★ **修「模块在 KernelSU 里是灰的 / 启用不了」**：安装脚本现在会主动清掉 `/data/adb/modules/<id>/disable`（KSU 的启用状态就是这个标记文件）——在此之前，KSU 若是**原地安装**，重装模块也**清不掉禁用标记**，用户会以为重装都没用（甚至去重启手机）。同时在「刚从禁用态恢复」时补一次 `ksud services`，让守护不必重启就起来 |
 | **v16.0** | ★ **应用页默认只显示有前台界面的应用**（`cmd package query-activities` 取启动器可见包，487→169），避免把无界面的系统服务拉进来绑核；已配档位的包仍显示 + 可切「含无界面」 |
 | v15.1 | ★ **装完不用重启**：KSU 走到 `modules_update/` 待迁移时，`customize.sh` 收尾**自己就地合并**（本机 root 不允许重启）；顺带修 `powercfg.sh` 里 `/dev` 挂载后备目录随机名导致每次跑堆一个垃圾目录 |
 | v15.0 | ★ **升级即覆盖**：升级时直接覆盖 `profile.json`/`powercfg.sh`/`features/*.conf` 等，只保留 `threads*.json`（应用/游戏线程表），覆盖前自动备份 + 覆盖后重启 daemon + 收掉旧版遗留的 GPU 温控 bind-mount；游戏页新增「FAS 调速器 → 设为 xres」按钮 |

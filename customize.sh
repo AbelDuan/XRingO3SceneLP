@@ -69,6 +69,33 @@ chmod 0755 "$MODPATH/Config/4+4+2/O3"/*/*.sh 2>/dev/null
 if [ -d "$FINAL_PATH" ] && [ "$MODPATH" != "$FINAL_PATH" ]; then
     rm -rf "$FINAL_PATH" 2>/dev/null
 fi
+
+# ---------- ★ 清除「模块被禁用 / 待迁移」标记 ----------
+#
+#  KSU 的「启用/禁用」在磁盘上就是 `/data/adb/modules/<id>/disable` 这一个标记文件。
+#  管理器里看到「模块是灰的、开关打不开、重启也没用」，就是它还在。
+#
+#  什么时候会被打上：
+#    ① 在管理器里手动关掉（或误触）；
+#    ② **KSU 判定本次开机失败 → 进入「安全模式」，会把所有已加载模块一起禁用**；
+#    ③ 从 modules_update「待迁移」状态掉 root 后残留 —— 本机 2026-09-17 就是这么来的
+#       （模块目录只剩 module.prop，内容全在 modules_update 里，重装又走了待迁移路径）。
+#
+#  ⚠ 为什么必须由安装脚本主动清：
+#    用户唯一的自救动作就是「重装模块」。如果安装脚本不清这个标记，
+#    重装完**模块仍然是灰的** —— 用户会以为重装都没用，然后去重启手机（本机重启=掉 root）。
+#    （上面那句 `rm -rf "$FINAL_PATH"` 只在 MODPATH≠FINAL_PATH 时执行，覆盖不到 KSU 原地安装的分支。）
+#
+#  ⚠ 安全性：本模块**没有 post-fs-data.sh**，只有 late_start 的 service.sh，
+#    不参与、也不可能影响开机流程 → 清掉禁用标记绝不会引入「开不了机」的风险。
+_cleared=""
+for _mk in disable update remove; do
+    if [ -f "${FINAL_PATH}/${_mk}" ]; then
+        rm -f "${FINAL_PATH}/${_mk}" 2>/dev/null && _cleared="${_cleared} ${_mk}"
+    fi
+done
+[ -n "$_cleared" ] && ui_print "- 已清除标记:${_cleared}（模块恢复为启用态，无需重启）"
+
 mkdir -p "$STATE_DIR" "${STATE_DIR}/webui"
 
 # ---------- 初始化状态 ----------
@@ -451,7 +478,13 @@ fi
 # ---------- 让守护用上新脚本（不重启）----------
 #  守护是按文件路径跑的（/data/adb/modules/<id>/Scripts/...），合并完路径就恢复了；
 #  已在跑的旧进程会在下一轮自然读回新文件，这里只补一次「确保在跑」。
-if [ -n "$_migrated" ] && [ -x "$FINAL_PATH/service.sh" ] && command -v ksud >/dev/null 2>&1; then
+#
+#  ⚠ 两种情况都要拉一次：
+#    · $_migrated —— 刚从 modules_update 就地合并过来，路径换了；
+#    · $_cleared  —— 刚清掉 disable，模块从「被禁用」变回启用态，
+#                    上一个 boot 的 service.sh 根本没跑过，不补这一次守护就是死的。
+if { [ -n "$_migrated" ] || [ -n "$_cleared" ]; } \
+   && [ -x "$FINAL_PATH/service.sh" ] && command -v ksud >/dev/null 2>&1; then
     ksud services >/dev/null 2>&1 && ui_print "- 已让 ksud 重新拉起模块服务（无需重启）"
 fi
 
