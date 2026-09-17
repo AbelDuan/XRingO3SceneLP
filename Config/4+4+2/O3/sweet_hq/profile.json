@@ -1086,7 +1086,7 @@
         "@cpu_freq",
         "cpu0",
         "672000",
-        "2246400"
+        "1939200"
       ],
       [
         "/sys/devices/system/cpu/cpu4/cpufreq/scaling_governor",
@@ -1096,7 +1096,7 @@
         "@cpu_freq",
         "cpu4",
         "835200",
-        "3148800"
+        "1468800"
       ],
       [
         "/sys/devices/system/cpu/cpu8/cpufreq/scaling_governor",
