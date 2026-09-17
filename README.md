@@ -520,7 +520,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.2-20260917.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.2.1-20260917.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -867,6 +867,7 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.2.1** | ★ **修「刷入后 Web UI 还显示旧版本号」**：v16.2 只改了 `module.prop` 的版本号、**漏跑了 `gen_webui.py`**，打包脚本也不调它，导致打进 zip 的 `webroot/index.html` 是上一次遗留的 16.1 构建（版本角标 + 前端代码都是旧的）。v16.2.1 把 `gen_webui.py` 调进 `pack_module.py` 的打包流程，成为硬步骤（重建失败即中止打包），从此版本号与前端必定同步。功能代码与 v16.2 一致 |
 | **v16.2** | ★ **修「开关是灰的 + 没有执行 / 打开按钮」**：读 KernelSU 源码定位到这是 **`update` 待更新标记**（不是 v16.1 的 `disable`）—— 安装器在 `. customize.sh` 返回**之后**才写 `update`，脚本里删它必失败；且 `update` 存在时 active 目录可能只剩 `module.prop`（缺 `webroot/`/`action.sh`），导致按钮**根本不渲染**。修正：安装脚本就地合并 + 清 `disable`/`remove`，再落一个独立自愈脚本 `setsid` 后台拉起，等 `update` 出现后合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（不重启）。新增 `test_pending_selfheal.py`（22 断言）覆盖该路径 |
 | **v16.1** | ★ **修「模块在 KernelSU 里是灰的 / 启用不了」**：安装脚本现在会主动清掉 `/data/adb/modules/<id>/disable`（KSU 的启用状态就是这个标记文件）——在此之前，KSU 若是**原地安装**，重装模块也**清不掉禁用标记**，用户会以为重装都没用（甚至去重启手机）。同时在「刚从禁用态恢复」时补一次 `ksud services`，让守护不必重启就起来 |
 | **v16.0** | ★ **应用页默认只显示有前台界面的应用**（`cmd package query-activities` 取启动器可见包，487→169），避免把无界面的系统服务拉进来绑核；已配档位的包仍显示 + 可切「含无界面」 |
