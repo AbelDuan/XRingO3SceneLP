@@ -46,6 +46,14 @@ MODCFG="${MODDIR}/Config/4+4+2/O3/${SCHEME}"
 
 mkdir -p "$WEB_DIR" "$BKDIR" "$TMPD" 2>/dev/null
 
+# ---------- 访问即自愈：合并 KSU 待更新副本（免重启）----------
+#  本机禁止重启，而 KSU 更新已存在模块走「暂存 + 待重启」。
+#  customize.sh 收尾的异步自愈若因后台进程被回收而没兜住，这里兜底：
+#  用户一打开 WebUI（本脚本每次都被调用）就触发合并，把 modules_update 合进
+#  正在服务的 modules/<id>，清标记、拉服务。只在新版本暂存副本存在时才动作，
+#  否则零开销直接返回。
+selfheal_pending_update
+
 has(){ command -v "$1" >/dev/null 2>&1; }
 
 # ---------- 文件 ID → 真实路径（白名单，杜绝任意路径写入）----------
@@ -747,12 +755,20 @@ cmd_live() {
 }
 
 cmd_ksufix() {
-    if [ -e "$MODDIR/update" ]; then
-        rm -f "$MODDIR/update"
-        log "webui: 已删除 KSU 孤儿 update 标记"
-        echo "OK 已删除孤儿 update 标记，重启后 KSU 开关应恢复可点"
+    # 先尝试合并 KSU 待更新副本（modules_update → modules），再清孤儿标记。
+    # 单独删 update 标记而不合并，会让「旧模块继续服务」——开关虽能点，但内容还是旧的。
+    if selfheal_pending_update; then
+        if [ -e "$MODDIR/update" ]; then
+            rm -f "$MODDIR/update"
+            log "webui: 已删除 KSU 孤儿 update 标记"
+        fi
+        if [ -d /data/adb/modules_update/SceneO3Tuner ]; then
+            echo "OK 已合并待更新副本 + 清标记 + 重拉服务（开关恢复可点、内容已更新）"
+        else
+            echo "OK 已清孤儿 update 标记（无待更新副本，无需合并）"
+        fi
     else
-        echo "OK 无孤儿标记（无需处理）"
+        echo "ERR 待更新副本校验不通过，已保留副本未删除（请检查 /data/adb/modules_update/SceneO3Tuner 完整性）"
     fi
 }
 

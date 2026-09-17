@@ -1849,6 +1849,69 @@ migrate_templates_v12() {
 #     if (heavy_thread 匹配 comm)   w = heavy_cores
 #     if (comm 规则匹配)            w = 该规则核位        ← 优先级最高
 #   核位全空 = 该应用**一条 taskset 都不发**（不绑核，交回系统）→ 这就是「极速」档。
+
+# ---------- ★ 免重启自愈：合并 KSU 待更新副本（modules_update → modules）----------
+#
+#  背景：本机是临时越狱 root，**绝对不能重启**。而 KSU 更新一个「已存在」的模块时走
+#        的是「暂存 + 待重启」：新内容解到 /data/adb/modules_update/<id>，在
+#        /data/adb/modules/<id> 留 update 标记，真正的合并只在开机时发生
+#        （ksud handle_updated_modules 把 modules_update/<id> 改名覆盖 modules/<id>）。
+#        在这台机器上，不重启 = 永远卡在「旧模块在服务、新内容在 modules_update」。
+#
+#  本函数：在不重启的前提下，把 modules_update/<id> 合并进正在服务的 modules/<id>，
+#          清掉 update/remove 标记，rm 掉暂存目录，并重拉 ksud services（让守护用新脚本）。
+#
+#  触发判据（防误合并）：
+#    · modules_update/<id> 不存在或没有 module.prop → 直接返回（无需处理）；
+#    · 比较 versionCode：仅当「暂存版本 > 当前服务版本」才合并；
+#      否则只顺手清掉可能残留的 update 标记（修开关灰），绝不把旧副本覆盖回去。
+#
+#  安全边界：只有「4 个缺了就废的关键文件」都在才删 modules_update；
+#            校验不过就原样保留那份完整副本，绝不制造「两边都不全」的局面。
+#
+#  调用点（三重保险，任一命中即可自愈，不依赖后台进程存活）：
+#    ① customize.sh 安装收尾（异步 setsid 后台）  —— 见 customize.sh「安装后自愈」；
+#    ② webui.sh / action.sh 顶部（**访问即自愈**）—— 用户一开 WebUI 或按一次音量键就触发；
+#    ③ 前端「ksufix」命令 / 一键修复按钮            —— 用户手动点一下也能救。
+selfheal_pending_update() {
+  local NVBASE="/data/adb" ID="SceneO3Tuner"
+  local UPD="${NVBASE}/modules_update/${ID}" FIN="${NVBASE}/modules/${ID}"
+  [ -d "$UPD" ] || return 0
+  [ -f "$UPD/module.prop" ] || return 0
+
+  local vc_u vc_m="0"
+  vc_u=$(grep '^versionCode=' "$UPD/module.prop" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\r')
+  [ -z "$vc_u" ] && vc_u="0"
+  if [ -f "$FIN/module.prop" ]; then
+    vc_m=$(grep '^versionCode=' "$FIN/module.prop" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\r')
+    [ -z "$vc_m" ] && vc_m="0"
+  fi
+
+  # 不是更高版本：只清可能残留的 update 标记（修开关灰），不碰内容
+  if [ "$vc_u" -le "$vc_m" ] 2>/dev/null; then
+    [ -e "$FIN/update" ] && rm -f "$FIN/update" 2>/dev/null
+    return 0
+  fi
+
+  # 合并暂存副本进正在服务的目录
+  cp -af "$UPD"/. "$FIN"/ 2>/dev/null
+  if [ -f "$FIN/module.prop" ] && [ -f "$FIN/service.sh" ] \
+     && [ -f "$FIN/webroot/index.html" ] && [ -f "$FIN/lib/util.sh" ]; then
+    rm -f "$FIN/update" "$FIN/remove" 2>/dev/null
+    chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
+    chmod 0755 "$FIN"/Scripts/*/*/*.sh "$FIN"/Config/*/*/*.sh "$FIN"/Config/*/*/*/*.sh 2>/dev/null
+    # 让正在服务的守护用上新脚本（不重启）
+    local KSUD=""
+    for c in /data/adb/ksu/bin/ksud /data/adb/ksud; do [ -x "$c" ] && { KSUD="$c"; break; }; done
+    [ -z "$KSUD" ] && KSUD=$(command -v ksud 2>/dev/null)
+    [ -n "$KSUD" ] && "$KSUD" services >/dev/null 2>&1
+    [ -d "$UPD" ] && rm -rf "$UPD" 2>/dev/null
+    return 0
+  fi
+  # 校验不通过：保留 modules_update 副本，绝不删（下次访问再试）
+  return 1
+}
+
 seed_app_templates() {
   [ -f "$APP_TPL_FILE" ] && return 0
   mkdir -p "$(dirname "$APP_TPL_FILE")" 2>/dev/null

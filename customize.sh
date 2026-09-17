@@ -544,6 +544,14 @@ cat > "$SELFHEAL" <<'SHEOF'
 #   把 /data/adb/modules_update/<id> 合并进 /data/adb/modules/<id>，
 #   删掉 active 目录里的 update 标记，再让 ksud 重拉一次模块服务。
 # 日志：/data/adb/SceneO3Tuner/fix_pending.log
+#
+# 触发：installer.sh 在本脚本返回之后才 mktouch update 标记，所以这里轮询等
+#   update 标记出现；同时只要 modules_update/<id> 带 module.prop 也视为可合并
+#   （双触发，避免「只等 update 标记、后台进程中途被回收」导致漏合并）。
+#   版本守门：仅当「暂存 versionCode > 当前服务 versionCode」才合并，绝不把旧/同版本回盖。
+#
+# ⚠ 即便这一步因后台进程被回收而没兜住，还有 webui.sh / action.sh 顶部的
+#   「访问即自愈」（用户一开 WebUI 或按一次音量键即触发合并）作为兜底。
 ID=SceneO3Tuner
 UPD="/data/adb/modules_update/$ID"
 FIN="/data/adb/modules/$ID"
@@ -558,33 +566,45 @@ for c in /data/adb/ksu/bin/ksud /data/adb/ksud; do
 done
 [ -z "$KSUD" ] && KSUD=$(command -v ksud 2>/dev/null)
 
+vcode(){ grep '^versionCode=' "$1" 2>/dev/null | head -1 | cut -d= -f2 | tr -d '\r'; }
+
 i=0
-while [ "$i" -lt 90 ]; do
-    if [ -e "$FIN/update" ]; then
-        [ -d "$UPD" ] && cp -af "$UPD"/. "$FIN"/ 2>/dev/null
-        if [ -f "$FIN/module.prop" ] && [ -f "$FIN/service.sh" ] \
-           && [ -f "$FIN/webroot/index.html" ] && [ -f "$FIN/lib/util.sh" ]; then
-            rm -f "$FIN/update" "$FIN/remove" 2>/dev/null
-            # zip 里的脚本被 installer 统一设成 0644，这里把该可执行的补回来
-            chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
-            chmod 0755 "$FIN"/Scripts/*/*/*.sh "$FIN"/Config/*/*/*.sh \
-                       "$FIN"/Config/*/*/*/*.sh 2>/dev/null
-            chmod 0644 "$FIN/module.prop" "$FIN/webroot/index.html" "$FIN/lib/util.sh" 2>/dev/null
-            # 留 3s 让 installer.sh 把剩下的收尾动作跑完（它还要 cp module.prop），
-            # 再清掉暂存目录 —— 等价于「重启后 handle_updated_modules 的结果」。
-            sleep 3
-            [ -d "$UPD" ] && rm -rf "$UPD" 2>/dev/null
-            echo "$(now) OK 已合并、已清 update 标记（免重启生效）" >> "$LOG"
-            [ -n "$KSUD" ] && "$KSUD" services >/dev/null 2>&1
-            exit 0
+while [ "$i" -lt 45 ]; do
+    _trigger=0
+    [ -e "$FIN/update" ] && _trigger=1
+    [ -d "$UPD" ] && [ -f "$UPD/module.prop" ] && _trigger=1
+    if [ "$_trigger" -eq 1 ]; then
+        vc_u=$(vcode "$UPD/module.prop"); [ -z "$vc_u" ] && vc_u=0
+        vc_m=$(vcode "$FIN/module.prop"); [ -z "$vc_m" ] && vc_m=0
+        if [ "$vc_u" -gt "$vc_m" ] 2>/dev/null; then
+            [ -d "$UPD" ] && cp -af "$UPD"/. "$FIN"/ 2>/dev/null
+            if [ -f "$FIN/module.prop" ] && [ -f "$FIN/service.sh" ] \
+               && [ -f "$FIN/webroot/index.html" ] && [ -f "$FIN/lib/util.sh" ]; then
+                rm -f "$FIN/update" "$FIN/remove" 2>/dev/null
+                chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
+                chmod 0755 "$FIN"/Scripts/*/*/*.sh "$FIN"/Config/*/*/*.sh \
+                           "$FIN"/Config/*/*/*/*.sh 2>/dev/null
+                chmod 0644 "$FIN/module.prop" "$FIN/webroot/index.html" "$FIN/lib/util.sh" 2>/dev/null
+                # 留 3s 让 installer.sh 把剩下的收尾动作跑完（它还要 cp module.prop），
+                # 再清掉暂存目录 —— 等价于「重启后 handle_updated_modules 的结果」。
+                sleep 3
+                [ -d "$UPD" ] && rm -rf "$UPD" 2>/dev/null
+                echo "$(now) OK 已合并、已清 update 标记（免重启生效）" >> "$LOG"
+                [ -n "$KSUD" ] && "$KSUD" services >/dev/null 2>&1
+                exit 0
+            fi
+            echo "$(now) FAIL 校验不通过（$FIN 缺关键文件）—— 保留 modules_update 副本，未做任何删除" >> "$LOG"
+            exit 1
         fi
-        echo "$(now) FAIL 校验不通过（$FIN 缺关键文件）—— 保留 modules_update 副本，未做任何删除" >> "$LOG"
-        exit 1
+        # 暂存版本不高于当前：只清孤儿 update 标记（修开关灰），不动内容
+        [ -e "$FIN/update" ] && rm -f "$FIN/update" 2>/dev/null
+        echo "$(now) SKIP 暂存版本不高于当前，已清孤儿 update 标记" >> "$LOG"
+        exit 0
     fi
     i=$((i + 1))
     sleep 1
 done
-echo "$(now) SKIP 等待 90s 未出现 update 标记（可能不是 KSU zip 安装路径，无需处理）" >> "$LOG"
+echo "$(now) SKIP 等待 45s 未出现更新标记 / 暂存副本（可能不是 KSU zip 安装路径，无需处理）" >> "$LOG"
 exit 2
 SHEOF
 chmod 0755 "$SELFHEAL"

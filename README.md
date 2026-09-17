@@ -520,7 +520,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.2.1-20260917.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.2.2-20260917.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -756,6 +756,15 @@ A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
 > 所以在安装脚本里 `rm -f update` 一定失败（v16.1 的失手点）。v16.2 改成
 > **落一个独立自愈脚本 + `setsid` 后台拉起**，等 `update` 出现后把它合并进 active、
 > 删标记、`rm -rf modules_update`、重拉 `ksud services` —— **全程不重启**。
+>
+> **v16.2.2 再加第三路：访问即自愈。** 后台进程在真机上可能被系统回收，所以
+> `webui.sh` / `action.sh` 的**顶部**都会先跑一次同一个 `selfheal_pending_update`
+> —— 也就是说：**你只要打开一次 WebUI（或按一次音量键触发「执行」），
+> 就会顺手把待更新态合并掉**，不再依赖后台进程活着。
+>
+> 顺带一提，同一个原因的另一个症状是 **WebUI 首页版本号一直是旧的**：
+> 首页的版本号是**运行时实时读** `modules/<id>/module.prop` 得来的（不是写死在页面里），
+> 所以「版本号没变」＝ KSU 真正服务的那个目录还是旧文件 —— 处理办法和上面完全一样。
 
 按这个顺序处理：
 
@@ -768,7 +777,8 @@ A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
    su -c "cp -af /data/adb/modules_update/SceneO3Tuner/. /data/adb/modules/SceneO3Tuner/ && rm -f /data/adb/modules/SceneO3Tuner/update /data/adb/modules/SceneO3Tuner/remove && rm -rf /data/adb/modules_update/SceneO3Tuner && /data/adb/ksu/bin/ksud services"
    ```
    （用 MT 管理器手动做等价操作也行：把 `modules_update/SceneO3Tuner/` 整个覆盖进 `modules/SceneO3Tuner/`，删掉 `update`/`remove`，删掉 `modules_update/SceneO3Tuner/`。）
-5. 兜底：**重装本模块**（v16.2 起安装脚本会自动清 `disable`/`remove`，并由**异步自愈**处理 `update` 并补跑 `ksud services`）。
+5. 兜底：**重装本模块**（v16.2.2 起三路自愈：安装时就地合并 → 后台 `fix_pending.sh` 轮询 →
+   **访问 WebUI / 按音量键即自愈**，并都会补跑 `ksud services`）。
 
 > ✅ 放心清：本模块**没有 `post-fs-data.sh`**，只有 late_start 阶段的 `service.sh`，
 > 不挂载 `/system`、不影响开机流程 —— 重新启用它**不可能**导致开不了机。
@@ -867,6 +877,7 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.2.2** | ★ **「待重启生效」加第三路自愈 + 检测配置不再只会说「缺失」**：① `update` 待更新态此前只靠安装脚本的后台进程兜底，真机上会被系统回收 → 新增 **「访问即自愈」**：`webui.sh` / `action.sh` **顶部**都调同一个 `selfheal_pending_update`（`lib/util.sh`），**打开一次 WebUI 或按一次音量键就会顺手把待更新态合并掉**，不再依赖后台进程活着；② 自愈加 **版本守门**（`versionCode` 更高才合并，绝不把旧版本回盖），`ksufix` 从「只删标记」升级为**真合并**；③ **「检测配置」加了目录级前置检查**：11 项全报「缺失」时，现在会直接写明成因 —— `★目录不存在 ← 路径/挂载问题` / `★目录不可读 ← 权限或 SELinux` / `目录可读但确实无此文件 ← 被删除或从未写入`，并输出 `DIR_SCENE` / `DIR_WEBUI` 路径自检行，一眼分清是**检测/路径问题**还是**文件真不在**；④ 回归测试：`test_selfheal.py` 22 断言 + `test_pending_selfheal.py` 扩到 4 场景 28 断言（新增「暂存版本 ≤ 当前 → 只清孤儿标记、不回盖」） |
 | **v16.2.1** | ★ **修「刷入后 Web UI 还显示旧版本号」**：v16.2 只改了 `module.prop` 的版本号、**漏跑了 `gen_webui.py`**，打包脚本也不调它，导致打进 zip 的 `webroot/index.html` 是上一次遗留的 16.1 构建（版本角标 + 前端代码都是旧的）。v16.2.1 把 `gen_webui.py` 调进 `pack_module.py` 的打包流程，成为硬步骤（重建失败即中止打包），从此版本号与前端必定同步。功能代码与 v16.2 一致 |
 | **v16.2** | ★ **修「开关是灰的 + 没有执行 / 打开按钮」**：读 KernelSU 源码定位到这是 **`update` 待更新标记**（不是 v16.1 的 `disable`）—— 安装器在 `. customize.sh` 返回**之后**才写 `update`，脚本里删它必失败；且 `update` 存在时 active 目录可能只剩 `module.prop`（缺 `webroot/`/`action.sh`），导致按钮**根本不渲染**。修正：安装脚本就地合并 + 清 `disable`/`remove`，再落一个独立自愈脚本 `setsid` 后台拉起，等 `update` 出现后合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（不重启）。新增 `test_pending_selfheal.py`（22 断言）覆盖该路径 |
 | **v16.1** | ★ **修「模块在 KernelSU 里是灰的 / 启用不了」**：安装脚本现在会主动清掉 `/data/adb/modules/<id>/disable`（KSU 的启用状态就是这个标记文件）——在此之前，KSU 若是**原地安装**，重装模块也**清不掉禁用标记**，用户会以为重装都没用（甚至去重启手机）。同时在「刚从禁用态恢复」时补一次 `ksud services`，让守护不必重启就起来 |

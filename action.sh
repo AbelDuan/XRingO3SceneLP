@@ -15,6 +15,12 @@ MODDIR="${0%/*}"
 export MODDIR
 . "$MODDIR/lib/util.sh"
 
+# ---------- 访问即自愈：合并 KSU 待更新副本（免重启）----------
+#  按下一次音量键（action.sh 由 KSU 管理器在「执行」按钮触发）也会走这里，
+#  顺手把 modules_update 合并进正在服务的 modules/<id>，清标记、拉服务。
+#  只在新版本暂存副本存在时才动作，否则零开销。
+selfheal_pending_update
+
 # ---------- 按键监听 ----------
 sub_key() {    # $1=超时  输出 next / ok / overtime
     local limit="$1" start now gap res

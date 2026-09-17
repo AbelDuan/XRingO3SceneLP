@@ -84,6 +84,27 @@ json_ok() {
 
 md5of_f() { [ -f "$1" ] && md5of "$1" || echo ""; }
 
+# 「缺失」的成因判别 —— 目录级前置检查
+# 为什么需要：11 项全报「缺失」时，光看清单分不清是
+#   ① 文件真被删了（Scene 身份校验会删我们那 7 个）
+#   ② 路径/挂载写错（整个目录都不在）
+#   ③ 权限 / SELinux 读不到目录
+# 这三种的处置完全不同，所以把成因直接写进 BAD 行的 detail 字段
+# （前端 app.js 会把这个字段渲染到清单第 4 列，无需改前端）。
+# 注意：只用 test 内建，不 fork —— 本机单次 fork/exec ≈ 20~30ms，11 项会很痛。
+miss_why() {   # $1=所在目录  $2=文件名
+    local d="$1"
+    if [ ! -d "$d" ]; then
+        echo "★目录不存在：$d ← 路径/挂载问题，不是文件被删"
+        return
+    fi
+    if [ ! -r "$d" ] || [ ! -x "$d" ]; then
+        echo "★目录不可读/不可进入：$d ← 权限或 SELinux 问题"
+        return
+    fi
+    echo "目录可读（$d）但确实无此文件 ← 被删除或从未写入"
+}
+
 # ============================================================
 #  审计
 # ============================================================
@@ -93,6 +114,9 @@ do_audit() {
 
     echo "SCHEME=${scheme}"
     echo "SRC_OK=$([ -d "$src" ] && echo 1 || echo 0)"
+    # 路径自检（终端里跑 audit 时能直接看到审计到底在读哪儿）
+    echo "DIR_SCENE=${SCENE_DIR}|$([ -d "$SCENE_DIR" ] && echo 存在 || echo 不存在)|$([ -r "$SCENE_DIR" ] && [ -x "$SCENE_DIR" ] && echo 可读 || echo 不可读)"
+    echo "DIR_WEBUI=${WEBUI_DIR}|$([ -d "$WEBUI_DIR" ] && echo 存在 || echo 不存在)|$([ -r "$WEBUI_DIR" ] && [ -x "$WEBUI_DIR" ] && echo 可读 || echo 不可读)"
 
     local bad=0 checked=0 line fname cn md5want md5now d
 
@@ -106,7 +130,7 @@ do_audit() {
         md5want=$(md5of_f "${src}/${fname}")
         md5now=$(md5of_f "${SCENE_DIR}/${fname}")
         if [ ! -f "${SCENE_DIR}/${fname}" ]; then
-            echo "BAD=${fname}|${cn}|缺失|Scene 侧没有这个文件"
+            echo "BAD=${fname}|${cn}|缺失|$(miss_why "$SCENE_DIR" "$fname")"
             bad=$((bad+1)); BAD_SEEN="${BAD_SEEN}${fname}
 "
         elif [ -n "$md5want" ] && [ "$md5now" != "$md5want" ]; then
@@ -165,7 +189,7 @@ do_audit() {
         fname="${line%%|*}"; cn="${line#*|}"
         checked=$((checked+1))
         if [ ! -f "${WEBUI_DIR}/${fname}" ]; then
-            echo "BAD=${fname}|${cn}|缺失|模块数据表不存在"
+            echo "BAD=${fname}|${cn}|缺失|$(miss_why "$WEBUI_DIR" "$fname")"
             bad=$((bad+1))
         fi
     done
