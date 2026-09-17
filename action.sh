@@ -55,7 +55,7 @@ scheme_label() {
 }
 
 # ---------- 方案循环选择 ----------
-LIST="sweet_eco sweet_bal sweet_perf __restore__"
+LIST="sweet_eco sweet_bal sweet_perf sweet_hq __restore__"
 set -- $LIST
 TOTAL=$#
 IDX=0

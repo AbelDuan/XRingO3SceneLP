@@ -1641,6 +1641,7 @@ scheme_name_cn() {
       sweet_eco)  echo "极致能效" ;;
       sweet_bal)  echo "日常均衡" ;;
       sweet_perf) echo "性能甜点" ;;
+      sweet_hq)   echo "满画质游戏" ;;
       *)          echo "$1" ;;
     esac
 }
