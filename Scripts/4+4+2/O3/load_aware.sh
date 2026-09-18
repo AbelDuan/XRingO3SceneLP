@@ -13,9 +13,12 @@
 #      · C1-Ultra（8-9）**只在 >2.2GHz 才有能效优势**，低频大核不如中核；
 #      · 中核（4-7）在 835200~1468800MHz 就能跑满 120fps（UnityMain 87%）；
 #      · 大核在游戏里只承担 0.7%~1.7% 的计算量。
-#    ⇒ 本移植的升级第一目标是 **{p1_core}（中核 4-7）**；
-#      只有基集**已经含中核**时，才再往上并 8-9。
-#      这样既不会把线程推去低频空转的大核，也保留了「中核也不够用」时的上限。
+#    ⇒ 升级目标是 **{p1_core}（中核 4-7）**，**默认不升 8-9**（LW_HP=1 才开）。
+#
+#  ⚠⚠ v16.10 修正（重要）：v16.9 曾写成「基集已含中核时再并 8-9」，
+#     而 performance 档的 other 本来就是 4-7 → **所有忙线程被推上 8-9**。
+#     真机实测：微信等应用打开后线程显示 4-9（40 个目标里 31 个是 performance 档）。
+#     与 O3 结论冲突（大核频窗 1.1~2.0GHz 在低效区）且违背档位语义 → 改为默认不升。
 #
 #  用法: load_aware.sh <tids文件> <hot输出文件> <p1表达式> <hp表达式> <e表达式>
 #  状态: $TMP/lw.state（tid<TAB>ticks）+ $TMP/lw.ts（上次采样时间戳）
@@ -23,6 +26,7 @@
 #  调参: LW_INTERVAL（秒，默认 25）—— 采样间隔，越大越省电、响应越慢
 #        LW_HOT（默认 8）—— 升级阈值，对应占用率 >60%
 #        LW_IDLE（默认 2）—— 收缩阈值，对应占用率 ≤5%
+#        LW_HP（默认 0）—— 忙线程是否允许再升超大核 8-9（O3 上不建议开）
 # ============================================================
 TMP="${TMPD:-/data/adb/SceneO3Tuner/tmp}"
 ST="${STATE_DIR:-/data/adb/SceneO3Tuner}"
@@ -38,6 +42,10 @@ TIDS="$1"; OUT="$2"; SP1="$3"; SHP="$4"; SE="$5"
 LW_INTERVAL="${LW_INTERVAL:-25}"
 LW_HOT="${LW_HOT:-8}"
 LW_IDLE="${LW_IDLE:-2}"
+# 忙线程是否允许再升到超大核 8-9。**默认 0（不升）** —— 见下方 awk 里的说明：
+#   performance 档的 other 本来就是 4-7，若允许再升就会把忙线程全推到 8-9，
+#   而 O3 的大核在 1.1~2.0GHz 频窗内能效不如中核（C1-Ultra 只在 >2.2GHz 才有优势）。
+LW_HP="${LW_HP:-0}"
 
 STATEF="$TMP/lw.state"; TSF="$TMP/lw.ts"; NEWF="$TMP/lw.state.new"
 
@@ -79,6 +87,7 @@ ETICKS=$(( WIN * 100 ))     # USER_HZ=100
 #   （测试实测：状态文件根本写不出来）。这里用 STNW / HOTF。
 } | awk -v SP1="$SP1" -v SHP="$SHP" -v SE="$SE" \
         -v ET="$ETICKS" -v FIRST="$FIRST" -v HOT="$LW_HOT" -v IDLE="$LW_IDLE" \
+        -v LWHP="$LW_HP" \
         -v STF="$STATEF" -v STNW="$NEWF" -v HOTF="$OUT" '
 #   ⚠⚠ 这三个函数的字符串**首尾都必须带空格**（" 4 5 6 7 "），
 #      否则 `index(s, " 7 ")` 对**最后一个元素**恒为 0 —— 实测踩过：
@@ -168,16 +177,26 @@ BEGIN {
     else                  lvl = 10
 
     baseL = listof(curBase)
+    be = list2expr(baseL)
     if (lvl >= HOT) {
-        # 忙线程：先并中核；基集已含中核时才再上超大核（O3 调优）
-        if (hasany(baseL, L_P1)) t = merge(baseL, L_HP)
-        else                     t = merge(baseL, L_P1)
-        # 输出 tid pid 核位表达式 —— 带上 pid，pin_cgroup 才能按进程判断「要不要跳过全量扫描」
-        print tid " " curPid " " list2expr(t) > HOTF
+        # 忙线程：**只并入中核 {p1_core}**。
+        # ★★ 默认**不**升超大核（v16.10 修正）：原来写成「基集已含中核就再并 8-9」，
+        #    而 performance 档的 other 本来就是 4-7 → 所有忙线程被推上 8-9（实测复现：
+        #    40 个目标里 31 个是 performance → 满屏 4-9）。这与 O3 实测结论冲突
+        #    （C1-Ultra 只在 >2.2GHz 才有能效优势，而大核频窗 1.1~2.0GHz），也违背档位语义。
+        #    需要恢复旧行为时设 LW_HP=1。
+        if (LWHP == 1 && hasany(baseL, L_P1)) t = merge(baseL, L_HP)
+        else                                   t = merge(baseL, L_P1)
+        te = list2expr(t)
+        # 与基集相同 = 无事可做 → **不写 hot 条目**。
+        #   ★ 顺带好处：不写就不会把该 pid 拉进 pin_cgroup 的「不跳过缓存」名单，
+        #     省掉每轮的全线程扫描（perf 档应用原本每 25 秒白白全扫一遍）。
+        if (te != "" && te != be) print tid " " curPid " " te > HOTF
     } else if (lvl <= IDLE && L_E != "") {
-        # 空闲线程：收缩到能效核（仅当基集本来就更大时才有实际变化）
+        # 空闲线程：收缩到能效核（仅当基集本来就更大时才动）
+        ee = list2expr(L_E)
         if (hasany(baseL, L_P1) || hasany(baseL, L_HP))
-            print tid " " curPid " " list2expr(L_E) > HOTF
+            if (ee != "" && ee != be) print tid " " curPid " " ee > HOTF
     }
 }
 END {
