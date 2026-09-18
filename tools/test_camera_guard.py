@@ -103,37 +103,29 @@ def test_do_fix_covers_all_clusters():
     check(n == 9, "回退档位串是 9 个数（3 簇 × 核/min/max）= %d" % n)
 
 
-# ---------------------------------------------------------------- 3. 期望值一致
+# ---------------------------------------------------------------- 3. 读不到必须回退
 def test_load_freqs_from_config():
-    print("[3] load_freqs 能从三个方案包各自的 _Camera.json 读出正确的档位")
+    print("[3] camera_freq_load 在拿不到档位时必须回退（不崩）")
     body = extract(src(UTIL), "camera_freq_load")
     check(bool(body), "camera_freq_load() 存在")
     check("set -- $FREQ_ALL" not in body or True, "camera_freq_load 用两行滑动窗口取值")
 
-    # 各方案包的期望值（三簇代表核 0/4/8）
-    expect = {
-        "sweet_bal":  {"0": (912000, 3148800), "4": (1142400, 3686400), "8": (2044800, 4358400)},
-        "sweet_perf": {"0": (912000, 3148800), "4": (1142400, 3686400), "8": (2044800, 4358400)},
-        "sweet_eco":  {"0": (672000, 2246400), "4": (835200, 2294400), "8": (1497600, 2860800)},
-    }
+    # 读不到文件时必须回退，而不是崩
     script = (
         body + "\n"
         'camera_freq_load || { echo "FAIL"; exit 1; }\n'
         'echo "$CAM_ALL"\n'
     )
-    for scheme, exp in expect.items():
-        d = os.path.join(CFG, scheme)
-        out, rc = sh('SCENE_DIR=%s\n' % _q(d) + script, ROOT)
-        got = out.strip().split()
-        want = []
-        for cpu in ("0", "4", "8"):
-            want += [cpu, str(exp[cpu][0]), str(exp[cpu][1])]
-        check(rc == 0 and got == want,
-              "%s → %s" % (scheme, " ".join(got) if got else "解析失败"))
-
-    # 读不到文件时必须回退，而不是崩
     out2, _ = sh('SCENE_DIR=/nonexistent\n' + script, ROOT)
     check("FAIL" in out2, "文件不存在 → camera_freq_load 返回失败（走回退表）")
+
+    # ⚠ 2026-09-18 删除了原来的「从三个方案包 _Camera.json 读出正确档位」3 项断言：
+    #   v12 已把 @cpu_freq 从 _Camera.json 里彻底移除（改引用 profile.json 的
+    #   fast_active），那是「相机 min==max 塌缩」的根因修复 —— 源头没了，
+    #   该断言永远为假。camera_freq_guard.sh 已降为手动应急工具、默认不启用，
+    #   它的内部逻辑（写入顺序 / 三簇覆盖 / sysfs 实跑）仍由本文件其余断言守着。
+    check("@cpu_freq" not in src(os.path.join(CFG, "sweet_bal", "_Camera.json")),
+          "_Camera.json 里已无 @cpu_freq（v12 根因修复，旧断言的前提消失）")
 
 
 # ---------------------------------------------------------------- 3b. 回退表保守

@@ -90,7 +90,8 @@ def run_offline_suite():
 
     默认构建**不**跑测试：构建是高频动作，测试失败会拖慢它；但发版前应当
     显式跑一次 —— 用 `python tools/build_module.py --check`。
-    涵盖 lint + 三个测试脚本（跳过需要真实方案目录布局的 test_sync_skip.sh）。
+    涵盖 lint + tools/test_*.py（test_pin_mode.py 会递归跑其余测试，已自排除；
+    跳过需要真实方案目录布局的 test_sync_skip.sh）。任一失败即中止打包。
     """
     import subprocess
     suite = [
@@ -98,7 +99,7 @@ def run_offline_suite():
         ("test_load_aware.py", "负载感知四档语义"),
         ("test_bigcore_guard.py", "8-9 封锁"),
         ("test_pin_mode.py", "落核模式默认值"),
-        ("test_camera_guard.py", "相机档位（历史遗留，允许失败）"),
+        ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
     ]
     rc = 0
     for f, desc in suite:
@@ -111,10 +112,8 @@ def run_offline_suite():
         tail = (r.stdout or "").strip().splitlines()
         last = tail[-1] if tail else ""
         ok = r.returncode == 0
-        # test_camera_guard 是 v7 时代遗留（脚本已删、断言保留），已知失败不算闸门
-        gate = f != "test_camera_guard.py"
         print("      %s %s" % ("PASS" if ok else "FAIL", last[:70]))
-        if not ok and gate:
+        if not ok:
             rc = 1
     return rc
 

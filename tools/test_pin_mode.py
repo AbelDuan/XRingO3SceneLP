@@ -108,6 +108,19 @@ def main():
     check('PIN_MODE" = "taskset"' in text,
           "清理只在 taskset 模式下触发")
 
+    print("\n[7] 离线套件必须干净通过（不留已知失败）")
+    import glob
+    me = os.path.basename(os.path.abspath(__file__))
+    suite = [t for t in sorted(glob.glob(os.path.join(ROOT, "test_*.py")))
+             if os.path.basename(t) != me]          # 排除自己，避免自递归
+    bad = []
+    for t in suite:
+        r = subprocess.run([sys.executable, t], capture_output=True, text=True)
+        if r.returncode != 0:
+            bad.append(os.path.basename(t))
+    check(not bad, "其它 tools/test_*.py 退出码全为 0（失败: %s）"
+          % (", ".join(bad) if bad else "无"))
+
     print("\n" + "=" * 62)
     if FAILS:
         print("\u274c 未通过 %d 项：" % len(FAILS))
