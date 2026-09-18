@@ -118,6 +118,10 @@ rm -f "${STATE_DIR}/locked" "${STATE_DIR}/unlocked" 2>/dev/null
 
 # ---------- WebUI 种子 ----------
 chmod 0755 "$MODPATH/Scripts/4+4+2/O3/webui.sh" 2>/dev/null
+# 事件驱动辅助是**编译好的 ELF**，必须可执行才能被 service.sh 拉起。
+# 虽然上面 set_perm_recursive 已覆盖 Scripts/（0755），这里显式再来一次 ——
+# 靠"压缩包里的权限位 + 合并时保留"是脆的（chmod 一次几乎零成本，失败也没副作用）。
+chmod 0755 "$MODPATH/Scripts/4+4+2/O3/pinwatch" 2>/dev/null
 
 # 1) 页面模型（内置模板 + 应用归类 + 游戏规则）
 if [ ! -f "${STATE_DIR}/webui/model.json" ] && [ -f "$MODPATH/Config/webui_model.seed.json" ]; then

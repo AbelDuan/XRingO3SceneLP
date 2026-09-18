@@ -2190,6 +2190,10 @@ selfheal_pending_update() {
     chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
     chmod 0755 "$FIN"/lib/*.sh "$FIN"/Scripts/*/*/*.sh \
                "$FIN"/Config/*/*/*.sh "$FIN"/Config/*/*/*/*.sh 2>/dev/null
+    # ⚠ 上面只匹配 *.sh；事件驱动辅助是**编译好的 ELF（无 .sh 后缀）**，
+    #   合并后若丢了可执行位，service.sh 会起不来它 —— 而且是静默失败
+    #   （`[ -x ... ]` 判 false 直接跳过），排查起来很费劲。显式补一次。
+    chmod 0755 "$FIN/Scripts/4+4+2/O3/pinwatch" 2>/dev/null
     return 0
   fi
 
@@ -2200,6 +2204,7 @@ selfheal_pending_update() {
     rm -f "$FIN/update" "$FIN/remove" 2>/dev/null
     chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
     chmod 0755 "$FIN"/Scripts/*/*/*.sh "$FIN"/Config/*/*/*.sh "$FIN"/Config/*/*/*/*.sh 2>/dev/null
+    chmod 0755 "$FIN/Scripts/4+4+2/O3/pinwatch" 2>/dev/null
     # 让正在服务的守护用上新脚本（不重启）
     local KSUD=""
     for c in /data/adb/ksu/bin/ksud /data/adb/ksud; do [ -x "$c" ] && { KSUD="$c"; break; }; done

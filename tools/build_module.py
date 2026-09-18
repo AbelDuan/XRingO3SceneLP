@@ -119,6 +119,28 @@ def run_offline_suite():
     return rc
 
 
+def inject_version(path, rel, ver, stamp):
+    """把前端里硬编码的版本号换成当前版本（只影响**打包内容**，不写源文件）。
+
+    背景：`webroot/index.html` 的标题栏有 `<span class="h-ver" id="ver">16.12 (…)`，
+    是手写的。构建脚本原来只从 module.prop 取版本做**文件名**，从不注入前端 ——
+    于是模块升到 16.20、WebUI 里仍显示 16.12（用户在界面上看到的就是这个）。
+    这里在写 zip 时替换，仓库源文件保持不动（版本号单一来源 = module.prop）。
+    """
+    if rel not in ("webroot/index.html", "webroot/index.htm"):
+        return None
+    try:
+        s = io.open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+    text = "%s (%s-%s-%s)" % (ver, stamp[0:4], stamp[4:6], stamp[6:8])
+    new = re.sub(r'(id="ver"[^>]*>)[^<]*(</span>)',
+                 lambda m: m.group(1) + text + m.group(2), s, count=1)
+    if new == s:
+        return None          # 没有可替换的标记 → 按原文件打包
+    return new.encode("utf-8")
+
+
 def main():
     args = sys.argv[1:]
     if "--check" in args:
@@ -148,9 +170,15 @@ def main():
         return 1
 
     entries = []
+    injected = []
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         for p, rel in items:
-            z.write(p, rel)
+            data = inject_version(p, rel, ver, stamp)
+            if data is None:
+                z.write(p, rel)
+            else:
+                z.writestr(rel, data)
+                injected.append(rel)
             entries.append(rel)
 
     # 模块包的自检：根必须有 module.prop，且不能混进测试/备份
@@ -160,6 +188,8 @@ def main():
 
     entries.sort()
     print("WROTE %s  (%d bytes, %d entries)" % (out, os.path.getsize(out), len(entries)))
+    if injected:
+        print("已注入版本号（%s）：%s" % (ver, ", ".join(injected)))
     print()
     print("关键文件:")
     for k in ("module.prop", "service.sh", "customize.sh",
