@@ -56,6 +56,8 @@ migrate_templates_v12
 migrate_templates_v13
 # v14：四档语义重定义 —— 极速 = 0-7 基线 + 高负载线程上探 4-9；均衡显示名 → 流畅
 migrate_templates_v14
+# v15：流畅 主/渲染 → 4-5；性能 轻线程 → 0-3（按本机 4-7 共频实测重排）
+migrate_templates_v15
 
 # 3) 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 if [ -f "$SCENE_POWERCFG" ]; then

@@ -56,7 +56,8 @@ def main():
     print("[1] 缺省：无配置文件时与内置默认一致（不许悄悄改变调参）")
     defaults = {
         "powersave":   "powersave 省电 - 0 15 10 4 0",
-        "balance":     "balance 流畅 4-7 0 12 10 4 0",
+        # v16.22：流畅升级目标 4-7 → 4-5；性能基线 4-7 → 0-3（按本机 4-7 共频实测）
+        "balance":     "balance 流畅 4-5 0 12 10 4 0",
         "performance": "performance 性能 4-7 0 10 9 4 0",
         "fast":        "fast 极速 4-9 1 8 8 4 1",
     }
@@ -80,6 +81,8 @@ def main():
 
     print("\n[3] 只接受那 5 个核心集合")
     valid = ["0-3", "4-7", "8-9", "0-7", "4-9"]
+    # 内置默认里还多了 4-5（流畅的升级目标）—— 用户可选项不含它，但默认合法
+    builtin_ok = valid + ["-", "4-5"]
     for v in valid:
         io.open(conf, "w", encoding="utf-8").write("fast\t%s\t1\t8\t8\t4\t1\n" % v)
         got, _ = row_of("fast", conf)
@@ -89,7 +92,7 @@ def main():
         io.open(conf, "w", encoding="utf-8").write("fast\t%s\t1\t8\t8\t4\t1\n" % bad)
         got, _ = row_of("fast", conf)
         esc = got.split()[2] if got else None
-        check(esc in valid or esc == "-",
+        check(esc in builtin_ok,
               "非法集合 %r 被拒绝并回落（实际 %r）" % (bad, esc))
 
     print("\n[4] 自洽性：目标含 8/9 ⇒ hotok 必须为 1")
@@ -122,8 +125,11 @@ def main():
             check(False, "默认行列数不足: %r" % r)
             continue
         esc = cols[2]
-        check(esc == "-" or esc in valid,
-              "默认行 %s 的升级目标 %s 合法" % (cols[0], esc))
+        # v16.22 起默认核位由 sched_cores_default_* 注入（单一来源），
+        # 静态看到的是 `$(sched_cores_default_esc xxx)` —— 真值由本测试第 1 节
+        # 的运行时断言保证，这里只确认「要么是命令替换、要么是合法字面量」。
+        ok = esc.startswith("$(") or esc == "-" or esc in builtin_ok
+        check(ok, "默认行 %s 的升级目标是命令替换或合法值（实际 %s）" % (cols[0], esc))
 
     print("\n[7] 后端写入的列序必须与读取一致（真机实测接反过）")
     # 用例：写入 <mode>\t<base>\t<esc>，读回后 base 必须是 base、esc 必须是 esc。

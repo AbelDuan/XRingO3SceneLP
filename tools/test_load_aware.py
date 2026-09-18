@@ -12,7 +12,7 @@ test_load_aware.py —— load_aware.sh（动态负载感知）的离线自检
   2. `-v HOT=...` 传进来的是字符串，`lvl >= HOT` 会走**字符串比较** ——
      `lvl=7 >= HOT=9` 为假、`10 >= 12` 也为假，阈值行为取决于字典序。
      手测（字面量）正常、走脚本失效。（v16.16 用 +0 修掉）
-  3. 档位语义：省电不升级、流畅/性能封顶 4-7、极速才上探 4-9；
+  3. 档位语义：省电不升级、流畅升到 4-5、性能升到 4-7、极速才上探 4-9；
      fast 档还不做空闲收缩（中低负载要留在 0-7）。
   4. "-" 是「本档不升级」的占位符，必须显式跳过 —— 否则会被当成核位字符串
      而恒真，省电档会被错误升级。
@@ -165,7 +165,7 @@ def main():
     print("\n[3] 四档升级目标（忙线程基线 0-3）")
     cases = [
         ("powersave",   "-",   "0", 15, 10, 4, 0, None,  "省电：不升级"),
-        ("balance",     "4-7", "0", 12, 10, 4, 0, "0-7", "流畅：升到 0-7"),
+        ("balance",     "4-5", "0", 12, 10, 4, 0, "0-5", "流畅：升到 0-5（并入 4-5）"),
         ("performance", "4-7", "0", 10, 9,  4, 0, "0-7", "性能：升到 0-7"),
         ("fast",        "4-9", "1", 8,  8,  4, 1, "0-9", "极速：升到 0-9（上探 4-9）"),
     ]
@@ -181,7 +181,7 @@ def main():
     # ---- 3) 空闲收缩：非 fast 档收缩、fast 档不收缩 ------------------------
     print("\n[4] 空闲线程处理（基线 4-7，占用 2%）")
     h.threads = [(6001, "4-7", 2, 0)]
-    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
+    got = h.targets(mode="balance", esc="4-5", hotok="0", interval=12,
                     hot=10, idle=4, idleoff=0)
     check(got.get(6001) == "0-3", "流畅档：空闲线程收缩到 0-3（实际 %s）" % got.get(6001))
     got = h.targets(mode="fast", esc="4-9", hotok="1", interval=8,
@@ -210,7 +210,8 @@ def main():
     print("\n[7] 与 lib/util.sh mode_sched_row 对齐")
     row = sh_out('. "%s" >/dev/null 2>&1; for m in powersave balance performance fast; '
                  'do echo "$m:$(mode_sched_row $m)"; done' % UTIL)
-    expect_esc = {"powersave": "-", "balance": "4-7",
+    # v16.22：流畅的升级目标改为 4-5（按本机 4-7 同频域实测重排），性能保持 4-7
+    expect_esc = {"powersave": "-", "balance": "4-5",
                   "performance": "4-7", "fast": "4-9"}
     expect_hp = {"powersave": "0", "balance": "0",
                  "performance": "0", "fast": "1"}

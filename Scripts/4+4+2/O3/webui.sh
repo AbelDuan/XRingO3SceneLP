@@ -718,13 +718,8 @@ cmd_modeset() {
 #  只接受 SCHED_CORES_VALID 里那 5 个集合，防手滑写进 0-9。
 #  该档模板里「其余线程」的内置核位（用于前端显示默认值）
 sched_cores_template_other() {
-    case "$1" in
-      powersave)   echo "0-3" ;;
-      balance)     echo "0-3" ;;
-      performance) echo "4-7" ;;
-      fast)        echo "0-7" ;;
-      *)           echo "0-3" ;;
-    esac
+    # 单一来源：lib/util.sh 的 sched_cores_default_base（避免两处漂移）
+    sched_cores_default_base "$1"
 }
 
 cmd_schedcores() {

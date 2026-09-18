@@ -24,7 +24,10 @@ SCENE_DIR="/data/data/${SCENE_PKG}/files"
 MODDIR="${MODDIR:-${0%/*}}"
 [ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/SceneO3Tuner"
 
-STATE_DIR="/data/adb/SceneO3Tuner"
+# ⚠ 用 ${VAR:-默认} 而不是硬赋值：单元测试要在沙盒里跑迁移/落盘逻辑，
+#   硬赋值会让测试**静默地**去操作真机路径（本测试套件踩过：沙盒参数不生效，
+#   测试"通过"其实是假阳性）。生产路径不变，只是允许外部覆盖。
+STATE_DIR="${STATE_DIR:-/data/adb/SceneO3Tuner}"
 ACTIVE_FILE="${STATE_DIR}/active_scheme"
 LOG_FILE="${STATE_DIR}/sceneo3.log"
 mkdir -p "$STATE_DIR" 2>/dev/null
@@ -746,9 +749,50 @@ SCHED_CORES_VALID="0-3 4-7 8-9 0-7 4-9"
 #  自定义配置文件（WebUI「模式」页读写）；不存在时一律用下面的内置默认。
 SCHED_CORES_FILE="${SCHED_CORES_FILE:-${WEBUI_DIR}/sched_cores.conf}"
 
+# ------------------------------------------------------------
+#  四档**内置默认**核位（v16.22 · 单一来源，webui.sh 的 sched_cores_template_other
+#  与 mode_sched_row 都从这里取，避免两处漂移）
+# ------------------------------------------------------------
+#  2026-09-18 按用户要求重排：让「重载线程少」的档用窄核位省电、
+#  「重载线程多」的档留宽核位保并行。依据是本机实测：
+#    · 4-7 是**同一个频率域**（policy4 的 related_cpus=4-7），四核共频；
+#    · cpu4/core_ctl min=max=4 → 4-7 被强制保持在线、不会自动下线空核。
+#  所以限制到 4-5 的收益是「少 2 个核的漏电」，代价是重载线程 ≥3 时要排队
+#  拉高频（同域共频下反而更费电）—— 正好对应「中低要求游戏」这个档。
+#    流畅(均衡)  基线 0-3，重载并到 **4-5**（2 核，够日常偏重，更省）
+#    性能        基线 0-3，重载并到 **4-7**（4 核余量，给中低要求游戏）
+#  其余两档不变：省电全压 0-3；极速 0-7 基线 + 重载上探 4-9。
+sched_cores_default_base() {   # 该档「中低负载基线」的内置默认
+    case "$1" in
+      powersave)   echo "0-3" ;;
+      balance)     echo "0-3" ;;
+      performance) echo "0-3" ;;
+      fast)        echo "0-7" ;;
+      *)           echo "0-3" ;;
+    esac
+}
+sched_cores_default_esc() {    # 该档「高负载升级目标」的内置默认（"-" = 不升级）
+    case "$1" in
+      powersave)   echo "-" ;;
+      balance)     echo "4-5" ;;
+      performance) echo "4-7" ;;
+      fast)        echo "4-9" ;;
+      *)           echo "4-7" ;;
+    esac
+}
+
 sched_cores_valid() {   # 0 = 合法（含 "-" 表示本档不升级）
     [ "$1" = "-" ] && return 0
     case " $SCHED_CORES_VALID " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+#  ⚠ 内置默认里出现 4-5，而 4-5 **不在** SCHED_CORES_VALID（WebUI 只给 5 个选项，
+#     按用户要求「自定义设置还是用原来的配方」）。所以校验分两个口径：
+#     · mode_sched_row 读出的默认值 → 用 sched_cores_builtin_ok（含 4-5）
+#     · 用户在 WebUI 提交的值          → 用 sched_cores_valid（不含 4-5）
+sched_cores_builtin_ok() {
+    [ "$1" = "-" ] && return 0
+    case "$1" in 0-3|4-5|4-7|8-9|0-7|4-9) return 0 ;; esac
     return 1
 }
 #  取某档的自定义值。兼容两种格式，读坏/越界/非法一律返回 1（调用方回默认）：
@@ -778,11 +822,12 @@ sched_cores_lookup() {   # $1=mode $2=列号(1..7) → 全局 SCV
 
 mode_sched_row() {
     case "$1" in
-      powersave)   _def="powersave 省电 - 0 15 10 4 0" ;;
-      balance)     _def="balance 流畅 4-7 0 12 10 4 0" ;;
-      performance) _def="performance 性能 4-7 0 10 9 4 0" ;;
-      fast)        _def="fast 极速 4-9 1 8 8 4 1" ;;
-      *)           _def="balance 流畅 4-7 0 12 10 4 0" ;;
+      # 核位来自 sched_cores_default_*（单一来源）；其余列是该档调参
+      powersave)   _def="powersave 省电 $(sched_cores_default_esc powersave) 0 15 10 4 0" ;;
+      balance)     _def="balance 流畅 $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
+      performance) _def="performance 性能 $(sched_cores_default_esc performance) 0 10 9 4 0" ;;
+      fast)        _def="fast 极速 $(sched_cores_default_esc fast) 1 8 8 4 1" ;;
+      *)           _def="balance 流畅 $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
     esac
     case "$1" in powersave|balance|performance|fast) ;; *) echo "$_def"; return 0 ;; esac
 
@@ -795,7 +840,7 @@ mode_sched_row() {
     _hot=$(printf '%s' "$_def" | cut -d' ' -f6)
     _idle=$(printf '%s' "$_def" | cut -d' ' -f7)
     _io=$(printf '%s' "$_def" | cut -d' ' -f8)
-    sched_cores_lookup "$1" 1 && sched_cores_valid "$SCV" && _esc="$SCV"
+    sched_cores_lookup "$1" 1 && sched_cores_builtin_ok "$SCV" && _esc="$SCV"
     sched_cores_lookup "$1" 2 && case "$SCV" in 0|1) _ho="$SCV" ;; esac
     sched_cores_lookup "$1" 3 && [ "$SCV" -ge 2 ] 2>/dev/null && [ "$SCV" -le 120 ] && _it="$SCV"
     sched_cores_lookup "$1" 4 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _hot="$SCV"
@@ -1860,8 +1905,8 @@ seed_game_templates() {
     #   直接上 4-9（王者/金铲铲实测 UnityMain 占 87%、渲染是最重的持续负载），
     #   其余真·高负载线程由 load_aware 按实测占用率上探 4-9。
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
-    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n'
-    printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
+    printf 'balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n'
+    printf 'performance\t性能\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
     printf 'fast\t极速\t{e_core},{p1_core}\t\t{p_core}\tUnityGfx\t{p_core}\t\n'
   } > "$GAME_TPL_FILE" 2>/dev/null
   chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
@@ -2132,6 +2177,60 @@ migrate_templates_v14() {
     return 0
 }
 
+# ============================================================
+#  档位迁移 v15（2026-09-18）—— 流畅/性能 的核位重排（按用户要求）
+# ------------------------------------------------------------
+#  依据本机实测：4-7 是**同一个频率域**（policy4 related_cpus=4-7，四核共频），
+#  且 cpu4/core_ctl min=max=4 → 4-7 强制在线、不会自动下线空核。
+#  所以「限制到 4-5」的收益是少 2 个核的漏电，代价是重载线程 ≥3 时要排队拉高频
+#  （同域共频下反而更费电）—— 正好把窄核位留给「重载线程少」的档。
+#
+#  改两档（只改核位列，调参不动）：
+#    流畅：轻线程 0-3（不变）；主线程/渲染线程 4-7 → **4-5**
+#    性能：轻线程 4-7 → **0-3**（原来整条都在 4-7，是最费电的一档）；
+#          主线程/渲染线程 4-7（不变）
+#  其余两档（省电、极速）不动。
+#
+#  幂等：$STATE_DIR/tpl_v15 标记；旧表先备份到 backup/*.pre-v15。
+#  只按**档位 id** 匹配，用户自建的行不受影响。
+# ============================================================
+TPL_V15_MARK="${STATE_DIR}/tpl_v15"
+
+migrate_templates_v15() {
+    [ -f "$TPL_V15_MARK" ] && return 0
+    mkdir -p "${STATE_DIR}/backup" 2>/dev/null
+    local t
+
+    for t in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$t" ] || continue
+        cp -f "$t" "${STATE_DIR}/backup/$(basename "$t").pre-v15" 2>/dev/null
+        # 与 seed_*_templates 的新默认逐字一致（应用/游戏各一套）
+        if [ "$t" = "$APP_TPL_FILE" ]; then
+            awk -F'\t' '
+              /^#/ { print; next }
+              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n"; next }
+              $1 == "performance" { printf "performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n"; next }
+              { print }
+            ' "$t" > "${TMPD}/tpl.v15" 2>/dev/null
+        else
+            awk -F'\t' '
+              /^#/ { print; next }
+              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n"; next }
+              $1 == "performance" { printf "performance\t性能\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n"; next }
+              { print }
+            ' "$t" > "${TMPD}/tpl.v15" 2>/dev/null
+        fi
+        if [ -s "${TMPD}/tpl.v15" ] && ! cmp -s "${TMPD}/tpl.v15" "$t"; then
+            write_replace "${TMPD}/tpl.v15" "$t" && chmod 0666 "$t" 2>/dev/null
+        fi
+        rm -f "${TMPD}/tpl.v15" 2>/dev/null
+    done
+
+    : > "$TPL_V15_MARK" 2>/dev/null
+    log_quiet "webui: 档位表已升级到 v15（流畅 4-5 / 性能 轻线程 0-3）"
+    return 0
+}
+
 # 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
 #   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
 #   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
@@ -2226,10 +2325,14 @@ seed_app_templates() {
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
     # 流畅：日常较重负载也要覆盖 —— 主线程与渲染线程上 Premium(4-7)，其余压 Pro。
     #   Worker/Job/Async/Pool 留 Pro 省电（它们是突发型，不是持续重载）。
-    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n'
+    # 流畅（v16.22）：轻线程 0-3；主线程/渲染线程并到 **4-5**（2 核够日常偏重，更省电）。
+    #   4-5 不在 WebUI 的 5 个可选值里 —— 用户要自定义仍用原来的选项，改的是内置默认。
+    printf 'balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n'
     # 性能：王者荣耀/金铲铲这类中低要求游戏 —— 其余线程也升到 Premium(4-7)，
     #   应对浏览器/WebView/游戏的多进程并发；8-9 不碰（留给系统级任务与热余量）。
-    printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n'
+    # 性能（v16.22）：轻线程压 0-3（原来整条都在 4-7，是最费电的一档）；
+    #   主线程/渲染线程并到 **4-7**（4 核余量，给王者/金铲铲这类中低要求游戏）。
+    printf 'performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n'
     # 极速：中低负载线程统一 0-7 由系统分配，**只有高负载线程**由 load_aware
     #   按实测占用率上探 4-9（中核 ∪ 超大核，内核按频率/热状态自选核）。
     #   为什么不整条给 4-9：binding 全进程到 4-9 会让「中低负载线程」也落在中核/大核，

@@ -895,6 +895,7 @@ python tools/test_bigcore_guard.py   # 8-9 封锁：收窄 / 冻结 / 重申 / �
 python tools/test_pin_mode.py        # 落核模式默认值（taskset / cgroup 回退）
 python tools/test_sched_cores.py     # 四档核心集合可自定义（读写往返 + 合法性）
 python tools/test_webui_render.py    # WebUI 五个视图无头渲染（防运行时错误）
+python tools/test_templates_v15.py   # 流畅/性能核位重排迁移（v15）
 bash   tools/test_sync_skip.sh       # 升级覆盖语义
 python tools/build_module.py         # 打 zip + tgz
 python tools/build_module.py --check # 打包前先跑一遍离线自检套件（lint + 测试）
@@ -908,6 +909,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | `tools/test_bigcore_guard.py` | 假 cpuset 树 + 假 mount/umount 跑**真脚本**：收窄 / 原值存出厂值 / **冻结值重申** / **按模式生效（极速解冻）** / restore / 幂等 | 25 断言 |
 | `tools/test_pin_mode.py` | 落核模式解析：默认 taskset / `pin_cgroup` 标记回退 group / 环境变量覆盖 / taskset 下清理遗留组树 | 8 断言 |
 | `tools/test_sched_cores.py` | 四档核心集合可自定义：缺省不行为变化 / 覆盖生效 / 只收 5 个合法集合 / 目标含 8-9 必须允许上探 / 损坏文件回落 / **后端读写列序往返** | 35 断言 |
+| `tools/test_templates_v15.py` | v15 迁移：旧表→新值 / 用户自建行不动 / 幂等（有标记 & 新表两种）/ seed printf 逐字一致 / 单一来源一致 / 4-5 是内置默认但不在 WebUI 白名单 | 19 断言 |
 | `tools/test_webui_render.py` | 把 index.html 的脚本抽到 Node + 最小 DOM 里跑**真实渲染函数**：五个视图都不得抛异常且返回非空 HTML；模式页核心集合区块真的渲染出来（≥8 个选择器）；静态断言禁止用 `esc` 当局部变量名 | 8 断言 |
 | `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
 | `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，任一失败就中止打包 | — |
@@ -929,6 +931,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 ## 10. 版本历史
 
 | 版本 | 主要内容 |
+| **v16.22** | ★ **按用户要求重排流畅/性能核位**（依据本机实测：4-7 是**同一频率域**——`policy4 related_cpus=4-7` 四核共频；`cpu4/core_ctl min=max=4` 强制在线，不会自动下线空核）：<br>　· **流畅（均衡）**：轻线程 0-3（不变）；主线程/渲染线程 4-7 → **4-5**（2 核够日常偏重，省「少 2 核漏电」）<br>　· **性能**：轻线程 4-7 → **0-3**（原来整条都在 4-7，是最费电的一档）；主线程/渲染线程保持 4-7（4 核余量，给王者/金铲铲这类中低要求游戏）<br>　· 省电/极速两档不动。**自定义机制保持原样**：WebUI 仍是那 5 个选项、仍走 `sched_cores.conf`；`4-5` 只作为**内置默认**存在，不进用户可选白名单（校验因此分两个口径：`sched_cores_valid` 管用户提交、`sched_cores_builtin_ok` 管内置默认）。<br>新增 `migrate_templates_v15`（幂等，`$STATE_DIR/tpl_v15` 标记 + `backup/*.pre-v15` 备份）把已装设备的模板行整行重写成新值——顺带修好设备上残留的旧显示名（`均衡`→`流畅`）。核位默认值收敛到 **`sched_cores_default_base/esc` 单一来源**（`mode_sched_row` 与 webui.sh 的 `sched_cores_template_other` 都从这里取），避免两处漂移。<br>⚠ 顺带修一个**测试基建坑**：`STATE_DIR` 原来是**硬赋值**（`STATE_DIR="/data/adb/..."`），导致沙盒测试**静默地**去操作真机路径 —— 测试"通过"其实是假阳性。改成 `${STATE_DIR:-默认}` 后沙盒才真的隔离（生产路径不变）。<br>真机验证（16.21 → 16.22，未重启）：迁移前 `balance|均衡|{p1_core}` → 迁移后 `balance|流畅|4-5`、`performance|性能|{e_core}`；`SC_balance=流畅|0-3|4-5`、`SC_performance=性能|0-3|4-7`；threads.json 已重建；抽查 `tencent.mm:push allowed=0-3`。构建闸门 7 套件全绿 |
 | **v16.21** | ★ **修「模式页打不开」** —— v16.18 加核心集合编辑器时，把局部变量命名为 `esc`，**遮蔽了全局转义函数 `esc()`**；下一行 `esc(cn)` 变成"调用字符串"，`viewModes()` 抛 `TypeError: esc is not a function`，整个模式页白屏。`lint_module.py` 只做静态检查（语法/接线/data-act 覆盖），**抓不到这种运行时错误** —— 现在新增 **`tools/test_webui_render.py`**：把 index.html 的内联脚本抽到 Node + 最小 DOM 里，**真实调用五个视图函数**，断言都不抛异常且返回非空 HTML、模式页核心集合区块确实渲染（≥8 选择器），并静态禁止把 `esc` 当变量名。已做红-绿验证（把实现改回遮蔽写法 → 测试立刻复现 `esc is not a function`）。⚠ 写这个测试时也踩了个坑：Node 的 CommonJS 里顶层函数**不是 `globalThis` 属性**，必须按名字直接调用（用 `global[v]` 动态取会让五个视图全报 NOT_A_FUNCTION）|
 | **v16.20b** | ★ **修「WebUI 一直显示 16.12」+ 刷入强制更新** —— 两个真问题：<br>① **前端版本号是硬编码的**：`webroot/index.html` 的标题栏写着 `16.12`，而构建脚本只从 `module.prop` 取版本做**文件名**，从不注入前端 → 模块升到 16.20、界面上仍显示 16.12。现在 `build_module.py` 在**写 zip 时**把 `id="ver"` 的内容替换成 `module.prop` 的版本（**不写源文件**，版本号单一来源），并在构建输出里报告 `已注入版本号`。<br>② **同版本刷入不会更新**：就地合并（免重启自愈）的判据是 `暂存 versionCode > 当前 versionCode`，所以 versionCode 相同就**什么都不做**。本次把 versionCode 提到 `2026091820`（设备原为 `2026091818`）→ 刷入即强制合并。<br>另修一处**静默失败隐患**：自愈合并后的权限恢复只匹配 `*.sh`，而事件驱动辅助是**编译好的 ELF（无 .sh 后缀）**——丢了可执行位会让 `service.sh` 静默跳过它。已在两处自愈分支 + `customize.sh` 显式 `chmod 0755`。<br>验证：包内 `module.prop`=16.20/2026091820、`index.html` 版本行已注入为 16.20、`pinwatch` 二进制 sha256 与源文件**逐字节一致**（ELF 头正确、未被 CRLF 破坏）、可执行位三处齐备（文件系统/git 索引 `100755`/zip 条目 `0755`）、包内全部 `sh -n` 通过、构建闸门 5 套件全绿 |
 | **v16.20** | ★ **pinwatch 目标表刷新策略修正** —— 实测发现 `pinwatch` 可能比守护更早启动，此时 `$TMPD/t.tids`（目标进程表）还没生成，内核侧过滤集合为空 → **一个事件都收不到**；而原来的 60s 刷新周期会让这个「空窗口」持续一分钟。改为**每 10s 刷新 + 表为空时下一轮立即重试**。同时把守护重启后 pinwatch 常驻进程的激活路径真机验证通过（守护 1 个 + pinwatch 常驻 1 个 + helper 在跑） |
