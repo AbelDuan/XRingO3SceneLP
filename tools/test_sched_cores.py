@@ -4,19 +4,21 @@
 test_sched_cores.py —— 四档核心集合「可自定义」的离线自检
 
 需求（用户 2026-09-18）：WebUI 里能自定义所有线程模式、选择核心集合
-（0-3 / 4-7 / 8-9 / 0-7 / 4-9）。
+（0-3 / 4-5 / 4-7 / 8-9 / 0-7 / 4-9）。
+v16.23：4-5 从「仅内置默认」提升为**用户可选**（用户要求「同步到模式列表」），
+于是 sched_cores_valid 与 WebUI 下拉、SCHED_CORES_VALID 三者必须是同一份清单。
 
 设计约束（本测试锁住这些语义）：
   1. **缺省不行为变化**：没有配置文件时，mode_sched_row 必须与内置默认完全一致
      —— 否则升级会悄悄改变调参，用户又要重测。
   2. 配置文件存在时**覆盖**内置默认，且只覆盖写了的模式。
-  3. 允许的核心集合**只有**那 5 个（防手滑写进 0-9 这种会打到超大核的非法值）。
+  3. 允许的核心集合**只有**那 6 个（防手滑写进 0-9 这种会打到超大核的非法值）。
   4. 「允许上探 4-9」与「升级目标」必须自洽：目标含 8/9 时该标志才为 1。
   5. 文件损坏/半截（少列、乱码）时**回落内置默认**，绝不产生畸形行。
 
 跑法: python tools/test_sched_cores.py
 """
-import io, os, subprocess, sys, tempfile
+import io, os, re, subprocess, sys, tempfile
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
 MOD = os.path.dirname(ROOT)
@@ -79,10 +81,10 @@ def main():
     check(got2 == defaults["balance"],
           "未写进配置的 balance 仍是内置默认（实际 %r）" % got2)
 
-    print("\n[3] 只接受那 5 个核心集合")
-    valid = ["0-3", "4-7", "8-9", "0-7", "4-9"]
-    # 内置默认里还多了 4-5（流畅的升级目标）—— 用户可选项不含它，但默认合法
-    builtin_ok = valid + ["-", "4-5"]
+    print("\n[3] 只接受那 6 个核心集合（v16.23：4-5 进入可选白名单）")
+    valid = ["0-3", "4-5", "4-7", "8-9", "0-7", "4-9"]
+    # 4-5 转正后不再有「内置默认合法、用户不可选」的第二口径，两边同一份清单
+    acceptable = valid + ["-"]
     for v in valid:
         io.open(conf, "w", encoding="utf-8").write("fast\t%s\t1\t8\t8\t4\t1\n" % v)
         got, _ = row_of("fast", conf)
@@ -92,7 +94,7 @@ def main():
         io.open(conf, "w", encoding="utf-8").write("fast\t%s\t1\t8\t8\t4\t1\n" % bad)
         got, _ = row_of("fast", conf)
         esc = got.split()[2] if got else None
-        check(esc in builtin_ok,
+        check(esc in acceptable,
               "非法集合 %r 被拒绝并回落（实际 %r）" % (bad, esc))
 
     print("\n[4] 自洽性：目标含 8/9 ⇒ hotok 必须为 1")
@@ -112,7 +114,6 @@ def main():
 
     print("\n[6] 静态：默认表里只有那 5 个集合（防止有人在默认里塞 0-9）")
     src = io.open(UTIL, encoding="utf-8").read()
-    import re
     # 默认现在是 `powersave) _def="powersave 省电 - 0 15 10 4 0" ;;` 形式
     fn = re.search(r"mode_sched_row\(\)\s*\{.*?\n\}", src, re.S)
     body = fn.group(0) if fn else ""
@@ -128,7 +129,7 @@ def main():
         # v16.22 起默认核位由 sched_cores_default_* 注入（单一来源），
         # 静态看到的是 `$(sched_cores_default_esc xxx)` —— 真值由本测试第 1 节
         # 的运行时断言保证，这里只确认「要么是命令替换、要么是合法字面量」。
-        ok = esc.startswith("$(") or esc == "-" or esc in builtin_ok
+        ok = esc.startswith("$(") or esc == "-" or esc in acceptable
         check(ok, "默认行 %s 的升级目标是命令替换或合法值（实际 %s）" % (cols[0], esc))
 
     print("\n[7] 后端写入的列序必须与读取一致（真机实测接反过）")
@@ -164,6 +165,16 @@ def main():
           "读侧第 1 列 → base（基线）")
     check('sched_cores_lookup "$m" 2 && sched_cores_valid "$SCV" && esc="$SCV"' in rd,
           "读侧第 2 列 → esc（升级目标）")
+
+    print("\n[8] WebUI「模式列表」的可选项 == 后端白名单（4-5 必须能选到）")
+    html = io.open(os.path.join(MOD, "webroot", "index.html"), encoding="utf-8").read()
+    mo = re.search(r"const SC_OUT = \[([^\]]*)\]", html)
+    check(mo is not None, "index.html 里有 SC_OUT 定义")
+    ui = re.findall(r"'([^']+)'", mo.group(1)) if mo else []
+    check(ui == valid, "WebUI 下拉与白名单逐项一致（实际 %r）" % ui)
+    check("4-5" in ui, "4-5 出现在 WebUI 可选列表里")
+    env_out, _ = sh('. "%s" >/dev/null 2>&1\necho "$SCHED_CORES_VALID"\n' % UTIL)
+    check(env_out.split() == valid, "SCHED_CORES_VALID 与清单一致（实际 %r）" % env_out)
 
     print("\n" + "=" * 62)
     if FAILS:

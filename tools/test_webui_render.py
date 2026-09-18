@@ -102,10 +102,10 @@ def main():
                     FREQS_P: '1113600 1497600 2044800' };
         S.schedcores = {
           SC_powersave: '省电|0-3|-|0-3|-',
-          SC_balance: '流畅|0-3|4-7|0-3|4-7',
-          SC_performance: '性能|4-7|4-7|4-7|4-7',
+          SC_balance: '流畅|0-3|4-5|0-3|4-5',
+          SC_performance: '性能|0-3|4-7|0-3|4-7',
           SC_fast: '极速|0-7|4-9|0-7|4-9',
-          SC_VALID: '0-3 4-7 8-9 0-7 4-9',
+          SC_VALID: '0-3 4-5 4-7 8-9 0-7 4-9',
           SC_HAS: '0',
         };
         S.status = { MODE_CN: '性能', MODE: 'performance' };
@@ -129,7 +129,31 @@ def main():
         let modesHtml = '';
         try { modesHtml = viewModes() || ''; } catch (e) {}
         out.__hasSC = modesHtml.indexOf('模式 → 核心集合') >= 0;
-        out.__hasSel = (modesHtml.match(/data-sc=/g) || []).length;
+        // v16.23：模式页曾用原生 <select> —— Android WebView 点开会先弹一个
+        //   系统大窗、再变成列表（用户报「闪出大半屏窗口」）。改为模块自己的
+        //   底部选择器后，模式页必须**一个 <select> 都不剩**。
+        out.__selCount = (modesHtml.match(/<select/g) || []).length;
+        out.__pickmf = (modesHtml.match(/data-act="pickmf"/g) || []).length;
+        out.__picksc = (modesHtml.match(/data-act="picksc"/g) || []).length;
+
+        // 功能：选择器回调必须真的写回状态（不是只画了个能点的壳）
+        const pick = (act, arg, val) => {
+          ACTIONS[act](arg);
+          const sheet = document.getElementById('picksheet');
+          sheet.onclick({ target: { closest: () => ({ getAttribute: () => val }) } });
+        };
+        let mf = 'NONE', sc = 'NONE';
+        try {
+          pick('pickmf', 'balance:active:L:1', '1939200');
+          mf = (S.model.modes.balance.active.L[1] === 1939200)
+            ? 'OK' : ('BAD:' + S.model.modes.balance.active.L[1]);
+        } catch (e) { mf = 'ERR:' + e; }
+        try {
+          pick('picksc', 'balance:esc', '4-5');
+          sc = (S.scPicks && S.scPicks.balance && S.scPicks.balance.esc === '4-5')
+            ? 'OK' : ('BAD:' + JSON.stringify(S.scPicks));
+        } catch (e) { sc = 'ERR:' + e; }
+        out.__mfPick = mf; out.__scPick = sc;
         console.log(JSON.stringify(out));
         """)
     r = subprocess.run(["node", harness], capture_output=True, text=True)
@@ -155,9 +179,7 @@ def main():
                   "%s 正常返回（%d 字符）" % (v, got.get("len", 0)))
 
     print("\n[3] 「模式」页的核心集合区块确实渲染出来了")
-    check(res.get("__hasSC"), "包含「模式 → 核心集合」标题")
-    check(res.get("__hasSel", 0) >= 8,
-          "至少 8 个选择器（4 档 × 基线/升级），实际 %d" % res.get("__hasSel", 0))
+    check(res.get("__hasSC"), "包含「模式 → 核心集合」标题（选择器数量见 [5]）")
 
     print("\n[4] 源文件静态检查：不得有遮蔽转义函数的变量名 esc")
     # 只查赋值形式 `esc =` / `esc,`（出现在 const/let 声明里），排除函数定义与调用
@@ -166,6 +188,20 @@ def main():
     #   const cn = ..., base = ..., esc = p2[2] || '-'
     bad = re.findall(r"(?:const|let|var)\s+[^;\n]*?\besc\s*[,=;]", script)
     check(not bad, "无 `esc` 局部变量遮蔽全局 esc()（发现 %d 处）" % len(bad))
+
+    print("\n[5] 模式页不得再用原生 <select>（Android 原生下拉 = 先弹系统大窗再变列表）")
+    check(res.get("__selCount", -1) == 0,
+          "模式页 0 个原生 <select>（实际 %s）" % res.get("__selCount"))
+    check(res.get("__pickmf", 0) >= 48,
+          "频率格子全走模块自己的选择器（≥48，实际 %s）" % res.get("__pickmf"))
+    check(res.get("__picksc", 0) >= 8,
+          "核心集合格子全走模块自己的选择器（≥8，实际 %s）" % res.get("__picksc"))
+
+    print("\n[6] 选择器回调真的写回状态（不是只画个能点的壳）")
+    check(res.get("__mfPick") == "OK",
+          "pickmf 选中后写入 S.model（实际 %s）" % res.get("__mfPick"))
+    check(res.get("__scPick") == "OK",
+          "picksc 选中后写入 S.scPicks（实际 %s）" % res.get("__scPick"))
 
     print("\n" + "=" * 62)
     if FAILS:

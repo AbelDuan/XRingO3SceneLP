@@ -464,7 +464,16 @@ pre.tall { max-height: 62vh; }
 .modetbl td.mn b { font-size: 13px; }
 .modetbl td.mn .mono { font-size: 10.5px; color: var(--sub2); }
 .modetbl tr.cur { background: color-mix(in srgb, var(--accent) 10%, transparent); }
-.modetbl .f { width: auto !important; padding: 3px 4px; font-size: 11px; }
+/* 模式表格里「点开选择」的小按钮。
+   ⚠ v16.23 起替代原生 <select>：Android WebView 点原生 select 会**先弹一个
+     系统大窗、再变成列表**（用户报「闪出大半屏一个窗口」），换成 button +
+    pickSheet 后不再有原生弹窗。▾ 是纯 CSS 提示，不是可点的展开箭头。 */
+.modetbl .fsel {
+  font: inherit; font-size: 11px; background: var(--chip-bg); color: var(--text);
+  border: 0; border-radius: 7px; padding: 4px 8px; cursor: pointer; white-space: nowrap;
+}
+.modetbl .fsel::after { content: ' ▾'; color: var(--sub2); }
+.modetbl .fsel:active { background: var(--accent); color: #fff; }
 .modetbl i.tild { color: var(--sub2); font-style: normal; margin: 0 1px; }
 
 
@@ -1511,51 +1520,43 @@ ${(st.SCENE_DYN === 'true' && st.SCENE_SOURCE === 'SOURCE_SCENE_ONLINE') ? '' : 
 /* ============================================================
    10) 视图：模式
    ============================================================ */
+/* 频率表（某簇的可选频率，升序）。viewModes 的画格与 pickmf 的选择器共用它。 */
+function freqArr(cluster) {
+  return String(((S.freqs || {})['FREQS_' + cluster]) || '').trim()
+    .split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
+}
+/* 四档核心集合：后端 SC_<mode> = 中文|基线|升级|基线默认|升级默认 */
+const SC_OUT = ['0-3', '4-5', '4-7', '8-9', '0-7', '4-9'];
+function scSaved(m) {
+  const p = String((S.schedcores || {})['SC_' + m] || '').split('|');
+  return { cn: p[0] || MODE_CN[m], base: p[1] || '0-3', esc: p[2] || '-' };
+}
+/* 用户还没保存的改动（S.scPicks）优先于后端值。 */
+function scPick(m, which) {
+  const e = (S.scPicks || {})[m];
+  return (e && e[which]) || scSaved(m)[which];
+}
+
 function viewModes() {
   const m = (S.model && S.model.modes) || {};
-  const fr = S.freqs;
-  const list = k => String(fr[k] || '').trim().split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
-  const L = list('FREQS_L'), M = list('FREQS_M'), P = list('FREQS_P');
-  const arrOf = c => (c === 'L' ? L : c === 'M' ? M : P);
   const cur = globalMode();
 
-  // 四档核心集合编辑器（后端 SC_<mode>=中文|基线|升级|基线默认|升级默认）
-  const SC = S.schedcores || {};
-  const SC_OUT = ['0-3', '4-7', '8-9', '0-7', '4-9'];
-  const scOpts = (m, which, val) => {
-    const id = 'sc-' + m + '-' + which;
-    let h = '<select class="fsel" data-sc="' + id + '">';
-    // 升级目标多一个「不升级」
-    if (which === 'esc') h += '<option value="-"' + (val === '-' ? ' selected' : '') + '>不升级</option>';
-    for (const v of SC_OUT) h += '<option value="' + v + '"' + (v === val ? ' selected' : '') + '>' + v + '</option>';
-    return h + '</select>';
-  };
-  const scRows = MODE_ORDER.map(k => {
-    const raw = SC['SC_' + k];
-    if (!raw) return '';
-    const p2 = raw.split('|');
-    const cn = p2[0] || MODE_CN[k], base = p2[1] || '0-3', escv = p2[2] || '-';
-    return '<tr class="' + (k === cur ? 'cur' : '') + '">' +
-      '<td class="mn"><b>' + esc(cn) + '</b><br><span class="mono">' + esc(k) + '</span></td>' +
-      '<td>' + scOpts(k, 'base', base) + '</td>' +
-      '<td>' + scOpts(k, 'esc', escv) + '</td></tr>';
-  }).join('');
+  /* 频率格子：button + 模块自己的底部选择器。
+     ⚠ v16.23 之前这里是原生 <select class="fsel">（没做 appearance:none）。
+       Android WebView 点原生 select 会**先弹一个系统大窗、再变成列表** ——
+       用户报「点了闪出大半屏一个窗口」。换成 pickSheet 后不再有原生弹窗。 */
+  const fbtn = (k, st, c, i, val) =>
+    '<button class="fsel" data-act="pickmf" data-arg="' + k + ':' + st + ':' + c + ':' + i + '">' +
+    esc(fmtMHz(val)) + '</button>';
 
   const cell = (k, st, c) => {
-    const arr = arrOf(c), v = m[k][st][c];
-    if (!arr.length) {   // 拿不到该簇可用频率表时退回只读展示
+    const v = m[k][st][c];
+    if (!freqArr(c).length) {   // 拿不到该簇可用频率表时退回只读展示
       return '<span class="mono" style="font-size:12px;white-space:nowrap">' +
         fmtMHz(v[0]) + ' <i class="tild">~</i> ' + fmtMHz(v[1]) + '</span>';
     }
-    const opts = sel => arr.map(x =>
-      '<option value="' + x + '"' + (Number(x) === Number(sel) ? ' selected' : '') + '>' +
-      fmtMHz(x) + '</option>').join('');
-    // data-mf = 模式:状态:簇:0(min)|1(max)，由 app.views.js 的 INPUT_HANDLER 处理
-    return '<span class="fcell">' +
-      '<select class="fsel" data-mf="' + k + ':' + st + ':' + c + ':0">' + opts(v[0]) + '</select>' +
-      '<i class="tild">~</i>' +
-      '<select class="fsel" data-mf="' + k + ':' + st + ':' + c + ':1">' + opts(v[1]) + '</select>' +
-      '</span>';
+    return '<span class="fcell">' + fbtn(k, st, c, 0, v[0]) +
+      '<i class="tild">~</i>' + fbtn(k, st, c, 1, v[1]) + '</span>';
   };
 
   const head = '<tr><th>模式</th><th>L 前台</th><th>L 后台</th><th>M 前台</th><th>M 后台</th><th>P 前台</th><th>P 后台</th></tr>';
@@ -1566,6 +1567,20 @@ function viewModes() {
       '<td>' + cell(k, 'active', 'L') + '</td><td>' + cell(k, 'inactive', 'L') + '</td>' +
       '<td>' + cell(k, 'active', 'M') + '</td><td>' + cell(k, 'inactive', 'M') + '</td>' +
       '<td>' + cell(k, 'active', 'P') + '</td><td>' + cell(k, 'inactive', 'P') + '</td></tr>';
+  }).join('');
+
+  /* 核心集合格子：同样换掉原生 select（原因见上面 fbtn 的注释） */
+  const sbtn = (k, which) => {
+    const v = scPick(k, which);
+    return '<button class="fsel" data-act="picksc" data-arg="' + k + ':' + which + '">' +
+      esc(v === '-' ? '不升级' : v) + '</button>';
+  };
+  const scRows = MODE_ORDER.map(k => {
+    if (!(S.schedcores || {})['SC_' + k]) return '';
+    return '<tr class="' + (k === cur ? 'cur' : '') + '">' +
+      '<td class="mn"><b>' + esc(scSaved(k).cn) + '</b><br><span class="mono">' + esc(k) + '</span></td>' +
+      '<td>' + sbtn(k, 'base') + '</td>' +
+      '<td>' + sbtn(k, 'esc') + '</td></tr>';
   }).join('');
 
   return `
@@ -1591,8 +1606,8 @@ function viewModes() {
 <div class="group">
   <div class="g-title">模式 → 核心集合</div>
   <div class="mono" style="font-size:11px;opacity:.65;padding:0 0 6px">
-    每档可选 5 个核位：<b>0-3</b>（Pro 小核）/ <b>4-7</b>（Premium 中核）/
-    <b>8-9</b>（Ultra 超大核）/ <b>0-7</b> / <b>4-9</b>。<br>
+    每档可选 6 个核位：<b>0-3</b>（Pro 小核）/ <b>4-5</b>（Premium 中核 · 窄）/
+    <b>4-7</b>（Premium 中核 · 全）/ <b>8-9</b>（Ultra 超大核）/ <b>0-7</b> / <b>4-9</b>。<br>
     「基线」= 中低负载线程落哪；「高负载升级到」= 实测占用率超阈值后并入哪。
     选「不升级」则该档忙线程也留在基线内。
   </div>
@@ -2101,10 +2116,11 @@ async function actSyncMode(silent) {
 
 /** 保存模式阶梯：model + modes.conf + profile.json 的 preset，然后重建 threads */
 async function actSaveSchedCores() {
+  // 值来源：后端 SC_<mode> 叠加用户暂存的改动（v16.23 起不再是 DOM 里的 <select>）
   const picks = {};
-  document.querySelectorAll('[data-sc]').forEach(e => {
-    const p = e.getAttribute('data-sc').split('-');   // sc-<mode>-<base|esc>
-    (picks[p[1]] = picks[p[1]] || {})[p[2]] = e.value;
+  MODE_ORDER.forEach(k => {
+    if (!(S.schedcores || {})['SC_' + k]) return;
+    picks[k] = { base: scPick(k, 'base'), esc: scPick(k, 'esc') };
   });
   const modes = Object.keys(picks);
   if (!modes.length) { toast('没有可保存的项'); return; }
@@ -2117,6 +2133,7 @@ async function actSaveSchedCores() {
     return acc;
   });
   const bad = Array.isArray(out) ? out.find(x => /ERR/i.test(String(x))) : null;
+  if (!bad) S.scPicks = {};      // 落盘成功才丢弃暂存，失败时保留用户的选择
   logOp('▶ 核心集合已保存：' + String(out).slice(0, 160));
   toast(bad ? String(bad).slice(0, 90) : '核心集合已保存并落核');
   await refreshStatus(); render();
@@ -2207,6 +2224,46 @@ const ACTIONS = {
   live: async () => { const o = await doApply(false); if (/^OK/m.test(String(o || ''))) { await refreshStatus(); render(); } },
   savemodes: actSaveModes,
   saveschedcores: actSaveSchedCores,
+
+  /* 模式页频率格子。arg = 模式:状态:簇:0(min)|1(max)。
+     ⚠ 替代原生 <select>：Android WebView 点原生 select 先弹系统大窗再变列表。
+     选中后的「min > max 就顶另一端」的夹取逻辑与旧 INPUT_HANDLER 一致。 */
+  pickmf: a => {
+    const p = String(a).split(':');
+    const md = S.model && S.model.modes && S.model.modes[p[0]];
+    const row = md && md[p[1]];
+    const v = row && row[p[2]];
+    if (!v) return;
+    const arr = freqArr(p[2]);
+    if (!arr.length) { toast('拿不到该簇频率表'); return; }
+    const i = p[3] === '1' ? 1 : 0;
+    pickSheet((MODE_CN[p[0]] || p[0]) + ' · ' + (p[1] === 'active' ? '前台' : '后台') +
+      ' · ' + p[2] + ' 的 ' + (i ? 'max' : 'min'),
+      arr.map(x => ({ v: String(x), label: fmtMHz(x), on: Number(x) === Number(v[i]) })),
+      val => {
+        const nv = parseInt(val, 10);
+        if (!isFinite(nv)) return;
+        v[i] = nv;
+        if (v[0] > v[1]) { if (i === 0) v[1] = v[0]; else v[0] = v[1]; }
+        markDirty();
+        render();
+      });
+  },
+  /* 模式页核心集合格子。arg = 模式:base|esc（改动暂存 S.scPicks，点保存才下发） */
+  picksc: a => {
+    const p = String(a).split(':');
+    const cur = scPick(p[0], p[1]);
+    const opts = SC_OUT.map(v => ({ v, label: v, on: v === cur }));
+    if (p[1] === 'esc') {
+      opts.unshift({ v: '-', label: '不升级', hint: '忙线程也留在基线内', on: cur === '-' });
+    }
+    pickSheet((p[1] === 'base' ? '基线核位（中低负载）' : '高负载升级到') +
+      ' · ' + (MODE_CN[p[0]] || p[0]), opts, v => {
+        const e = S.scPicks = S.scPicks || {};
+        (e[p[0]] = e[p[0]] || {})[p[1]] = v;
+        render();
+      });
+  },
 
   /* 恢复模块内置默认频率。
      数据源是后端 cmd_mode 下发的 DEF_<mode>_<state>，
@@ -2408,26 +2465,6 @@ const INPUT_HANDLER = async ev => {
     S.query = t.value; S.showCount = 100;
     clearTimeout(window._qt);
     window._qt = setTimeout(() => { if (S.tab === 'games') render(); else updateAppList(); }, 140);
-    return;
-  }
-
-  // 模式页：频率 min/max 下拉（data-mf = 模式:状态:簇:0=min|1=max）
-  // v9：重新开放编辑 —— 改完点「保存并下发」会写进 Scene 的 profile.json preset。
-  if (t.dataset && t.dataset.mf) {
-    const p = String(t.dataset.mf).split(':');
-    const md = S.model && S.model.modes && S.model.modes[p[0]];
-    const row = md && md[p[1]];
-    if (!row || !row[p[2]]) return;
-    const v = row[p[2]];
-    const i = p[3] === '1' ? 1 : 0;
-    const nv = parseInt(t.value, 10);
-    if (!isFinite(nv)) return;
-    v[i] = nv;
-    if (v[0] > v[1]) {          // min > max 时把另一端顶过去，避免下发非法区间
-      if (i === 0) v[1] = v[0]; else v[0] = v[1];
-      render();
-    }
-    markDirty();
     return;
   }
 

@@ -715,7 +715,7 @@ cmd_modeset() {
 #  配置文件 $SCHED_CORES_FILE，每行： <mode>\t<baseline>\t<esc>
 #    baseline = 中低负载线程的基线核位（同步写进该档模板的 other/heaviest）
 #    esc      = 高负载线程的升级目标（"-" = 本档不升级）
-#  只接受 SCHED_CORES_VALID 里那 5 个集合，防手滑写进 0-9。
+#  只接受 SCHED_CORES_VALID 里那 6 个集合，防手滑写进 0-9。
 #  该档模板里「其余线程」的内置核位（用于前端显示默认值）
 sched_cores_template_other() {
     # 单一来源：lib/util.sh 的 sched_cores_default_base（避免两处漂移）

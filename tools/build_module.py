@@ -96,6 +96,7 @@ def run_offline_suite():
     import subprocess
     suite = [
         ("lint_module.py", "模块结构自检"),
+        ("test_build_stamp.py", "产物日期跟随构建日"),
         ("test_load_aware.py", "负载感知四档语义"),
         ("test_bigcore_guard.py", "8-9 封锁"),
         ("test_pin_mode.py", "落核模式默认值"),
@@ -151,6 +152,38 @@ def inject_version(path, rel, ver, stamp):
     return new.encode("utf-8")
 
 
+def stamp_module_prop(text, stamp):
+    """把 module.prop 文本里的日期改成构建日 stamp（YYYYMMDD）。
+
+    · `version=16.22 (2026-09-18)` → 括号里的日期换成构建日；
+      没写括号日期的 `version=1.2` 会补上 `(构建日)`。
+    · `versionCode=2026091822` → 只换**前 8 位日期段**，保留末尾修订号（22）。
+    """
+    pretty = "%s-%s-%s" % (stamp[0:4], stamp[4:6], stamp[6:8])
+    new = re.sub(r"(?m)^(version=[^\s(]+)\s*(?:\([^)]*\))?\s*$",
+                 lambda m: "%s (%s)" % (m.group(1), pretty), text)
+    new = re.sub(r"(?m)^versionCode=\d{8}", "versionCode=" + stamp, new)
+    return new
+
+
+def inject_module_prop(path, rel, ver, stamp):
+    """module.prop 的 version / versionCode 里日期换成**构建日**（只影响打包内容）。
+
+    背景：`dist/*.zip` 的文件名一直是 time.strftime 现算的，但 module.prop 的
+    `version=16.22 (2026-09-18)` 与 `versionCode=2026091822` 是源码里手写的 ——
+    KernelSU 模块页读的正是这两行，所以显示日期永远停在写代码那天。
+    这里在写 zip 时替换；仓库源文件保持不动（与 index.html 的版本注入同款）。
+    """
+    if rel != "module.prop":
+        return None
+    try:
+        s = io.open(path, encoding="utf-8").read()
+    except OSError:
+        return None
+    new = stamp_module_prop(s, stamp)
+    return new.encode("utf-8") if new != s else None
+
+
 def main():
     args = sys.argv[1:]
     if "--check" in args:
@@ -185,7 +218,11 @@ def main():
         for p, rel in items:
             data = inject_version(p, rel, ver, stamp)
             if data is None:
+                data = inject_module_prop(p, rel, ver, stamp)
+            if data is None:
                 data = io.open(p, "rb").read()
+            else:
+                injected.append(rel)
             # 显式写权限位：zip 的 external_attr 决定解包后的模式。
             # ⚠ 实测：直接用 z.write() 会带上构建账户的 umask（普通文件 0600），
             #   只靠安装脚本的 set_perm_recursive 兜底。这里统一写成
@@ -194,8 +231,6 @@ def main():
             zi.external_attr = (0o100755 if needs_exec(rel) else 0o100644) << 16
             zi.compress_type = zipfile.ZIP_DEFLATED
             z.writestr(zi, data)
-            if rel.endswith(("index.html", "index.htm")) and inject_version(p, rel, ver, stamp) is not None:
-                injected.append(rel)
             entries.append(rel)
 
     # 模块包的自检：根必须有 module.prop，且不能混进测试/备份

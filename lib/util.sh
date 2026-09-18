@@ -743,9 +743,11 @@ mode_valid() { case " $MODE_LIST " in *" $1 "*) return 0 ;; *) return 1 ;; esac;
 # ------------------------------------------------------------
 #  四档核心集合适配（v16.18 · 用户可在 WebUI 自定义）
 # ------------------------------------------------------------
-#  用户可选的**核心集合**只有这 5 个（不允许 0-9 —— 那会让中低负载也打到
+#  用户可选的**核心集合**只有这 6 个（不允许 0-9 —— 那会让中低负载也打到
 #  超大核，违背四档语义；也不允许任意表达式，防手滑）。
-SCHED_CORES_VALID="0-3 4-7 8-9 0-7 4-9"
+#  v16.23：4-5 从「仅内置默认」提升为**用户可选**（用户要求同步进模式列表），
+#  于是 sched_cores_valid 不再需要与 builtin_ok 分成两个口径。
+SCHED_CORES_VALID="0-3 4-5 4-7 8-9 0-7 4-9"
 #  自定义配置文件（WebUI「模式」页读写）；不存在时一律用下面的内置默认。
 SCHED_CORES_FILE="${SCHED_CORES_FILE:-${WEBUI_DIR}/sched_cores.conf}"
 
@@ -784,15 +786,6 @@ sched_cores_default_esc() {    # 该档「高负载升级目标」的内置默�
 sched_cores_valid() {   # 0 = 合法（含 "-" 表示本档不升级）
     [ "$1" = "-" ] && return 0
     case " $SCHED_CORES_VALID " in *" $1 "*) return 0 ;; esac
-    return 1
-}
-#  ⚠ 内置默认里出现 4-5，而 4-5 **不在** SCHED_CORES_VALID（WebUI 只给 5 个选项，
-#     按用户要求「自定义设置还是用原来的配方」）。所以校验分两个口径：
-#     · mode_sched_row 读出的默认值 → 用 sched_cores_builtin_ok（含 4-5）
-#     · 用户在 WebUI 提交的值          → 用 sched_cores_valid（不含 4-5）
-sched_cores_builtin_ok() {
-    [ "$1" = "-" ] && return 0
-    case "$1" in 0-3|4-5|4-7|8-9|0-7|4-9) return 0 ;; esac
     return 1
 }
 #  取某档的自定义值。兼容两种格式，读坏/越界/非法一律返回 1（调用方回默认）：
@@ -840,7 +833,7 @@ mode_sched_row() {
     _hot=$(printf '%s' "$_def" | cut -d' ' -f6)
     _idle=$(printf '%s' "$_def" | cut -d' ' -f7)
     _io=$(printf '%s' "$_def" | cut -d' ' -f8)
-    sched_cores_lookup "$1" 1 && sched_cores_builtin_ok "$SCV" && _esc="$SCV"
+    sched_cores_lookup "$1" 1 && sched_cores_valid "$SCV" && _esc="$SCV"
     sched_cores_lookup "$1" 2 && case "$SCV" in 0|1) _ho="$SCV" ;; esac
     sched_cores_lookup "$1" 3 && [ "$SCV" -ge 2 ] 2>/dev/null && [ "$SCV" -le 120 ] && _it="$SCV"
     sched_cores_lookup "$1" 4 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _hot="$SCV"

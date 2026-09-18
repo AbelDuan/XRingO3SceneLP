@@ -16,7 +16,7 @@ test_templates_v15.py —— 流畅/性能 核位重排（v15 迁移）的离线
   2. v15 迁移：新表不动、旧表被改对、用户自建行不受影响
   3. 幂等：迁移后表不再变化（靠 tpl_v15 标记）
   4. 单一来源：mode_sched_row 的核位与 sched_cores_default_* 一致
-  5. 4-5 是内置默认但不在 WebUI 白名单（自定义仍用原来的 5 个选项）
+  5. 4-5 既是内置默认，也在 WebUI 可选白名单里（v16.23 起用户要求「同步到模式列表」）
 
 跑法: python tools/test_templates_v15.py
 """
@@ -124,8 +124,8 @@ def main():
     check(vals.get("E") == "4-5", "流畅 升级目标 = 4-5（实际 %s）" % vals.get("E"))
     check(vals.get("PB") == "0-3", "性能 基线 = 0-3（实际 %s）" % vals.get("PB"))
     check(vals.get("PE") == "4-7", "性能 升级目标 = 4-7（实际 %s）" % vals.get("PE"))
-    check("4-5" not in (vals.get("VALID") or ""),
-          "4-5 **不在** WebUI 白名单（自定义仍用原来的 5 个选项）")
+    check("4-5" in (vals.get("VALID") or ""),
+          "4-5 **在** WebUI 白名单里（v16.23 起可自定义）")
 
     print("\n[2] mode_sched_row 与单一来源一致")
     out, _ = sh('. "%s" >/dev/null 2>&1\n'
