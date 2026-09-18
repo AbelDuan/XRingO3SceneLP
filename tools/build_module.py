@@ -119,6 +119,14 @@ def run_offline_suite():
     return rc
 
 
+def needs_exec(rel):
+    """.sh 与无扩展名的可执行（如 pinwatch ELF）在包里必须是 0755。"""
+    if rel.endswith(".sh"):
+        return True
+    base = rel.rsplit("/", 1)[-1]
+    return "." not in base and base not in ("module.prop", "LICENSE")
+
+
 def inject_version(path, rel, ver, stamp):
     """把前端里硬编码的版本号换成当前版本（只影响**打包内容**，不写源文件）。
 
@@ -175,9 +183,16 @@ def main():
         for p, rel in items:
             data = inject_version(p, rel, ver, stamp)
             if data is None:
-                z.write(p, rel)
-            else:
-                z.writestr(rel, data)
+                data = io.open(p, "rb").read()
+            # 显式写权限位：zip 的 external_attr 决定解包后的模式。
+            # ⚠ 实测：直接用 z.write() 会带上构建账户的 umask（普通文件 0600），
+            #   只靠安装脚本的 set_perm_recursive 兜底。这里统一写成
+            #   0755（.sh 与 ELF）/ 0644（其余），包里就是自洽的。
+            zi = zipfile.ZipInfo(rel)
+            zi.external_attr = (0o100755 if needs_exec(rel) else 0o100644) << 16
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            z.writestr(zi, data)
+            if rel.endswith(("index.html", "index.htm")) and inject_version(p, rel, ver, stamp) is not None:
                 injected.append(rel)
             entries.append(rel)
 
