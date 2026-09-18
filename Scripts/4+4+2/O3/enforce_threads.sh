@@ -75,17 +75,47 @@ APL_TTL="${APL_TTL:-180}"
 rm -f "$KEEP" "$TODO" 2>/dev/null
 
 # ============================================================
-#  落核模式（v12）
+#  落核模式（v16.17）—— 默认改为逐线程 taskset
 # ------------------------------------------------------------
-#  group  = 艇长式 cgroup 分组（默认）：整进程放进 cgroup 子组，
-#           新线程自动继承 → 「新建线程」不再需要靠轮询去追。
-#  taskset= 老路径：逐线程 sched_setaffinity。保留作回退 ——
-#           建不了 cgroup 的环境（内核没挂 cpuset）会走它。
-#  应急回退：touch $STATE_DIR/pin_taskset（重装即失效）。
+#  taskset = 默认：逐线程 sched_setaffinity（艇长 Aether_OptExt 的原始手段）。
+#  group   = 可选回退：整进程放进 cgroup 子组，**新线程靠继承**。
+#
+#  【为什么把默认从 group 换成 taskset】（2026-09-18 真机 A/B，同 TMPD、各 4 轮稳态）
+#      cgroup 分组   459 / 488 / 528 ms
+#      逐线程 taskset 268 / 321 / 396 ms
+#    taskset 稳态快约 1.4~1.7 倍，来源是：① 值已正确时一条命令都不发（幂等短路）；
+#    ② 不必每轮维护 96+ 个 cgroup 组目录、也不做组迁移。
+#    实测单次 `taskset -p` 12ms、fork+exec 6ms（proot 下 fork 特别贵）。
+#
+#  【代价（实测，必须知情）】taskset 的亲和性**不继承**给新线程：
+#      父线程 taskset 到 0-3 → 它之后新建的线程 allowed=0-9
+#    而 cgroup 组的 cpus 会强制约束组内（含新建）线程。
+#    所以 taskset 模式下新线程最多要等一轮才被绑上；有 APL_TTL（180s）兜底自愈。
+#
+#  调试/单测可用环境变量强制：PIN_MODE=group|taskset
+#  切回 cgroup：touch $STATE_DIR/pin_cgroup（重装即失效）
+#  ⚠ 旧版的 pin_taskset 标记已废弃（默认就是 taskset），留着也不影响。
 # ============================================================
-PIN_MODE="${PIN_MODE:-group}"
-[ -f "${STATE_DIR}/pin_taskset" ] && PIN_MODE="taskset"
+PIN_MODE="${PIN_MODE:-taskset}"
+[ -f "${STATE_DIR}/pin_cgroup" ] && PIN_MODE="group"
 CG_PIN="$MODDIR/Scripts/4+4+2/O3/pin_cgroup.sh"
+
+# ------------------------------------------------------------
+#  taskset 模式：一次性清掉遗留的 cgroup 组树（v16.17）
+# ------------------------------------------------------------
+#  为什么必须清：从旧布局升级上来的设备，/dev/cpuset/SceneO3Tuner 下还留着
+#  各组，**组内线程仍受组 cpus 约束**（cgroup 的 cpus 是硬约束，taskset 只在其
+#  之上收窄）。不清的话「默认走 taskset」名不副实 —— 线程依然被组锁着，
+#  而且新线程继续继承组的掩码。
+#  只在切换后跑一次（标记 $STATE_DIR/cg_unbound），幂等。
+# ------------------------------------------------------------
+if [ "$PIN_MODE" = "taskset" ] && [ ! -f "${STATE_DIR}/cg_unbound" ]; then
+    if [ -d "$CG_ROOT/SceneO3Tuner" ]; then
+        sh "$CG_PIN" --unbind-all >/dev/null 2>&1
+        log_quiet "enforce: 已清理遗留 cgroup 组树（切到 taskset 模式）"
+    fi
+    : > "${STATE_DIR}/cg_unbound" 2>/dev/null
+fi
 
 # 输入是否变了：用**文件 mtime** 与 $SIGF 比较（shell 内建 -nt，0 子进程）。
 #   ⚠ 原来用 md5sum + awk 算签名，两个子进程 ≈ 30~80ms；而本脚本前台一变就会被调用，

@@ -97,6 +97,7 @@ def run_offline_suite():
         ("lint_module.py", "模块结构自检"),
         ("test_load_aware.py", "负载感知四档语义"),
         ("test_bigcore_guard.py", "8-9 封锁"),
+        ("test_pin_mode.py", "落核模式默认值"),
         ("test_camera_guard.py", "相机档位（历史遗留，允许失败）"),
     ]
     rc = 0
