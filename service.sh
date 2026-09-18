@@ -79,6 +79,15 @@ sleep 1
 sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
 
 nohup sh "$MODDIR/Scripts/4+4+2/O3/guard.sh" "${GUARD_INTERVAL:-5}" >> "$LOG_FILE" 2>&1 &
+# 4.05) 事件驱动落核辅助（v16.19）：eBPF 捕获 fork，新线程毫秒级落核。
+#   没有它就靠守护的 work 轮/120s 兜底 —— taskset 模式下新线程亲和性不继承，
+#   窗口最大 120s。二进制缺失或内核不支持 eBPF 时自身会静默退出，不影响主流程。
+if [ -x "$MODDIR/Scripts/4+4+2/O3/pinwatch" ]; then
+    pkill -f "O3/pinwatch\.sh loop" 2>/dev/null
+    sleep 1
+    nohup sh "$MODDIR/Scripts/4+4+2/O3/pinwatch.sh" loop >> "$LOG_FILE" 2>&1 &
+    log "· pinwatch 事件驱动辅助已启动（pid $!）"
+fi
 log "· guard 已启动 (pid $!，间隔 ${GUARD_INTERVAL:-5}s)"
 
 # 4.1) 相机频率守护作为**可选兜底**（v9 默认不开）

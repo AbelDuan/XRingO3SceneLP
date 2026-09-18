@@ -223,6 +223,13 @@ while :; do
             sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
         fi
 
+        # ---- 5.1) 事件驱动增量落核（v16.19）----
+        #   pinwatch 常驻进程已把「哪些进程新开了线程」写进事件文件；这里消费它，
+        #   只对涉及的包做精确落核。无事件时开销≈读一个行数，可以每轮跑。
+        if [ -x "$MODDIR/Scripts/4+4+2/O3/pinwatch.sh" ]; then
+            sh "$MODDIR/Scripts/4+4+2/O3/pinwatch.sh" >/dev/null 2>&1
+        fi
+
         # ---- 6) 相机档位看护：**已移除（v12，2026-09-17）** ----
         #   它原本是 v7 的 workaround，修的是「Scene 的 _Camera.json 里 @cpu_freq
         #   签名错（5 参数）导致相机态 min==max 区间塌缩」。当时的做法是模块
