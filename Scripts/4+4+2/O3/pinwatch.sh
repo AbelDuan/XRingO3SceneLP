@@ -126,8 +126,15 @@ case "$1" in
         [ -f "$OFF" ] && break
         # helper 掉了就重拉（同时刷新 pid 表并轮转事件）
         if ! kill -0 "$HPID" 2>/dev/null; then start_helper; fi
-        # 每 60 轮（约 60s）刷新一次目标 pid 表
-        i=$((i + 1)); [ $((i % 60)) -eq 0 ] && write_pids >/dev/null 2>&1
+        # 每 10 轮（约 10s）刷新目标 pid 表；表为空时立即重试
+        #   ⚠ 实测：pinwatch 可能比守护更早启动，此时 $TMPD/t.tids 还没生成，
+        #     写成 60s 会让内核过滤长时间"无目标"→ 一个事件都收不到。
+        i=$((i + 1))
+        if [ $((i % 10)) -eq 0 ]; then
+            n=$(write_pids 2>/dev/null)
+            case "$n" in ''|*[!0-9]*) n=0 ;; esac
+            [ "$n" -gt 0 ] || i=9          # 表为空 → 下一轮立刻再试
+        fi
         consume
         rotate_if_big
         sleep 1
