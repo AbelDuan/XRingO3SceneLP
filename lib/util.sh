@@ -737,14 +737,75 @@ mode_valid() { case " $MODE_LIST " in *" $1 "*) return 0 ;; *) return 1 ;; esac;
 #    调到 15 以上会出现「满负载线程也不升核」。
 #  ⚠ 本函数每轮只调一两次，允许用 $( )；热路径用 mode_sched_read 取全局变量。
 # ============================================================
+# ------------------------------------------------------------
+#  四档核心集合适配（v16.18 · 用户可在 WebUI 自定义）
+# ------------------------------------------------------------
+#  用户可选的**核心集合**只有这 5 个（不允许 0-9 —— 那会让中低负载也打到
+#  超大核，违背四档语义；也不允许任意表达式，防手滑）。
+SCHED_CORES_VALID="0-3 4-7 8-9 0-7 4-9"
+#  自定义配置文件（WebUI「模式」页读写）；不存在时一律用下面的内置默认。
+SCHED_CORES_FILE="${SCHED_CORES_FILE:-${WEBUI_DIR}/sched_cores.conf}"
+
+sched_cores_valid() {   # 0 = 合法（含 "-" 表示本档不升级）
+    [ "$1" = "-" ] && return 0
+    case " $SCHED_CORES_VALID " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+#  取某档的自定义值。兼容两种格式，读坏/越界/非法一律返回 1（调用方回默认）：
+#    A) mode<TAB>esc_target<TAB>hotok<TAB>interval<TAB>hot<TAB>idle<TAB>idleoff  (7 列)
+#    B) mode<TAB>esc_target<空格>hotok<空格>...                                   (2 列)
+sched_cores_lookup() {   # $1=mode $2=列号(1..7) → 全局 SCV
+    SCV=""
+    [ -f "$SCHED_CORES_FILE" ] || return 1
+    while IFS= read -r _sl || [ -n "$_sl" ]; do
+        case "$_sl" in ''|\#*) continue ;; esac
+        case "$_sl" in
+          "$1	"*)
+            _rest="${_sl#*	}"
+            case "$_rest" in
+              *"	"*) _row="$_rest" ;;                 # 7 列制
+              *)    _row=$(printf '%s' "$_rest" | tr ' ' '\t') ;;   # 2 列制
+            esac
+            SCV=$(printf '%s' "$_row" | cut -f"$2" 2>/dev/null)
+            case "$SCV" in ''|*[!0-9-]*) SCV="" ;; esac
+            [ -n "$SCV" ] && return 0
+            return 1
+            ;;
+        esac
+    done < "$SCHED_CORES_FILE"
+    return 1
+}
+
 mode_sched_row() {
     case "$1" in
-      powersave)   echo "powersave 省电 - 0 15 10 4 0" ;;
-      balance)     echo "balance 流畅 4-7 0 12 10 4 0" ;;
-      performance) echo "performance 性能 4-7 0 10 9 4 0" ;;
-      fast)        echo "fast 极速 4-9 1 8 8 4 1" ;;
-      *)           echo "balance 流畅 4-7 0 12 10 4 0" ;;
+      powersave)   _def="powersave 省电 - 0 15 10 4 0" ;;
+      balance)     _def="balance 流畅 4-7 0 12 10 4 0" ;;
+      performance) _def="performance 性能 4-7 0 10 9 4 0" ;;
+      fast)        _def="fast 极速 4-9 1 8 8 4 1" ;;
+      *)           _def="balance 流畅 4-7 0 12 10 4 0" ;;
     esac
+    case "$1" in powersave|balance|performance|fast) ;; *) echo "$_def"; return 0 ;; esac
+
+    # 逐列用自定义值覆盖；任一列非法/缺失就保留**该档的**默认列（绝不产出畸形行）
+    #  ⚠ 默认值必须逐档从 _def 里取，不能图省事写成通用 12/10/4/0 ——
+    #    那样会悄悄改掉每档调参（测试第 1 节就是防这个，实测抓到过）。
+    _esc=$(printf '%s' "$_def" | cut -d' ' -f3)
+    _ho=$(printf '%s' "$_def" | cut -d' ' -f4)
+    _it=$(printf '%s' "$_def" | cut -d' ' -f5)
+    _hot=$(printf '%s' "$_def" | cut -d' ' -f6)
+    _idle=$(printf '%s' "$_def" | cut -d' ' -f7)
+    _io=$(printf '%s' "$_def" | cut -d' ' -f8)
+    sched_cores_lookup "$1" 1 && sched_cores_valid "$SCV" && _esc="$SCV"
+    sched_cores_lookup "$1" 2 && case "$SCV" in 0|1) _ho="$SCV" ;; esac
+    sched_cores_lookup "$1" 3 && [ "$SCV" -ge 2 ] 2>/dev/null && [ "$SCV" -le 120 ] && _it="$SCV"
+    sched_cores_lookup "$1" 4 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _hot="$SCV"
+    sched_cores_lookup "$1" 5 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _idle="$SCV"
+    sched_cores_lookup "$1" 6 && case "$SCV" in 0|1) _io="$SCV" ;; esac
+    # 自洽：升级目标含 8/9 时必须允许上探，否则目标永远到不了 → 自动置 1
+    case "$_esc" in *8*|*9*) _ho=1 ;; esac
+    # 不升级的档：清掉上探标志
+    [ "$_esc" = "-" ] && _ho=0
+    echo "$1 $(mode_name_cn "$1") $_esc $_ho $_it $_hot $_idle $_io"
 }
 
 # 列名 → 值。用法: mode_sched_get <mode> <esc_target|hotok|interval|hot|idle|idleoff>

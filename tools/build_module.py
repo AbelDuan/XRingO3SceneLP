@@ -99,6 +99,7 @@ def run_offline_suite():
         ("test_load_aware.py", "负载感知四档语义"),
         ("test_bigcore_guard.py", "8-9 封锁"),
         ("test_pin_mode.py", "落核模式默认值"),
+        ("test_sched_cores.py", "四档核心集合可自定义"),
         ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
     ]
     rc = 0

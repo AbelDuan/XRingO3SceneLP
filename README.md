@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.16-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.18-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -893,6 +893,7 @@ python tools/test_camera_guard.py    # 相机档位逻辑
 python tools/test_load_aware.py      # 负载感知：四档升级目标 / 阈值 / 空闲收缩
 python tools/test_bigcore_guard.py   # 8-9 封锁：收窄 / 冻结 / 重申 / 按模式生效
 python tools/test_pin_mode.py        # 落核模式默认值（taskset / cgroup 回退）
+python tools/test_sched_cores.py     # 四档核心集合可自定义（读写往返 + 合法性）
 bash   tools/test_sync_skip.sh       # 升级覆盖语义
 python tools/build_module.py         # 打 zip + tgz
 python tools/build_module.py --check # 打包前先跑一遍离线自检套件（lint + 测试）
@@ -904,7 +905,8 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | `tools/test_camera_guard.py` | 相机档位逻辑（见下）；**2026-09-18 删掉 3 项测已删行为的断言**（见 v16.17 记账） | 8 组 |
 | `tools/test_load_aware.py` | 把 `load_aware.sh` 里的 awk **原样抽出**喂合成 `/proc` 数据：四档升级目标（省电不升 / 流畅·性能 0-7 / 极速 0-9）、空闲收缩开关、阈值数值化回归、`"-"` 占位符、与 `mode_sched_row()` 对齐 | 23 断言 |
 | `tools/test_bigcore_guard.py` | 假 cpuset 树 + 假 mount/umount 跑**真脚本**：收窄 / 原值存出厂值 / **冻结值重申** / **按模式生效（极速解冻）** / restore / 幂等 | 25 断言 |
-| `tools/test_pin_mode.py` | 落核模式解析：默认 taskset / `pin_cgroup` 标记回退 group / 环境变量覆盖 / taskset 下清理遗留组树 | 7 断言 |
+| `tools/test_pin_mode.py` | 落核模式解析：默认 taskset / `pin_cgroup` 标记回退 group / 环境变量覆盖 / taskset 下清理遗留组树 | 8 断言 |
+| `tools/test_sched_cores.py` | 四档核心集合可自定义：缺省不行为变化 / 覆盖生效 / 只收 5 个合法集合 / 目标含 8-9 必须允许上探 / 损坏文件回落 / **后端读写列序往返** | 35 断言 |
 | `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
 | `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，任一失败就中止打包 | — |
 
@@ -925,6 +927,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 ## 10. 版本历史
 
 | 版本 | 主要内容 |
+| **v16.18** | ★ **WebUI 可自定义四档核心集合** —— 「模式」页新增「模式 → 核心集合」编辑区，每档可选 **0-3 / 4-7 / 8-9 / 0-7 / 4-9** 五个集合里的：**基线**（中低负载线程落哪）与**高负载升级到**（占用率超阈值后并入哪，「不升级」= 忙线程也留在基线内）。落盘 `webui/sched_cores.conf`（`<mode>\t<base>\t<esc>`），`mode_sched_row()` 读它覆盖内置默认；同时把基线同步进该档模板的 `other`/`heaviest`（新线程靠模板落核），并立即重算一次落核。**设计上刻意保证「缺省不行为变化」**：没有该文件时四档调参一字不改（`test_sched_cores.py` 第 1 节专门守这条）。只接受那 5 个集合（拒绝 `0-9` 之类会打到超大核的值）；目标含 8/9 时自动置「允许上探」，不升级档自动清掉该标志；文件损坏/半截一律逐列回落默认，绝不产出畸形行。新增 `tools/test_sched_cores.py`（35 断言）。⚠ 开发中**真机测出一个字段串位 bug**（写侧修了读侧没修，UI 显示仍是反的），已修并把「读/写两侧列序」都写成静态断言锁住 |
 | **v16.17** | ★ **落核默认从 cgroup 分组改为逐线程 taskset** —— 真机 A/B（同 TMPD、各 4 轮稳态）：cgroup `459/488/528 ms` vs taskset `268/321/396 ms`，**taskset 快约 1.4~1.7 倍**。来源：① 值已正确时一条命令都不发（幂等短路）；② 不必每轮维护 96+ 个 cgroup 组目录、不做组迁移。本机实测单次 `taskset -p` 12ms、`fork+exec` 6ms（proot 下 fork 极贵）。⚠ **代价（实测）**：taskset 的亲和性**不继承**给新线程（父线程绑 0-3 后新建线程 `allowed=0-9`），而 cgroup 组的 `cpus` 会强制约束组内新线程 ⇒ 新线程最多等一轮才被绑上，`APL_TTL`(180s) 兜底自愈。切回 cgroup：`touch $STATE_DIR/pin_cgroup`（`pin_taskset` 旧标记已废弃）。另修一处遗留陷阱：从旧布局升级时 `/dev/cpuset/SceneO3Tuner` 下还留着组，**组内线程仍受组 cpus 硬约束**（cpuset 是硬约束、taskset 只在其上收窄）⇒ 切到 taskset 时一次性 `--unbind-all` 并清空（`$STATE_DIR/cg_unbound` 幂等）。新增 `tools/test_pin_mode.py`（8 断言，红-绿循环验过，其中一项是「离线套件必须干净通过」的元测试）。**同时清掉 3 项遗留失败**：`test_camera_guard.py` 里「从三个方案包 `_Camera.json` 读出正确档位」的断言 —— v12 已把 `@cpu_freq` 从 `_Camera.json` 彻底移除（改引用 `profile.json` 的 `fast_active`），那是「相机 min==max 塌缩」的**根因修复**，源头没了该断言永远为假。删掉它、并把「`_Camera.json` 已无 `@cpu_freq`」变成一条正向断言；其余 21 项（写入顺序 / 三簇覆盖 / 假 sysfs 实跑 / 回退表）原样保留。构建闸门随之收紧：不再给 `test_camera_guard.py` 豁免，**任一测试失败即中止打包** |
 | **v16.16** | ★ **四档调度语义按用途重定义 + 修掉三个静默失效** —— 用户按实际用途重定义四档，`lib/util.sh` 新增 **`mode_sched_row()` 作为单一事实源**（「模式 → 升级目标/阈值/间隔」原来散在模板表、`load_aware` 调用参数、各自 `profile.json` 三处，改一档要动三个文件、极易互相矛盾 —— v16.9 的「越级」bug 就是这么来的）：<br>　· **省电** 0-3 小核，忙线程**不升级**（升级就白省电）<br>　· **流畅** 主/渲染 4-7、其余 0-3，忙线程只并 4-7<br>　· **性能** 其余线程也到 4-7，忙线程封顶 4-7（8-9 留给系统）<br>　· **极速** 中低负载线程 0-7 交系统分配（**不做空闲收缩**），只有**高负载线程**上探 **4-9**（中核 ∪ 超大核，内核按频率/热状态自选核）<br>显示名 均衡 → **流畅**（与 `mode_name_cn` 统一）。新增 **`migrate_templates_v14`**：把 fast 从 v13 的「整条 4-9」改为「0-7 基线 + 高负载 4-9」（整条 4-9 会让中低负载线程也落中核/大核）。<br>**三个静默失效**（都在真机/隔离测试里挖出来，且都被调用方的 `2>/dev/null` 吞掉）：<br>① awk `{ print x > F; done = 1 }` 是**语法错误** → 整个程序解析失败、主规则不执行、状态文件空白、**永不升核**；<br>② `lvl >= HOT` 在 `-v` 传参下走**字符串比较**（`lvl=7 >= HOT=9` 为假、`10 >= 12` 也为假，取决于字典序）→ 改 `+0` 强制数值化；<br>③ 冻结组**只读不写**：外部（scene-daemon）写的是 bind-mount 的**后备文件**，被改成 0-9 后守卫不重申意图值 → 「锁在 0-7」变成空话（真机 `top-app`/`foreground` 的 `eff` 实际是 0-9）；现在每轮把意图值写回后备文件（值一致时零写入）。<br>**`bigcore_guard` 按模式生效**：极速档解冻并停用 8-9 封锁（否则高负载线程上不去 4-9），其余档继续锁 0-7；只解冻一次（`bigcore.mode.fast` 标记）避免每轮反复 umount。<br>新增离线测试并登记进 `tools/`：**`test_load_aware.py`（23 断言）**、**`test_bigcore_guard.py`（25 断言）** —— 这两个文件在 v16.11/v16.12 的记账里被声称存在，实际**从未进过仓库**（本版勘误并补齐）。真机验证（16.15 → 16.16，**未重启**）：四档升级目标、8-9 封锁/解冻、v14 迁移幂等，均通过；`lint_module.py` 全过 |
 |---|---|

@@ -709,6 +709,91 @@ cmd_modeset() {
     echo "OK $(mode_name_cn "$m")"
 }
 
+# ------------------------------------------------------------
+#  四档核心集合：读 / 写（v16.18 · WebUI「模式」页可自定义）
+# ------------------------------------------------------------
+#  配置文件 $SCHED_CORES_FILE，每行： <mode>\t<baseline>\t<esc>
+#    baseline = 中低负载线程的基线核位（同步写进该档模板的 other/heaviest）
+#    esc      = 高负载线程的升级目标（"-" = 本档不升级）
+#  只接受 SCHED_CORES_VALID 里那 5 个集合，防手滑写进 0-9。
+#  该档模板里「其余线程」的内置核位（用于前端显示默认值）
+sched_cores_template_other() {
+    case "$1" in
+      powersave)   echo "0-3" ;;
+      balance)     echo "0-3" ;;
+      performance) echo "4-7" ;;
+      fast)        echo "0-7" ;;
+      *)           echo "0-3" ;;
+    esac
+}
+
+cmd_schedcores() {
+    local m
+    for m in $MODE_LIST; do
+        local row esc esc_def base base_def cn
+        row=$(mode_sched_row "$m")
+        esc_def=$(printf '%s' "$row" | cut -d' ' -f3)
+        base_def=$(sched_cores_template_other "$m")
+        esc="$esc_def"; base="$base_def"
+        # ⚠ 列序：文件是 <base>\t<esc>，所以第 1 列 → base、第 2 列 → esc
+        sched_cores_lookup "$m" 1 && sched_cores_valid "$SCV" && base="$SCV"
+        sched_cores_lookup "$m" 2 && sched_cores_valid "$SCV" && esc="$SCV"
+        cn=$(mode_name_cn "$m")
+        echo "SC_${m}=${cn}|${base}|${esc}|${base_def}|${esc_def}"
+    done
+    echo "SC_VALID=${SCHED_CORES_VALID}"
+    echo "SC_FILE=${SCHED_CORES_FILE}"
+    echo "SC_HAS=$([ -f "$SCHED_CORES_FILE" ] && echo 1 || echo 0)"
+}
+
+#  把某档模板里 other/heaviest 的核位改成给定集合（用 plain 核位，选什么就是什么）
+sched_cores_apply_template() {   # $1=mode $2=coreset
+    local m="$1" cs="$2" t
+    for t in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$t" ] || continue
+        awk -F'\t' -v OFS='\t' -v M="$m" -v C="$cs" '
+          /^#/ { print; next }
+          $1 == M { $3 = C; if ($5 != "") $5 = C; print; next }
+          { print }
+        ' "$t" > "${TMPD}/sc.tpl" 2>/dev/null
+        if [ -s "${TMPD}/sc.tpl" ] && ! cmp -s "${TMPD}/sc.tpl" "$t"; then
+            write_replace "${TMPD}/sc.tpl" "$t" && chmod 0666 "$t" 2>/dev/null
+        fi
+        rm -f "${TMPD}/sc.tpl" 2>/dev/null
+    done
+}
+
+cmd_setschedcores() {   # $1=mode $2=baseline $3=esc
+    local m; m=$(mode_from_cn "$1")
+    mode_valid "$m" || { echo "ERR 未知模式: $1"; return 1; }
+    local base="$2" esc="$3"
+    sched_cores_valid "$base" || { echo "ERR 非法基线核位: ${base:-空}（可选 ${SCHED_CORES_VALID}）"; return 1; }
+    sched_cores_valid "$esc"  || { echo "ERR 非法升级目标: ${esc:-空}（可选 ${SCHED_CORES_VALID} 或 -）"; return 1; }
+    mkdir -p "$(dirname "$SCHED_CORES_FILE")" 2>/dev/null
+    local tmp="${TMPD}/sc.new" x e2 b2
+    : > "$tmp"
+    for x in $MODE_LIST; do
+        if [ "$x" = "$m" ]; then
+            b2="$base"; e2="$esc"
+        else
+            # ⚠ 文件列序是 <base>\t<esc>，别接反（真机实测接反过）
+            b2=$(sched_cores_template_other "$x")
+            e2=$(mode_sched_row "$x" | cut -d' ' -f3)
+            sched_cores_lookup "$x" 1 && sched_cores_valid "$SCV" && b2="$SCV"
+            sched_cores_lookup "$x" 2 && sched_cores_valid "$SCV" && e2="$SCV"
+        fi
+        printf '%s\t%s\t%s\n' "$x" "$b2" "$e2" >> "$tmp"
+    done
+    write_replace "$tmp" "$SCHED_CORES_FILE" && chmod 0666 "$SCHED_CORES_FILE" 2>/dev/null
+    rm -f "$tmp" 2>/dev/null
+    log "webui: $m 核心集合 → 基线 $base / 升级 $esc"
+    sched_cores_apply_template "$m" "$base"
+    # 立刻重算一次（新基线要靠模板生效；升/降档由本轮的 hot 重算承担）
+    sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
+    echo "OK $(mode_name_cn "$m")：基线 $base / 升级 $esc"
+}
+
+
 # 校正核心分配的必需开关（用户不需要看见它们，但缺一就不生效）
 # 只动这三个键，其余（gold_first / ebpf_enhanced / perf_notify…）保持用户在 Scene 里的选择。
 ensure_required_flags() {
@@ -881,6 +966,8 @@ case "$1" in
   profilelist)   sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" list ;;
   mode)          cmd_mode ;;
   modeset)       cmd_modeset "$2" ;;
+  schedcores)    cmd_schedcores ;;
+  setschedcores) shift; cmd_setschedcores "$1" "$2" "$3" ;;
   appmodes)      cmd_appmodes ;;
   setappmode)    shift; cmd_setappmode "$1" "$2" ;;
   importscene)   cmd_importscene ;;

@@ -1519,6 +1519,28 @@ function viewModes() {
   const arrOf = c => (c === 'L' ? L : c === 'M' ? M : P);
   const cur = globalMode();
 
+  // 四档核心集合编辑器（后端 SC_<mode>=中文|基线|升级|基线默认|升级默认）
+  const SC = S.schedcores || {};
+  const SC_OUT = ['0-3', '4-7', '8-9', '0-7', '4-9'];
+  const scOpts = (m, which, val) => {
+    const id = 'sc-' + m + '-' + which;
+    let h = '<select class="fsel" data-sc="' + id + '">';
+    // 升级目标多一个「不升级」
+    if (which === 'esc') h += '<option value="-"' + (val === '-' ? ' selected' : '') + '>不升级</option>';
+    for (const v of SC_OUT) h += '<option value="' + v + '"' + (v === val ? ' selected' : '') + '>' + v + '</option>';
+    return h + '</select>';
+  };
+  const scRows = MODE_ORDER.map(k => {
+    const raw = SC['SC_' + k];
+    if (!raw) return '';
+    const p2 = raw.split('|');
+    const cn = p2[0] || MODE_CN[k], base = p2[1] || '0-3', esc = p2[2] || '-';
+    return '<tr class="' + (k === cur ? 'cur' : '') + '">' +
+      '<td class="mn"><b>' + esc(cn) + '</b><br><span class="mono">' + esc(k) + '</span></td>' +
+      '<td>' + scOpts(k, 'base', base) + '</td>' +
+      '<td>' + scOpts(k, 'esc', esc) + '</td></tr>';
+  }).join('');
+
   const cell = (k, st, c) => {
     const arr = arrOf(c), v = m[k][st][c];
     if (!arr.length) {   // 拿不到该簇可用频率表时退回只读展示
@@ -1562,6 +1584,26 @@ function viewModes() {
   <div class="btn-row" style="padding:6px 0 0">
     <button class="btn primary" data-act="savemodes">保存并下发</button>
     <button class="btn" data-act="freqdefaults">恢复模块默认</button>
+    <button class="btn" data-act="reload">丢弃改动</button>
+  </div>
+</div>
+
+<div class="group">
+  <div class="g-title">模式 → 核心集合</div>
+  <div class="mono" style="font-size:11px;opacity:.65;padding:0 0 6px">
+    每档可选 5 个核位：<b>0-3</b>（Pro 小核）/ <b>4-7</b>（Premium 中核）/
+    <b>8-9</b>（Ultra 超大核）/ <b>0-7</b> / <b>4-9</b>。<br>
+    「基线」= 中低负载线程落哪；「高负载升级到」= 实测占用率超阈值后并入哪。
+    选「不升级」则该档忙线程也留在基线内。
+  </div>
+  <div class="card" style="padding:0;overflow:auto">
+    <table class="modetbl">
+      <thead><tr><th>模式</th><th>基线（中低负载）</th><th>高负载升级到</th></tr></thead>
+      <tbody>${scRows}</tbody>
+    </table>
+  </div>
+  <div class="btn-row" style="padding:6px 0 0">
+    <button class="btn primary" data-act="saveschedcores">保存核心集合</button>
     <button class="btn" data-act="reload">丢弃改动</button>
   </div>
 </div>`;
@@ -2058,6 +2100,28 @@ async function actSyncMode(silent) {
 }
 
 /** 保存模式阶梯：model + modes.conf + profile.json 的 preset，然后重建 threads */
+async function actSaveSchedCores() {
+  const picks = {};
+  document.querySelectorAll('[data-sc]').forEach(e => {
+    const p = e.getAttribute('data-sc').split('-');   // sc-<mode>-<base|esc>
+    (picks[p[1]] = picks[p[1]] || {})[p[2]] = e.value;
+  });
+  const modes = Object.keys(picks);
+  if (!modes.length) { toast('没有可保存的项'); return; }
+  const out = await busy('正在保存核心集合…', async () => {
+    const acc = [];
+    for (const k of modes) {
+      const v = picks[k];
+      acc.push(await Api.run('setschedcores ' + Api.shq(k) + ' ' + Api.shq(v.base || '0-3') + ' ' + Api.shq(v.esc || '-')));
+    }
+    return acc;
+  });
+  const bad = Array.isArray(out) ? out.find(x => /ERR/i.test(String(x))) : null;
+  logOp('▶ 核心集合已保存：' + String(out).slice(0, 160));
+  toast(bad ? String(bad).slice(0, 90) : '核心集合已保存并落核');
+  await refreshStatus(); render();
+}
+
 async function actSaveModes() {
   const r = await busy('正在下发模式阶梯…', async () => {
     if (!await saveModelNow()) return 'ERR 保存模型失败';
@@ -2142,6 +2206,7 @@ const ACTIONS = {
   // 「立即生效」按钮（dirty bar）用：把改动下发到 Scene
   live: async () => { const o = await doApply(false); if (/^OK/m.test(String(o || ''))) { await refreshStatus(); render(); } },
   savemodes: actSaveModes,
+  saveschedcores: actSaveSchedCores,
 
   /* 恢复模块内置默认频率。
      数据源是后端 cmd_mode 下发的 DEF_<mode>_<state>，
@@ -2552,6 +2617,7 @@ async function loadFreqs() {
 }
 
 async function refreshStatus() {
+  try { S.schedcores = Api._kv(await Api.run('schedcores')); } catch (e) { /* 老后端无此命令 */ }
   S.status = await Api.status();
   S.debug = String(S.status.DEBUG) === '1' ? 1 : 0;   // 日志开关（影响守护写盘）
   S.mode = await Api.modes();
