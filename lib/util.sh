@@ -692,7 +692,7 @@ MODE_LIST="powersave balance performance fast"
 mode_name_cn() {
     case "$1" in
       powersave)   echo "省电" ;;
-      balance)     echo "均衡" ;;
+      balance)     echo "流畅" ;;
       performance) echo "性能" ;;
       fast)        echo "极速" ;;
       *)           echo "$1" ;;
@@ -700,14 +700,88 @@ mode_name_cn() {
 }
 mode_from_cn() {
     case "$1" in
-      省电|powersave)   echo powersave ;;
-      均衡|balance)     echo balance ;;
-      性能|performance) echo performance ;;
-      极速|fast)        echo fast ;;
-      *)                echo "" ;;
+      省电|powersave)          echo powersave ;;
+      均衡|流畅|balance)       echo balance ;;
+      性能|performance)        echo performance ;;
+      极速|fast)               echo fast ;;
+      *)                       echo "" ;;
     esac
 }
 mode_valid() { case " $MODE_LIST " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+
+# ============================================================
+#  四档调度语义表（v16.13 · 单一事实源）
+# ------------------------------------------------------------
+#  【为什么要有这张表】
+#    「模式 → 核位/负载策略」原来散在 app_templates.tsv、load_aware.sh 的调用
+#    参数、以及各自 profile.json 的 @cpuset 三处；改一档要动三个文件，很容易
+#    互相矛盾（v16.9 的「越级」bug 就是这么来的）。现在集中到这一张表。
+#
+#  【四档语义（2026-09-18 按用户要求定义）】
+#    powersave   省电   整条应用压 Pro 小核 0-3；忙线程**不升级**（升级就白省电）。
+#    balance     流畅   日常较重负载也要覆盖：主/渲染线程 4-7，其余 0-3；
+#                       忙线程只并到 4-7，不碰 8-9。
+#    performance 性能   王者荣耀/金铲铲这类中低要求游戏：其余线程也升到 4-7，
+#                       忙线程同样封顶 4-7（8-9 留给系统级任务与热余量）。
+#    fast        极速   中低负载线程 0-7 交系统分配（不收缩回 0-3），
+#                       只有**高负载线程**才上探 4-9（中核 ∪ 超大核）——
+#                       由内核按当时频率/热状态自己选核（见 load_aware 的 LW_HP）。
+#
+#  【列】mode 中文名 升级目标 允许8-9 采样间隔 忙阈值 闲阈值 禁用空闲收缩
+#    · 升级目标 = 忙线程并入的核位；"-" = 本档不升级
+#    · 忙/闲阈值是**占用率百分数**，与采样窗口无关：load_aware 里
+#      ratio = (tick 增量 × 100) ÷ 窗口 tick 数，本身就是占用率。
+#    · 采样间隔越小响应越快：fast 取 8s（原 25s），响应快 3 倍。
+#    · hotok=1 只给 fast：只有它允许高负载线程上探 4-9。
+#  ⚠ 阈值别往大调：fast 的 `>8%` 已是「单线程吃掉 8% 的一个核」才算忙；
+#    调到 15 以上会出现「满负载线程也不升核」。
+#  ⚠ 本函数每轮只调一两次，允许用 $( )；热路径用 mode_sched_read 取全局变量。
+# ============================================================
+mode_sched_row() {
+    case "$1" in
+      powersave)   echo "powersave 省电 - 0 15 10 4 0" ;;
+      balance)     echo "balance 流畅 4-7 0 12 10 4 0" ;;
+      performance) echo "performance 性能 4-7 0 10 9 4 0" ;;
+      fast)        echo "fast 极速 4-9 1 8 8 4 1" ;;
+      *)           echo "balance 流畅 4-7 0 12 10 4 0" ;;
+    esac
+}
+
+# 列名 → 值。用法: mode_sched_get <mode> <esc_target|hotok|interval|hot|idle|idleoff>
+mode_sched_get() {
+    _ms_n=0
+    for _ms_c in $(mode_sched_row "$1"); do
+        _ms_n=$((_ms_n + 1))
+        [ "$_ms_n" -le 2 ] && continue          # 前两列是 id 与中文名
+        case "$_ms_n" in
+          3) [ "$2" = esc_target ] && { echo "$_ms_c"; return 0; } ;;
+          4) [ "$2" = hotok ]      && { echo "$_ms_c"; return 0; } ;;
+          5) [ "$2" = interval ]   && { echo "$_ms_c"; return 0; } ;;
+          6) [ "$2" = hot ]        && { echo "$_ms_c"; return 0; } ;;
+          7) [ "$2" = idle ]       && { echo "$_ms_c"; return 0; } ;;
+          8) [ "$2" = idleoff ]    && { echo "$_ms_c"; return 0; } ;;
+        esac
+    done
+    return 1
+}
+
+# 零 fork 版：读进全局 MS_ESC MS_HOTOK MS_INT MS_HOT MS_IDLE MS_IDLEOFF
+mode_sched_read() {   # $1 = powersave|balance|performance|fast
+    MS_ESC=""; MS_HOTOK="0"; MS_INT="12"; MS_HOT="10"; MS_IDLE="4"; MS_IDLEOFF="0"
+    _ms_n=0
+    for _ms_c in $(mode_sched_row "$1"); do
+        _ms_n=$((_ms_n + 1))
+        case "$_ms_n" in
+          3) MS_ESC="$_ms_c" ;;
+          4) MS_HOTOK="$_ms_c" ;;
+          5) MS_INT="$_ms_c" ;;
+          6) MS_HOT="$_ms_c" ;;
+          7) MS_IDLE="$_ms_c" ;;
+          8) MS_IDLEOFF="$_ms_c" ;;
+        esac
+    done
+    return 0
+}
 
 # 频率表：输出 "Lmin Lmax Mmin Mmax Pmin Pmax"。$2=active|inactive
 mode_freq() {
@@ -1163,7 +1237,7 @@ APP_TPL_FILE="${WEBUI_DIR}/app_templates.tsv"
 APP_ASSIGN_FILE="${WEBUI_DIR}/app_assign.tsv"
 
 # ------------------------------------------------------------
-#  系统相机：线程**固定「系统接管」**，用户不可调整
+#  系统相机：线程**固定「不绑核」**，用户不可调整
 # ------------------------------------------------------------
 #  v11（2026-09-17 用户要求）：相机不绑核、不参与任何档位，UI 入口也隐藏。
 #  三个落点共用同一套前缀，改的时候三处一起改：
@@ -1373,7 +1447,7 @@ gen_game_rules_json() {
 #   实测直接写下方那种写法会触发 unexpected EOF。powercfg.xml 有几百行，逐行 shell 还慢。
 import_scene_assign() {
     [ -f "$SCENE_POWERCFG" ] || return 1
-    # ⚠ 相机不导入：它在 Scene 里是什么模式都无所谓 —— 线程固定「系统接管」。
+    # ⚠ 相机不导入：它在 Scene 里是什么模式都无所谓 —— 线程固定「不绑核」。
     awk -v CAMRE="$CAMERA_RE" '
       {
         # 行形如：  <string name="com.foo.bar">balance</string>
@@ -1633,6 +1707,50 @@ gen_threads_from_scene() {
 
 # ---------- 状态 ----------
 active_scheme() { cat "$ACTIVE_FILE" 2>/dev/null; }
+
+# 当前生效模式：优先读 Scene 的 state（用户选中的模式），回退到方案名映射。
+#   为什么不能只用 scene_default_mode()：那个读的是 powercfg.xml 里 "*" 的显式
+#   模式；而极速档下每个应用的模式是它自己的显式设置，全局模式必须看 state。
+scene_current_mode() {
+    local f="${SCENE_DIR}/state" m
+    if [ -f "$f" ]; then
+        while IFS= read -r m || [ -n "$m" ]; do
+            case "$m" in
+              powersave|balance|performance|fast) echo "$m"; return 0 ;;
+            esac
+        done < "$f"
+    fi
+    case "$(active_scheme 2>/dev/null)" in
+      sweet_eco)  echo powersave ;;
+      sweet_bal)  echo balance ;;
+      sweet_hq)   echo performance ;;
+      sweet_perf) echo fast ;;
+      *)          echo balance ;;
+    esac
+}
+
+# 零 fork 版：当前模式 → 全局 CUR_MODE
+scene_current_mode_read() {
+    CUR_MODE=""
+    local f="${SCENE_DIR}/state" m
+    if [ -f "$f" ]; then
+        while IFS= read -r m || [ -n "$m" ]; do
+            case "$m" in
+              powersave|balance|performance|fast) CUR_MODE="$m"; break ;;
+            esac
+        done < "$f"
+    fi
+    if [ -z "$CUR_MODE" ]; then
+        case "$(active_scheme 2>/dev/null)" in
+          sweet_eco)  CUR_MODE="powersave" ;;
+          sweet_bal)  CUR_MODE="balance" ;;
+          sweet_hq)   CUR_MODE="performance" ;;
+          sweet_perf) CUR_MODE="fast" ;;
+          *)          CUR_MODE="balance" ;;
+        esac
+    fi
+    return 0
+}
 # 注：锁定机制（chattr +i）已于 2026-09-15 彻底废除，is_unlocked() 与
 #     $STATE_DIR/unlocked 标记一并删除 —— 所有入口（action.sh / switch.sh /
 #     WebUI）都不再询问锁定状态。详见 action.sh 头部说明。
@@ -1676,11 +1794,14 @@ seed_game_templates() {
     #   heavy_thread    → **真实线程名**，匹配到才用 heavy_cores
     #   heavy_cores     → 上面对应线程的核位
     #   comm            → "核位=线程名1,线程名2;核位=..."（优先级最高）
-    # 核位全空 = 该游戏一条 taskset 都不发（不绑核，交回系统）→ 「系统接管」档。
+    # 核位全空 = 该游戏一条 taskset 都不发（不绑核，交回系统）。
+    # 「极速」档（v16.13）= 中低负载线程 0-7 交系统分配，渲染线程（UnityGfx）
+    #   直接上 4-9（王者/金铲铲实测 UnityMain 占 87%、渲染是最重的持续负载），
+    #   其余真·高负载线程由 load_aware 按实测占用率上探 4-9。
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
-    printf 'balance\t均衡\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n'
+    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n'
     printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
-    printf 'fast\t系统接管\t\t\t\t\t\t\n'
+    printf 'fast\t极速\t{e_core},{p1_core}\t\t{p_core}\tUnityGfx\t{p_core}\t\n'
   } > "$GAME_TPL_FILE" 2>/dev/null
   chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
   log_quiet "webui: 已生成默认游戏线程档位表"
@@ -1759,7 +1880,7 @@ migrate_templates_v10() {
 # ============================================================
 #  档位表 / 分配表迁移 v11（2026-09-17）
 # ------------------------------------------------------------
-#  ① 档位表重写（刷新显示名；v12 起 fast 档叫「系统接管」）
+#  ① 档位表重写（刷新显示名；v12 起 fast 档叫「不绑核」）
 #     （核位定义没变：极速依然是「核位全空 = 不绑核」）
 #  ② **清空内置默认分配**：两份分配表只留表头。
 #     用户要求「不再预设任何默认值，改由手动导入或手动调整自行配置」。
@@ -1840,6 +1961,116 @@ migrate_templates_v12() {
     return 0
 }
 
+
+# ============================================================
+#  档位迁移 v13（2026-09-18）
+# ------------------------------------------------------------
+#  把 fast 档从「系统接管（核位全空、不绑核）」改回「极速」并**给上 4-9 核位**。
+#  为什么：
+#    · 名字上——mode_name_cn() 一直都叫「极速」，只有 v12 把 TSV 的 friendly 改成了
+#      「系统接管」，两处不一致；现在统一回「极速」。
+#    · 核位上——原来不绑核，等于把 8-9 的使用权完全交给内核 core_ctl（厂商 HAL）。
+#      用户要求「可以用到超大核，但别用 8-9、要用 4-9」：给 4-9 后，内核按实际负载
+#      在 4-7（4 核）和 8-9（2 核）之间自己挑，低负载自然留在中核，
+#      不会像写 8-9 那样常驻超大核。
+#  只改 fast 一行（第 2/3/5/7 列），其它档位与用户自定义一律不动 —— 同 v12 的取舍。
+# ============================================================
+TPL_V13_MARK="${STATE_DIR}/tpl_v13"
+
+migrate_templates_v13() {
+    [ -f "$TPL_V13_MARK" ] && return 0
+    mkdir -p "$TMPD" 2>/dev/null
+    local t
+
+    for t in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$t" ] || continue
+        cp -f "$t" "${STATE_DIR}/backup/$(basename "$t").pre-v13" 2>/dev/null
+        awk -F'\t' -v OFS='\t' '
+          # 只动 fast 这一行的 friendly / other / heaviest_cores / heavy_cores
+          $1 == "fast" {
+              $2 = "极速"; $3 = "{p_core}"; $5 = "{p_core}"; $7 = "{p_core}"; n++
+              # 核位给上了，comm 必须清掉（旧的空行本来就空，防御性写一遍）
+              $8 = ""
+          }
+          { print }
+        ' "$t" > "${TMPD}/tpl.v13" 2>/dev/null
+        [ -s "${TMPD}/tpl.v13" ] && ! cmp -s "${TMPD}/tpl.v13" "$t" && \
+            write_replace "${TMPD}/tpl.v13" "$t" && chmod 0666 "$t" 2>/dev/null
+        rm -f "${TMPD}/tpl.v13" 2>/dev/null
+    done
+
+    : > "$TPL_V13_MARK" 2>/dev/null
+    log_quiet "webui: fast 档已改为「极速」（核位 {p_core} = 4-9）"
+    return 0
+}
+
+# ============================================================
+#  档位迁移 v14（2026-09-18）—— 四档语义按用途重定义
+# ------------------------------------------------------------
+#  用户按实际用途重定义四档：
+#    省电 = 0-3 小核省电；流畅 = 覆盖日常较重负载；
+#    性能 = 王者/金铲铲这类中低要求游戏；
+#    极速 = **中低负载线程 0-7 交系统分配，只有高负载线程上探 4-9**。
+#
+#  本次改两处：
+#    ① balance 显示名：均衡 → 流畅（贴合「日常流畅」的语义，与 mode_name_cn 一致）。
+#    ② fast 核位：v13 给的是「整条应用 4-9」，但那会让**中低负载线程也落在中核/大核**；
+#       新语义要求中低负载留 0-7、只有负载感知认定「忙」的线程才上探 4-9。
+#       所以：
+#         应用表 fast → other/主线程 = {e_core},{p1_core}（0-7 基线）
+#         游戏表 fast → other = {e_core},{p1_core}（0-7），主线程/UnityGfx = {p_core}（4-9）
+#       load_aware 的升级目标由 mode_sched_row() 的 fast 档给出（4-9），
+#       这条迁移只保证「基线」正确 —— 没有基线就没有 hot 条目，升级就无从谈起。
+#
+#  幂等：靠 $STATE_DIR/tpl_v14 标记；只改 fast/balance 两行，用户其它自定义不动；
+#        旧表备份到 backup/*.pre-v14。
+#  ⚠ 重写内容必须与 seed_app_templates()/seed_game_templates() 逐字一致。
+# ============================================================
+TPL_V14_MARK="${STATE_DIR}/tpl_v14"
+
+migrate_templates_v14() {
+    [ -f "$TPL_V14_MARK" ] && return 0
+    mkdir -p "${STATE_DIR}/backup" 2>/dev/null
+    local t
+
+    for t in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$t" ] || continue
+        cp -f "$t" "${STATE_DIR}/backup/$(basename "$t").pre-v14" 2>/dev/null
+    done
+
+    # ---- 应用表 ----
+    if [ -f "$APP_TPL_FILE" ]; then
+        awk -F'\t' -v OFS='\t' '
+          /^#/ { print; next }
+          $1 == "fast"    { printf "fast\t极速\t{e_core},{p1_core}\t\t{e_core},{p1_core}\t\t\t\n"; next }
+          $1 == "balance" { $2 = "流畅"; print; next }
+          { print }
+        ' "$APP_TPL_FILE" > "${TMPD}/tpl.v14.app" 2>/dev/null
+        if [ -s "${TMPD}/tpl.v14.app" ] && ! cmp -s "${TMPD}/tpl.v14.app" "$APP_TPL_FILE"; then
+            write_replace "${TMPD}/tpl.v14.app" "$APP_TPL_FILE" && chmod 0666 "$APP_TPL_FILE" 2>/dev/null
+        fi
+        rm -f "${TMPD}/tpl.v14.app" 2>/dev/null
+    fi
+
+    # ---- 游戏表 ----
+    if [ -f "$GAME_TPL_FILE" ]; then
+        awk -F'\t' -v OFS='\t' '
+          /^#/ { print; next }
+          $1 == "fast"    { printf "fast\t极速\t{e_core},{p1_core}\t\t{p_core}\tUnityGfx\t{p_core}\t\n"; next }
+          $1 == "balance" { $2 = "流畅"; print; next }
+          { print }
+        ' "$GAME_TPL_FILE" > "${TMPD}/tpl.v14.game" 2>/dev/null
+        if [ -s "${TMPD}/tpl.v14.game" ] && ! cmp -s "${TMPD}/tpl.v14.game" "$GAME_TPL_FILE"; then
+            write_replace "${TMPD}/tpl.v14.game" "$GAME_TPL_FILE" && chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
+        fi
+        rm -f "${TMPD}/tpl.v14.game" 2>/dev/null
+    fi
+
+    : > "$TPL_V14_MARK" 2>/dev/null
+    log_quiet "webui: 档位表已升级到 v14（极速=0-7 基线/高负载 4-9；均衡→流畅）"
+    return 0
+}
+
 # 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
 #   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
 #   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
@@ -1892,6 +2123,12 @@ selfheal_pending_update() {
   # 不是更高版本：只清可能残留的 update 标记（修开关灰），不碰内容
   if [ "$vc_u" -le "$vc_m" ] 2>/dev/null; then
     [ -e "$FIN/update" ] && rm -f "$FIN/update" 2>/dev/null
+    # ★ 顺手补回 .sh 的可执行位 —— 这是安装后最常被触发的一条路径（用户一开 WebUI 就跑），
+    #   而 customize.sh 的就地合并会把文件设成 0644；不补的话 KSU 不会执行 service.sh，
+    #   整个模块静默停摆（2026-09-18 实测踩到）。
+    chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
+    chmod 0755 "$FIN"/lib/*.sh "$FIN"/Scripts/*/*/*.sh \
+               "$FIN"/Config/*/*/*.sh "$FIN"/Config/*/*/*/*.sh 2>/dev/null
     return 0
   fi
 
@@ -1919,15 +2156,22 @@ seed_app_templates() {
   mkdir -p "$(dirname "$APP_TPL_FILE")" 2>/dev/null
   {
     printf '# id\tfriendly\tother\theaviest_thread\theaviest_cores\theavy_thread\theavy_cores\tcomm\n'
-    # 省电：整条应用压 Pro 簇（主线程/其余都在 0-3）。低功耗场景能效最优。
+    # 省电：整条应用压 Pro 小核（主线程/其余都在 0-3）。低功耗场景能效最优。
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
-    # 均衡：主线程 + 渲染线程上 Premium(4-7)，其余压 Pro。Worker 留在 Pro 省电。
-    printf 'balance\t均衡\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n'
-    # 性能：其余线程也升到 Premium —— 应对浏览器/WebView 的多进程渲染并发。
+    # 流畅：日常较重负载也要覆盖 —— 主线程与渲染线程上 Premium(4-7)，其余压 Pro。
+    #   Worker/Job/Async/Pool 留 Pro 省电（它们是突发型，不是持续重载）。
+    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n'
+    # 性能：王者荣耀/金铲铲这类中低要求游戏 —— 其余线程也升到 Premium(4-7)，
+    #   应对浏览器/WebView/游戏的多进程并发；8-9 不碰（留给系统级任务与热余量）。
     printf 'performance\t性能\t{p1_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n'
-    # 系统接管：核位全空 = 一条 taskset 都不发，交回系统调度器
-    #   （含内核 core_ctl 的动态超大核 —— 那本来就是厂商 HAL 的活，我们不去抢）
-    printf 'fast\t系统接管\t\t\t\t\t\t\n'
+    # 极速：中低负载线程统一 0-7 由系统分配，**只有高负载线程**由 load_aware
+    #   按实测占用率上探 4-9（中核 ∪ 超大核，内核按频率/热状态自选核）。
+    #   为什么不整条给 4-9：binding 全进程到 4-9 会让「中低负载线程」也落在中核/大核，
+    #   而用户要的是「中低负载 0-7、高负载才 4-9」。
+    #   ⚠ 这里必须留非空核位：核位全空会让该包从落核表消失
+    #     （enforce_threads 过滤 + pin_cgroup 按「全空=不绑核」解绑），
+    #     没有基线就没有 hot 条目 → 负载感知永远升不了级。
+    printf 'fast\t极速\t{e_core},{p1_core}\t\t{e_core},{p1_core}\t\t\t\n'
   } > "$APP_TPL_FILE" 2>/dev/null
   chmod 0666 "$APP_TPL_FILE" 2>/dev/null
   log_quiet "webui: 已生成默认应用线程档位表"

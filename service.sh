@@ -49,10 +49,13 @@ if [ -f "$PC" ]; then
     log "· powercfg.sh 已执行"
 fi
 
-# 2) 档位表迁移（v10 同名 + v11 清空默认分配 + v12 显示名改「系统接管」；幂等）
+# 2) 档位表迁移（v10 同名 + v11 清空默认分配 + v12 显示名 + v13 fast→4-9；幂等）
 migrate_templates_v10
 migrate_templates_v11
 migrate_templates_v12
+migrate_templates_v13
+# v14：四档语义重定义 —— 极速 = 0-7 基线 + 高负载线程上探 4-9；均衡显示名 → 流畅
+migrate_templates_v14
 
 # 3) 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 if [ -f "$SCENE_POWERCFG" ]; then

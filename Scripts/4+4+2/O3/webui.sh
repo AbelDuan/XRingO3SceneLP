@@ -21,7 +21,7 @@
 #    scene                        Scene 实时状态握手（WebUI 打开/刷新时用）
 #    topo                         拓扑与语义占位符映射
 #    scheme <name> | restore      切换/落地方案、恢复出厂频率
-#    mode | modeset <模式>        读模式阶梯 / 切换全局模式（省电|均衡|性能|极速）
+#    mode | modeset <模式>        读模式阶梯 / 切换全局模式（省电|流畅|性能|极速）
 #    profilepush | profilebackup | profilerestore | profilelist
 #                                  传递/备份/恢复/列出调度配置
 #    importscene                  从 Scene 一次性导入档位（不实时跟随）
@@ -702,7 +702,7 @@ cmd_mode() {
 # 频率由 Scene 的模式 preset 承担 —— 两边都不需要重启任何东西）。
 cmd_modeset() {
     local m; m=$(mode_from_cn "$1")
-    mode_valid "$m" || { echo "ERR 未知模式: $1（可用: $MODE_LIST / 省电|均衡|性能|极速）"; return 1; }
+    mode_valid "$m" || { echo "ERR 未知模式: $1（可用: $MODE_LIST / 省电|流畅|性能|极速）"; return 1; }
     mkdir -p "$STATE_DIR"
     echo "$m" > "${STATE_DIR}/active_mode"
     log "webui: 全局模式 → $m（$(mode_name_cn "$m")）"

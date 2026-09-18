@@ -115,6 +115,15 @@ online_cpus_read
 cpu_expr_to_list_read "$ONLINE_RAW"   # "0-3,8-9" → "0 1 2 3 8 9"（与旧版语义一致）
 ONLINE="$CPU_LIST"
 
+# ---- 当前模式的调度语义（v16.13）----
+#   四档语义集中在 lib/util.sh 的 mode_sched_row()；这里读出本档的
+#   升级目标/阈值/间隔，供下面的 load_aware 使用。零 fork 读法：
+#   Scene state → 方案名兜底。
+scene_current_mode_read
+mode_sched_read "$CUR_MODE"
+# 升级目标为空（省电档）时用单个 "-" 占位，保证 load_aware 的位置参数不错位
+SESC="$MS_ESC"; [ -n "$SESC" ] || SESC="-"
+
 # ============================================================
 #  1) 解析目标表
 #     PKG|other|main|heavy|heaviest_thread|heavy_thread|commPairs|uni
@@ -413,15 +422,21 @@ printf '%s' "$buf" > "$TIDS"
 # ============================================================
 #  4.5) 动态负载感知（load_aware）—— 移植自 Aether OptExt
 # ------------------------------------------------------------
-#  给「其余线程」按 /proc/{tid}/stat 的 tick 增量实测占用率调档：
-#    忙（>60%）→ 并入中核 {p1_core}（O3 调优；艇长原版是并入 {hp_core}）
-#    闲（≤5%） → 收缩到 {e_core}
+#  给「其余线程」按 /proc/{tid}/stat 的 tick 增量实测占用率调档。
+#  ★ v16.13：升级目标/阈值不再是写死的 {p1_core}，而是**按当前模式**取：
+#      powersave   → 目标 "-"（不升级，线程留在 0-3 省电）
+#      balance     → 4-7
+#      performance → 4-7（8-9 不碰）
+#      fast        → 4-9（只有高负载线程才上探；且不做空闲收缩）
+#    参数全部来自 lib/util.sh 的 mode_sched_row()（单一事实源）。
 #  产出 $TMP/lw.hot 供 pin_cgroup.sh 消费；不在间隔内则零开销直接返回。
 #  ⚠ 必须在 5a) 之前跑：pin_cgroup 依赖它决定组集合与是否跳过缓存。
 # ============================================================
 if [ "$PIN_MODE" = "group" ] && [ $# -eq 0 ]; then
     sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TIDS" "$TMP/lw.hot" \
-        "$SEM_p1" "$SEM_hp" "$SEM_e" >/dev/null 2>&1
+        "$SEM_p1" "$SEM_hp" "$SEM_e" \
+        "$CUR_MODE" "$SESC" "$MS_HOTOK" "$MS_INT" "$MS_HOT" "$MS_IDLE" "$MS_IDLEOFF" \
+        >/dev/null 2>&1
 fi
 
 # ============================================================

@@ -1,7 +1,7 @@
 id=SceneO3Tuner
 name=玄戒O3 · Abel 调度工具箱
-version=16.12 (2026-09-18)
-versionCode=2026091810
+version=16.16 (2026-09-18)
+versionCode=2026091814
 author=Abel Duan
-description=玄戒O3 线程档位 + 模式频率工具箱｜cgroup分组落核 / 四档同源 / 相机系统接管 / 图形化调频
+description=功能状态｜Scene 已启用 · 线程 cgroup落核 · 频率 Scene 下发 · 守护 运行中 · 日志 关
 action=action.sh

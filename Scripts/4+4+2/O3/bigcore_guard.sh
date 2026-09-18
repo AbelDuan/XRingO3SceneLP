@@ -272,6 +272,25 @@ do_apply() {
         done < "$INTENT.new"
     fi
     mv -f "$INTENT.new" "$INTENT" 2>/dev/null
+    # ⑤ ★ v16.13：冻结组**重新断言**意图值。
+    #   为什么必须单独做：bind-mount 之后，外部（scene-daemon）写 cpus 实际写的是
+    #   我们的**后备文件**，于是 `cat cpus` 读到的是被污染的 0-9。而冻结分支
+    #   （fix_group 的 frozen 早退 + freeze_cpus 的 is_mounted 早退）都只**读**不**写**，
+    #   结果「锁在 0-7」变成一句空话 —— 真机上 top-app/foreground 的 eff 会回到 0-9，
+    #   高负载线程照样能上大核，与档位语义冲突（实测复现）。
+    #   修法：每轮把意图值写回后备文件。值一致时零写入，幂等。
+    if [ -s "$FROZENF" ] && [ -s "$INTENT" ]; then
+        while IFS="$TAB" read -r _p _t; do
+            [ -n "$_p" ] && [ -n "$_t" ] || continue
+            [ -f "$_t" ] || continue
+            intent_lookup "$_p" || continue
+            read -r _tv < "$_t" 2>/dev/null
+            [ "$_tv" = "$IV" ] || {
+                printf '%s\n' "$IV" > "$_t" 2>/dev/null
+                sayq "no-bigcore: 重申 ${_p} 锁定值 ${_tv:-空} → ${IV}（后备文件被外部改写）"
+            }
+        done < "$FROZENF"
+    fi
     return 0
 }
 
@@ -320,6 +339,47 @@ do_restore() {
     rmdir "$FSDIR" 2>/dev/null
     echo "已解冻 $n 个组，还原 $m 个组的 cpus（不用重启）"
 }
+
+# ------------------------------------------------------------
+#  【按模式生效】（v16.13）—— 必须在 do_restore 等函数定义**之后**
+#    fast（极速）档的设计是「高负载线程上探 4-9」，所以**不能**再把 8-9 锁掉：
+#    否则 load_aware 算出来的 4-9 目标写进 cpus 后，effective_cpus 仍被锁在 0-7，
+#    高负载线程根本上不去 —— v16.12 在真机上「机制是死的」正是这个状态
+#    （实测：bigcore.frozen 里挂着 6 个组、后备文件被写成 0-9、bigcore.log 停在 19:27）。
+#    模式判断用 Scene 的 state（用户选中的模式），方案名兜底 —— 与 lib/util.sh 的
+#    scene_current_mode() 同一套逻辑；本脚本不 source util.sh（保持独立可测）。
+#  其余模式（省电/流畅/性能）继续锁 0-7：符合「性能档 8-9 留给系统」的语义。
+#  ⚠ 只解冻一次（标记 $ST/bigcore.mode.fast），避免 5 秒一轮反复 umount/写回。
+# ------------------------------------------------------------
+CUR_MODE=""
+_sf="${SCENE_DIR:-/data/data/com.omarea.vtools/files}/state"
+if [ -r "$_sf" ]; then
+    while IFS= read -r _m || [ -n "$_m" ]; do
+        case "$_m" in
+          powersave|balance|performance|fast) CUR_MODE="$_m"; break ;;
+        esac
+    done < "$_sf"
+fi
+if [ -z "$CUR_MODE" ]; then
+    case "$(cat "$ST/active_scheme" 2>/dev/null)" in
+      sweet_eco)  CUR_MODE="powersave" ;;
+      sweet_bal)  CUR_MODE="balance" ;;
+      sweet_hq)   CUR_MODE="performance" ;;
+      sweet_perf) CUR_MODE="fast" ;;
+    esac
+fi
+
+if [ "$1" != "status" ] && [ "$1" != "restore" ] && [ "$CUR_MODE" = "fast" ]; then
+    if [ ! -f "$ST/bigcore.mode.fast" ]; then
+        read_mounts
+        do_restore >/dev/null 2>&1
+        : > "$ST/bigcore.mode.fast" 2>/dev/null
+        [ "$QUIET" = "1" ] || echo "no-bigcore: 极速档 → 已解冻并停用 8-9 封锁（高负载线程要上探 4-9）"
+    fi
+    exit 0
+fi
+# 非极速档：清掉标记，让封锁在下一轮自动恢复
+[ -f "$ST/bigcore.mode.fast" ] && rm -f "$ST/bigcore.mode.fast" 2>/dev/null
 
 case "$1" in
     status)  do_status ;;
