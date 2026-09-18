@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.11-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.12-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -919,6 +919,8 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.12** | ★ **揪出「谁在把 0-9 写回」并冻结父组 —— v16.11 的修复其实会被改回去** —— 真机发现跑完 v16.11 后 `top-app`/`foreground` **几秒内自己变回 0-9**。定位方法（可复用）：① 扫 `/proc/*/fd/*` 的 readlink 看谁打开着这些 `cpus` 文件（命中 `vendor.xring.hardware.perfflinger.service`）；② **`kill -STOP` 逐个隔离**（可 `-CONT` 恢复、进程不重启）——**冻结 `scene-daemon` 15 秒 → mtime 完全不动**、冻结 perfflinger → 写入照旧 ⇒ **真正持续重写父组的是 scene-daemon**（周期 3~4 秒，只写 `top-app`/`foreground`）。⚠ 同时**纠正 v16.11 的一处错误结论**：以为「父组收到 0-7 后子组写 0-9 会被内核拒（EINVAL）」——**实测是错的**，子组照样能写成 0-9。真正起作用的是 **`effective_cpus` = 与所有祖先取交集**：父组冻在 0-7 后，`main`/`render`/`other`/`trashy`/`boost` 即使写成 0-9，它们的 `effective_cpus` 全是 0-7，**top-app 里 14 个真实进程的 `Cpus_allowed_list` 全是 0-7** ⇒ **只冻父组就压住整棵子树**。`bigcore_guard.sh` 因此新增：`$STATE_DIR/bigcore.intent` 记「应有值」，下一轮**先做回退检测**（必须在裁剪之前，否则永远检测不到）→ 被改回就升级为 `mount --bind` 冻结；`PREFREEZE="top-app foreground"` 第一轮就冻。`restore` 解冻 + 原值写回，**不用重启**。离线测试扩到 **47 断言**（用 `MOUNT_BIN`/`UMOUNT_BIN` + 假挂载表在无 root 环境复现 bind-mount），过程中抓到 3 个静默失败型 bug（`save_orig` 的 grep 判重被路径反斜杠破坏 → restore 用意图值覆盖出厂值；`freeze_cpus` 无条件写 → 破坏幂等；回退检测顺序反了 → 永不冻结） |
+
 | **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **Scene 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 Scene 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。新增 `test_bigcore_guard.py` **25 断言**（沙盒造假 cpuset 树跑真脚本）。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
 
 | **v16.10** | ★ **修 v16.9 的「越级」bug：负载升级默认不再上超大核** —— 用户实测反馈「应用设为均衡后打开线程显示 **4-9**」。根因是 v16.9 的升级规则写成「基集已含中核时再并 8-9」，而 **`performance` 档的 `other` 本来就是 4-7** → 条件恒真 → 所有忙线程被推上 8-9（真机 40 个目标里 31 个是 performance 档，所以「满屏 4-9」）。这与本项目结论冲突（**C1-Ultra 只在 >2.2GHz 才有能效优势**，而大核频窗 1.1~2.0GHz）。现在忙线程**只并入中核 `{p1_core}`**，升 8-9 改为可选开关 **`LW_HP`（默认 0 = 关）**；另外目标核位**等于基集时不写 hot 条目**（顺带省掉 perf 档应用每 25 秒一次的全线程扫描）。修复后：`powersave`/`balance`(other 0-3) 忙线程 → **0-7**；`performance`(other 4-7) → **无变化**。测试扩到 **22 断言**（新增「不越级」「`LW_HP=1` 才升」） |
