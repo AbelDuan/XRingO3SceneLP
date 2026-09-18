@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.6-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.8-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -919,6 +919,8 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.8** | ★ **把设备当前运行态反向固化成模块基线，并顺手纠正一处固化错误** —— 按用户要求抓取设备上的 Scene 配置与模块数据对比后固化：① **`fas_engine=feas|fas|fas_lite` → `fas`** 与 **`refresh_rate.conf enable=1 → 0`**（这两项是你通过 Scene UI 改的，此前只存在于设备 Scene 侧，**刷模块会被方案包覆盖**）；② 新增 `Config/app_assign.tsv`（58 条 APP→档位）与更新 `Config/game_assign.tsv` （王者/金铲铲→performance）作为**新装种子**，并在 `customize.sh` 补了 app 分配的种子逻辑（仍只在文件缺失时落地）。⚠ 同时纠正一处我自己的固化错误：**`gpu_lock` 曾被我固化成 `1`，但它在 O3 上根本没有执行体**（反汇编实证：Scene 只把它拼成 `export` 前缀交给 `powercfg.sh`，而本模块的 `powercfg.sh` 自 v10 起不读它）→ `customize.sh` 本就有 awk 强制改写为 `0`，现方案包也回退为 `0`。另：Scene 侧 9 个方案配置文件经二进制比对**与仓库完全一致**，说明日常刷模块并不会丢配置；你的 WebUI 分配存在 `STATE_DIR=/data/adb/SceneO3Tuner`（独立于模块目录，`uninstall.sh` 也不删） |
+
 | **v16.6** | ★ **按用户要求移除「配置完整性」与「一键还原数据」** —— 概览页的「配置完整性」分组（注错文件清单 + 「检测配置」按钮）和「一键还原数据」按钮、前端 `ACTIONS.audit`/`fixall`、`Api.audit`/`fixall`、`parseAudit()`、开机自动审计 `loadAudit()`，以及后端的 `webui.sh: audit|fixall` 两个子命令与整个 `integrity.sh` 脚本全部删除；`test_webui.mjs` 里对应的 mock 换成**防回归断言**（断言这三样都不再出现）。⚠ 顺带修正一条此前的误判：`game_templates.tsv` 里 `heaviest_thread` 为空是**刻意设计**（主线程靠「tid == pid」自动识别后绑 `heaviest_cores`），不是配置缺口。产物体积：`index.html` 136239 → 131712 B，zip 内文件 79 → 78 |
 
 | **v16.5** | ★ **配置键审计：揪出 9 个「Scene 根本不读」的编造键** —— 起因是 `fas.conf` 里那两个"目标功耗窗口"（`adj_min_power=6.0` / `adj_max_power=9.0`）与实测游戏功耗（3.8W）严重不符，于是把 Scene 的 APK 拉下来逐键核对，结果它们**在 `classes.dex` 和 `resources.arsc` 里都不存在**。顺藤摸瓜审计了模块推送的全部 5 个 `features/*.conf`，**14 个键里 9 个是编的**：① `fas.conf` 的 6 个 `adj_*`（功耗窗口 / 电池温度窗口 / SoC 温度窗口）全删 —— Scene 的 FAS **没有"目标功耗窗口(W)"这个功能**，功耗是靠 `target_fps_offset`（帧率微调‰）+ `margin_offset`（余量 MHz）+ 温度感知 + `fast_down_always` 间接控制的；② `limiter.conf` 的 `limiters_in_apps` / `limiters_in_games` / `stat_method` 改名成真实键 `limiter_apps` / `limiter_games` / `limiter_jiffies` —— **此前"改它就能开关辅助调速器"的说法是无效操作**，辅助调速器一直由 Scene 自己的 UI 设置在控制；③ `cpuset.conf` 的 5 个键也全部查无此键，但真实键名未确认，按"不猜"原则只加警告不动值。另附**键名验证法**（grep 两处字节 + 区分配置键与图表字段名） |

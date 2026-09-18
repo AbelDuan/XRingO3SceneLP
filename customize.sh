@@ -145,8 +145,9 @@ done
 [ -n "$_rdy" ] && ui_print "- 线程档位表已就绪：${_rdy# }"
 
 if [ -f "$MODPATH/Config/game_assign.tsv" ]; then
-    # ⚠ **游戏默认不套任何档位**，让用户自己在「游戏」页勾选套用。
-    #   所以这里只在缺失时落一个「只有表头」的种子，绝不预置分配。
+    # ⚠ 原设计是「游戏默认不套任何档位」、种子只留表头。
+    #   ★ 2026-09-18 按用户要求改为**预置他自己固化的分配**（Config/game_assign.tsv，
+    #     由设备现状导出）。仍然只在「文件不存在」时落地，不覆盖已装设备的选择。
     if [ ! -f "${STATE_DIR}/webui/game_assign.tsv" ]; then
         cp -f "$MODPATH/Config/game_assign.tsv" "${STATE_DIR}/webui/game_assign.tsv"
         ui_print "- 游戏档位分配：默认留空（由你在 WebUI 里勾选套用）"
@@ -168,6 +169,16 @@ if [ -f "$MODPATH/Config/game_assign.tsv" ]; then
         fi
     fi
     chmod 0666 "${STATE_DIR}/webui/game_assign.tsv" 2>/dev/null
+fi
+
+# APP 档位分配种子（★ 2026-09-18 按用户要求新增：把设备现状固化为新装默认）
+#   同样只在缺失时落地 —— 已装设备在 STATE_DIR 里已有的分配不会被覆盖。
+if [ -f "$MODPATH/Config/app_assign.tsv" ]; then
+    if [ ! -f "${STATE_DIR}/webui/app_assign.tsv" ]; then
+        cp -f "$MODPATH/Config/app_assign.tsv" "${STATE_DIR}/webui/app_assign.tsv"
+        ui_print "- APP 档位分配：已预置 $(($(wc -l < "$MODPATH/Config/app_assign.tsv") - 1)) 条"
+    fi
+    chmod 0666 "${STATE_DIR}/webui/app_assign.tsv" 2>/dev/null
 fi
 
 # ---------- 把模块内置的全部配置文件同步进 Scene（替换原文件 + 修正确权限）----------
