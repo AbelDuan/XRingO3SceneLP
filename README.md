@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.8-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.9-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -919,6 +919,8 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.9** | ★ **移植 Aether OptExt 的「负载感知」与「子进程匹配」**（修用户实测发现的真 bug）—— ① **子进程漏绑**：`enforce_threads.sh` 用的是**精确名匹配**，`com.tencent.mm:appbrand0` ≠ `com.tencent.mm`，真机实测微信 6 个进程里**只有主进程被绑**（5 个子进程共 518 线程全散在系统默认组、掩码 0-9）→ 现在 `ps` 里凡含 `:` 的名字会额外登记成主包的子进程，给主包配的档位**连带它所有子进程**一起生效（两趟处理保证显式子进程条目优先，去重靠 SEEN）。② **负载感知 `load_aware.sh`（新脚本）**：不再只靠名字猜，而是读 `/proc/{tid}/stat` 的 `utime+stime` **差分实测**每个线程的占用率（窗口 25 秒），>60% 升级、≤5% 收缩。★ **升级目标按玄戒 O3 实测调优，没有照搬艇长**：艇长把忙线程并入超大核 8-9，而本项目实测 C1-Ultra **只在 >2.2GHz 才有能效优势**、中核就能跑满 120fps、大核只承担 0.7%~1.7% 计算量 ⇒ **并入中核 4-7**，只有基集已含中核时才再并 8-9。③ 三条安全边界：主线程 / `heaviest_thread` / `heavy_thread` / `comm` 命中的线程**免疫**动态调整（对应艇长 `is_thread_rule` 语义）；hot 表以 **`pid:tid`** 为键（tid 会回收复用）；**有 hot 的进程不跳过缓存**（否则只生效一轮）。④ 关闭开关：`touch /data/adb/SceneO3Tuner/lw_off`。新增 `test_load_aware.py` **21 断言**（把源文件里的 awk 原样抽出来跑，含 2 个边界用例）。⚠ 过程中修掉两个 awk 真坑：核位串末位不加空格导致 `index` 恒不命中（会吐出 `4-9,9` 这种畸形表达式）、以及 `-v NF=` 覆盖 awk 内置变量导致状态文件静默写不出 |
+
 | **v16.8** | ★ **把设备当前运行态反向固化成模块基线，并顺手纠正一处固化错误** —— 按用户要求抓取设备上的 Scene 配置与模块数据对比后固化：① **`fas_engine=feas|fas|fas_lite` → `fas`** 与 **`refresh_rate.conf enable=1 → 0`**（这两项是你通过 Scene UI 改的，此前只存在于设备 Scene 侧，**刷模块会被方案包覆盖**）；② 新增 `Config/app_assign.tsv`（58 条 APP→档位）与更新 `Config/game_assign.tsv` （王者/金铲铲→performance）作为**新装种子**，并在 `customize.sh` 补了 app 分配的种子逻辑（仍只在文件缺失时落地）。⚠ 同时纠正一处我自己的固化错误：**`gpu_lock` 曾被我固化成 `1`，但它在 O3 上根本没有执行体**（反汇编实证：Scene 只把它拼成 `export` 前缀交给 `powercfg.sh`，而本模块的 `powercfg.sh` 自 v10 起不读它）→ `customize.sh` 本就有 awk 强制改写为 `0`，现方案包也回退为 `0`。另：Scene 侧 9 个方案配置文件经二进制比对**与仓库完全一致**，说明日常刷模块并不会丢配置；你的 WebUI 分配存在 `STATE_DIR=/data/adb/SceneO3Tuner`（独立于模块目录，`uninstall.sh` 也不删） |
 
 | **v16.6** | ★ **按用户要求移除「配置完整性」与「一键还原数据」** —— 概览页的「配置完整性」分组（注错文件清单 + 「检测配置」按钮）和「一键还原数据」按钮、前端 `ACTIONS.audit`/`fixall`、`Api.audit`/`fixall`、`parseAudit()`、开机自动审计 `loadAudit()`，以及后端的 `webui.sh: audit|fixall` 两个子命令与整个 `integrity.sh` 脚本全部删除；`test_webui.mjs` 里对应的 mock 换成**防回归断言**（断言这三样都不再出现）。⚠ 顺带修正一条此前的误判：`game_templates.tsv` 里 `heaviest_thread` 为空是**刻意设计**（主线程靠「tid == pid」自动识别后绑 `heaviest_cores`），不是配置缺口。产物体积：`index.html` 136239 → 131712 B，zip 内文件 79 → 78 |

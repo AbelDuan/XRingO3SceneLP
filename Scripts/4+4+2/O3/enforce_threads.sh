@@ -272,6 +272,18 @@ ps -A -o PID,ARGS > "$PSF" 2>/dev/null
 
 #  3) 目标 ∩ 运行中 → PID|other|main|heavy|ht|hr|commPairs|uni
 #     ⚠ 用 -F'[|]' 而不是 -F'|'：管道符在正则里是「或」，单字符 FS 会被当正则用。
+#  ⚠⚠ v17：必须同时匹配「主进程 + 冒号子进程」（2026-09-18 移植 Aether OptExt 的思路）
+#    旧写法 `if (!(p in PID)) next` 是**精确名匹配** —— 只有 ps 里名字完全等于目标名的
+#    进程才会被绑。Android 应用普遍有 `:push` / `:appbrand0` / `:xweb_*` / `:remote`
+#    这类子进程，名字不等于主包 → **一条都匹配不上，全部漏绑**。
+#    真机实测（微信 6 进程 / 酷安 2 进程）：只有主进程进了 c0-3，
+#    5 个子进程（518 线程）全留在系统默认组 0-9 → 用户看到「有的 0-3、有的 0-9」。
+#    子进程往往是干活的（`:appbrand0` = 小程序环境 214 线程、`:xweb_*` = WebView 沙箱）。
+#
+#    修法：ps 里凡含 ':' 的名字（`com.foo.bar:xxx`）额外登记到 SUB[`com.foo.bar`]，
+#    于是给 `com.foo.bar` 配的档位会**连带它所有子进程**一起生效。
+#    两趟处理保证「显式子进程条目优先」：先做精确匹配（含用户自己写的
+#    `com.tencent.mm:appbrand` 这类条目），子进程兜底放 END，且跳过已匹配的 pid。
 awk -F'[|]' -v PS="$PSF" '
 BEGIN {
     # ps 输出形如 "   1 init second_stage"（前面有空格）→ 先去前导空白，
@@ -284,15 +296,43 @@ BEGIN {
         nm = l2; sub(/^[0-9]+[ \t]+/, "", nm); sub(/[ \t].*$/, "", nm)
         if (nm == "") continue
         if (nm in PID) PID[nm] = PID[nm] " " pid; else PID[nm] = pid
+        # ---- 子进程登记：com.foo.bar:xxx → SUB[com.foo.bar] ----
+        ci = index(nm, ":")
+        if (ci > 1) {
+            base = substr(nm, 1, ci - 1)
+            if (base in SUB) SUB[base] = SUB[base] " " pid; else SUB[base] = pid
+        }
     }
     close(PS)
 }
 {
+    L[NR] = $0
     p = $1
     if (!(p in PID)) next
     n = split(PID[p], a, " ")
-    for (i = 1; i <= n; i++)
+    for (i = 1; i <= n; i++) {
+        if (a[i] in SEEN) continue
+        SEEN[a[i]] = 1
         printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8, $1
+    }
+}
+END {
+    for (k = 1; k <= NR; k++) {
+        split(L[k], f, "|")
+        p = f[1]
+        if (p == "") continue
+        # ⚠ 这里**不能**写 `if (p in PID) continue`：PID 的键是「ps 里存在的进程名」，
+        #   而主包名（如 com.tencent.mm）**一定**在 PID 里 → 那样会把自己整条子进程
+        #   分支短路掉（测试实测：只剩主进程被绑，子进程依然全漏）。
+        #   正确的去重靠 SEEN —— 第一趟精确匹配已经认领的 pid 才跳过。
+        if (!(p in SUB)) continue
+        n = split(SUB[p], a, " ")
+        for (i = 1; i <= n; i++) {
+            if (a[i] in SEEN) continue               # 已被更精确的条目认领
+            SEEN[a[i]] = 1
+            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], f[2], f[3], f[4], f[5], f[6], f[7], f[8], p
+        }
+    }
 }
 ' "$TGT" > "$RUN" 2>/dev/null
 
@@ -369,6 +409,20 @@ while IFS='|' read -r p o m h ht hr cm uni pkg; do
 "
 done < "$RUN"
 printf '%s' "$buf" > "$TIDS"
+
+# ============================================================
+#  4.5) 动态负载感知（load_aware）—— 移植自 Aether OptExt
+# ------------------------------------------------------------
+#  给「其余线程」按 /proc/{tid}/stat 的 tick 增量实测占用率调档：
+#    忙（>60%）→ 并入中核 {p1_core}（O3 调优；艇长原版是并入 {hp_core}）
+#    闲（≤5%） → 收缩到 {e_core}
+#  产出 $TMP/lw.hot 供 pin_cgroup.sh 消费；不在间隔内则零开销直接返回。
+#  ⚠ 必须在 5a) 之前跑：pin_cgroup 依赖它决定组集合与是否跳过缓存。
+# ============================================================
+if [ "$PIN_MODE" = "group" ] && [ $# -eq 0 ]; then
+    sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TIDS" "$TMP/lw.hot" \
+        "$SEM_p1" "$SEM_hp" "$SEM_e" >/dev/null 2>&1
+fi
 
 # ============================================================
 #  5a) cgroup 分组落核（首选）—— 原理见 pin_cgroup.sh 头部

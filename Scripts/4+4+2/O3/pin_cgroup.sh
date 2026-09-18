@@ -43,6 +43,10 @@ ST="$TMP/cg.state"
 CMD="$TMP/cg.cmds"
 KEEP="$TMP/cg.keep"
 UNB="$TMP/cg.unbind"
+# 动态负载感知的产物（load_aware.sh 写）：每行 "tid pid cpus表达式"
+#   移植自 Aether OptExt —— 忙线程并中核/超大核、空闲线程收缩能效核。
+#   文件不存在或为空 = 本轮无负载调整（行为与移植前完全一致）。
+LWF="$TMP/lw.hot"
 
 log() { [ "${QUIET:-0}" = "1" ] || echo "$@"; }
 
@@ -151,7 +155,7 @@ mkdir -p "$TMP" 2>/dev/null
 #  全程只用 awk 的 getline 读文件（不 fork）；不需要改的地方一条命令都不发。
 # ============================================================
 awk -F'[|]' -v ROOT="$CROOT" -v CGNAME="$CG_NAME" -v ST="$ST" \
-    -v CMD="$CMD" -v KEEP="$KEEP" -v UNB="$UNB" -v TAB="$TAB" \
+    -v CMD="$CMD" -v KEEP="$KEEP" -v UNB="$UNB" -v TAB="$TAB" -v LWF="$LWF" \
     -v MAXC="$(cat /sys/devices/system/cpu/present 2>/dev/null | sed 's/.*-//')" '
 function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
 function emit(s) { print s > CMD }
@@ -205,6 +209,21 @@ BEGIN {
         if (n >= 8 && a[1] != "") S[a[1]] = a[2] TAB a[3] TAB a[4] TAB a[5] TAB a[6] TAB a[7] TAB a[8]
     }
     close(ST)
+
+    # ---- 动态负载感知表（load_aware.sh 产物：tid pid cpus）----
+    #   HOT["pid:tid"] → 该线程本轮的负载调整目标核位
+    #   ⚠ 键必须带 pid：tid 会跨进程回收复用，只用 tid 会命中到别的进程的同号线程
+    #     （窗口 25 秒，期间完全可能发生）。
+    #   HOTPID[pid]    → 该进程有负载调整的 tid 列表（用于「不跳过」判定 + 建组）
+    while ((getline l < LWF) > 0) {
+        n = split(l, a, " ")
+        if (n >= 3 && a[1] != "" && a[2] != "" && a[3] != "") {
+            HOT[a[2] ":" a[1]] = a[3]
+            if (a[2] in HOTPID) HOTPID[a[2]] = HOTPID[a[2]] " " a[1]
+            else                HOTPID[a[2]] = a[1]
+        }
+    }
+    close(LWF)
 }
 {
     pid = $1; o = $2; m = $3; h = $4; ht = $5; hr = $6; cm = $7; uni = $8; tl = $9; pkg = $10
@@ -234,6 +253,15 @@ BEGIN {
             at = index(cps[k], "@"); if (at < 1) continue
             ce = substr(cps[k], at+1)
             if (ce != "" && ce != lo) ND[gname(ce)] = ce
+        }
+    }
+    # ---- 动态负载感知：把本进程 hot 线程的目标核位也纳入组集合 ----
+    #   ⚠ 必须先建组，否则后面的 `echo tid > <组>/tasks` 会静默失败。
+    if (pid in HOTPID) {
+        nh = split(HOTPID[pid], htl, " ")
+        for (k = 1; k <= nh; k++) {
+            hc = HOT[pid ":" htl[k]]
+            if (hc != "" && hc != lo) ND[gname(hc)] = hc
         }
     }
     # ---- 父组 cpus = 各角色核位的并集（压成 0-3,4-7 形式）----
@@ -276,6 +304,10 @@ BEGIN {
         split(S[pid], ov, TAB)
         if (ov[1] == nt && (ov[3] TAB ov[4] TAB ov[5] TAB ov[6] TAB ov[7]) == sig) skip = 1
     }
+    # ★★ 有动态负载调整的进程**不跳过**：它的「忙 / 闲」每 LW_INTERVAL 秒变一次，
+    #    一旦进了这个缓存就再也不会重新评估 → 负载感知会永久失效。
+    #    （这是移植时的关键坑：不打破缓存，load_aware 只在第一轮有效。）
+    if (pid in HOTPID) skip = 0
     print pid TAB nt TAB loPath TAB m TAB h TAB ht TAB hr TAB cm > (ST ".new")
     if (skip || tl == "" || nt == "") next
 
@@ -295,6 +327,16 @@ BEGIN {
                 tn = substr(pairs[k], 1, at-1); tm = substr(pairs[k], at+1)
                 if (tn != "" && index(c, tn) > 0) { w = tm; break }
             }
+        }
+        # ★★ 动态负载感知：**只在没有任何显式角色命中时**才覆盖 ——
+        #    即只作用于落到「其余线程」lo 的那些 tid。
+        #    主线程 / heaviest_thread / heavy_thread / comm 名单命中的线程，
+        #    都是用户按模板精确指定的，**免疫**动态调整
+        #    （对应 Aether OptExt 里 `if e.is_thread_rule { return; }` 的语义）。
+        hk = pid ":" tid
+        if ((w == "" || w == lo) && (hk in HOT)) {
+            hw = HOT[hk]
+            if (hw != "") w = hw
         }
         if (w == "" || w == lo) continue                      # 默认组就是进程组，不必单独迁
         want = "/" CGNAME "/" sg "/" gname(w)
