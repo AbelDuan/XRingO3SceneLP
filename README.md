@@ -79,7 +79,6 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 | **档位（v10+）** | `lib/util.sh` `seed_app_templates()` | 档位与模式同名：**省电 / 均衡 / 性能 / 系统接管**（4 档，`fast` = 不绑核）；**默认不预设任何分配** |
 | **从 Scene 导入档位** | `lib/util.sh` `import_scene_assign()` | 一次性导入，之后不再实时跟随（避免 Scene 一改就把你的分配冲掉） |
 | **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
-| **配置完整性审计 + 一键还原** | `Scripts/…/integrity.sh` | 7 个维度核对，输出「注错文件清单」 |
 | **升级即覆盖（v15）** | `customize.sh` + `lib/util.sh` `SYNC_SKIP` | 升级时**直接覆盖** `profile.json`/`powercfg.sh`/`features/*.conf` 等模块设计文件，只保留 `threads*.json`（应用/游戏的线程表）；覆盖前自动备份 |
 | **装完不用重启（v15.1 / v16.1 / v16.2）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**并将内容立即可用；并清掉 `disable` 标记（KSU 的启用状态就是 `/data/adb/modules/<id>/disable`）。⚠ **`update` 标记是 installer.sh 在 `. customize.sh` 返回之后才写的**，所以脚本里删它没用 —— v16.2 改成**落一个独立脚本 + `setsid` 后台拉起**，等 `update` 标记出现后再把它合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（全程不重启）。装完自动 `ksud services` 把守护拉起来 |
 | **Scene · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | Scene 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
@@ -393,7 +392,6 @@ XRingO3SceneLP/
 │   ├── camera_freq_guard.sh             ★ 相机频率兜底守护
 │   ├── apply_freq.sh                    幂等的遗留 QoS 清理器
 │   ├── profile_sync.sh                  调度配置 传递 / 备份 / 恢复
-│   ├── integrity.sh                     配置完整性审计 + 一键还原
 │   └── set_scheme.sh                    方案应用
 └── Config/
     ├── game_templates.tsv               游戏线程模板库
@@ -443,7 +441,6 @@ appmodes                    读 Scene 的模式表（A_=生效模式 / OWN_=显�
 syncmode / applymodes       按 Scene 模式同步线程分配
 enforce / enforcep <pkg…>   落核（全量 / 定向）
 freqapply / freqrestore     调 apply_freq.sh
-audit / fixall              配置完整性审计 / 一键还原
 profilepush / profilebackup / profilerestore / profilelist
 live / scheme / log <n>
 b64len / b64 / wbegin / wappend / wcommit     通用文件通道
@@ -457,7 +454,7 @@ b64len / b64 / wbegin / wappend / wcommit     通用文件通道
 
 | 板块 | 内容 |
 |---|---|
-| **概览** | 功能状态、调度配置（传递 / 备份 / 恢复）、配置身份、注错文件清单 |
+| **概览** | 功能状态、调度配置（传递 / 备份 / 恢复）、配置身份 |
 | **模式** | 4 档模式的**频率阶梯**（进/退前台各一组，读写 Scene 的真实 preset）、「频率跟随模式」开关 |
 | **应用** | 模板卡（省电 / 均衡 / 性能 / 系统接管）、筛选、逐应用分配；**默认只显示有前台界面的应用**，标题行可切「含无界面」 |
 | **游戏** | 同应用页，数据源是 Scene 的游戏名单；**顶部多一张「Scene · FAS 调速器」卡 + 「设为 xres」按钮** |
@@ -521,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.5-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.6-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -871,7 +868,7 @@ done
 # 谁在写频率（需要 root + strace）—— 定位辅助调速器时用的就是这条
 strace -f -e trace=write -p "$(pidof scene-daemon)" 2>&1 | grep -i freq
 
-# 模块状态 / 配置完整性 / 日志
+# 模块状态 / 日志
 sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh status
 sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh audit
 tail -50 /data/adb/SceneO3Tuner/sceneo3.log
@@ -922,12 +919,14 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.6** | ★ **按用户要求移除「配置完整性」与「一键还原数据」** —— 概览页的「配置完整性」分组（注错文件清单 + 「检测配置」按钮）和「一键还原数据」按钮、前端 `ACTIONS.audit`/`fixall`、`Api.audit`/`fixall`、`parseAudit()`、开机自动审计 `loadAudit()`，以及后端的 `webui.sh: audit|fixall` 两个子命令与整个 `integrity.sh` 脚本全部删除；`test_webui.mjs` 里对应的 mock 换成**防回归断言**（断言这三样都不再出现）。⚠ 顺带修正一条此前的误判：`game_templates.tsv` 里 `heaviest_thread` 为空是**刻意设计**（主线程靠「tid == pid」自动识别后绑 `heaviest_cores`），不是配置缺口。产物体积：`index.html` 136239 → 131712 B，zip 内文件 79 → 78 |
+
 | **v16.5** | ★ **配置键审计：揪出 9 个「Scene 根本不读」的编造键** —— 起因是 `fas.conf` 里那两个"目标功耗窗口"（`adj_min_power=6.0` / `adj_max_power=9.0`）与实测游戏功耗（3.8W）严重不符，于是把 Scene 的 APK 拉下来逐键核对，结果它们**在 `classes.dex` 和 `resources.arsc` 里都不存在**。顺藤摸瓜审计了模块推送的全部 5 个 `features/*.conf`，**14 个键里 9 个是编的**：① `fas.conf` 的 6 个 `adj_*`（功耗窗口 / 电池温度窗口 / SoC 温度窗口）全删 —— Scene 的 FAS **没有"目标功耗窗口(W)"这个功能**，功耗是靠 `target_fps_offset`（帧率微调‰）+ `margin_offset`（余量 MHz）+ 温度感知 + `fast_down_always` 间接控制的；② `limiter.conf` 的 `limiters_in_apps` / `limiters_in_games` / `stat_method` 改名成真实键 `limiter_apps` / `limiter_games` / `limiter_jiffies` —— **此前"改它就能开关辅助调速器"的说法是无效操作**，辅助调速器一直由 Scene 自己的 UI 设置在控制；③ `cpuset.conf` 的 5 个键也全部查无此键，但真实键名未确认，按"不猜"原则只加警告不动值。另附**键名验证法**（grep 两处字节 + 区分配置键与图表字段名） |
 
 | **v16.4** | ★ **用第二份实测校正 `sweet_hq`，并修掉一处「改了但没生效」的配置** —— 第二份报告（同款游戏，`767s`、电量从 `10%` 一路测到 `4%`）带来两个结论：① **中核上限 `1651200→1468800`**：这次先按 `cpu_loads` 把中核负载分桶、再在桶内比频率（排除「高频出现在团战」的选择偏差），控制变量后帧率全程 119~120 纹丝不动，功耗却从 3.58W 单调涨到 4.59W，能效 33.5→25.9 fps/W，`1550MHz` 以上纯浪费；② **补 v16.3 的漏**：v16.3 只改了 `_Games.json` 的 `@cpu_freq`，`profile.json` 里中核上限还留在 `3148800`（会被硬件 clamp 到 ≈1.8GHz）——**实测无法区分这两套配置谁在游戏态生效**，所以现在两处同步改成同一个值，中核上限才真正落地。另：查清了低电量（≤5%）掉帧的根因 —— 系统把 cpu8/cpu9 下线、负载全压回中核，省 `0.467W` 却损失 `21.2 fps`（不是热降频，当时才 54℃）；因属电池保护策略且本机为临时 root，本版**不强行对抗**，只在方案说明里写清 |
 
 | **v16.3** | ★ **新增 `sweet_hq`（满画质游戏）方案** —— 基于 Scene 实测报告（王者荣耀 v11.4.1.36 · 满画质 120fps · 453s）做的「砍过量供给」调优：报告显示帧率全程贴 120 上限（avg 119.63 / 5% Low 118），而功耗 2.86W→4.86W 帧率纹丝不动 ⇒ SoC 在过供给。改动（仅性能模式 · 游戏态）：大核下限 `1497600→1113600`（大核只承担 1.7% 计算量、90.3% 采样负载 <5%）、大核 boost `2371200/2044800→1651200/1497600`、中核 boost `1651200→1296000`、三簇上限收到实测峰值（L 1939200 / M 1651200 / P 2044800）。**中核下限 835200 与 target_loads 刻意不动**（UnityMain 主线程 84.6%，835MHz 是维持 120fps 的临界）。非游戏部分与 `sweet_bal` 逐字节相同 → 音量键菜单一点即可 A/B。⚠ 前提：游戏在 Scene 里要设为「性能模式」 |
-| **v16.2.2** | ★ **「待重启生效」加第三路自愈 + 检测配置不再只会说「缺失」**：① `update` 待更新态此前只靠安装脚本的后台进程兜底，真机上会被系统回收 → 新增 **「访问即自愈」**：`webui.sh` / `action.sh` **顶部**都调同一个 `selfheal_pending_update`（`lib/util.sh`），**打开一次 WebUI 或按一次音量键就会顺手把待更新态合并掉**，不再依赖后台进程活着；② 自愈加 **版本守门**（`versionCode` 更高才合并，绝不把旧版本回盖），`ksufix` 从「只删标记」升级为**真合并**；③ **「检测配置」加了目录级前置检查**：11 项全报「缺失」时，现在会直接写明成因 —— `★目录不存在 ← 路径/挂载问题` / `★目录不可读 ← 权限或 SELinux` / `目录可读但确实无此文件 ← 被删除或从未写入`，并输出 `DIR_SCENE` / `DIR_WEBUI` 路径自检行，一眼分清是**检测/路径问题**还是**文件真不在**；④ 回归测试：`test_selfheal.py` 22 断言 + `test_pending_selfheal.py` 扩到 4 场景 28 断言（新增「暂存版本 ≤ 当前 → 只清孤儿标记、不回盖」） |
+| **v16.2.2** | ★ **「待重启生效」加第三路自愈 + 检测配置不再只会说「缺失」**：① `update` 待更新态此前只靠安装脚本的后台进程兜底，真机上会被系统回收 → 新增 **「访问即自愈」**：`webui.sh` / `action.sh` **顶部**都调同一个 `selfheal_pending_update`（`lib/util.sh`），**打开一次 WebUI 或按一次音量键就会顺手把待更新态合并掉**，不再依赖后台进程活着；② 自愈加 **版本守门**（`versionCode` 更高才合并，绝不把旧版本回盖），`ksufix` 从「只删标记」升级为**真合并**；③ **「检测配置」加了目录级前置检查**：11 项全报「缺失」时，现在会直接写明成因 —— `★目录不存在 ← 路径/挂载问题` / `★目录不可读 ← 权限或 SELinux` / `目录可读但确实无此文件 ← 被删除或从未写入`，并输出 `DIR_SCENE` / `DIR_WEBUI` 路径自检行，一眼分清是**检测/路径问题**还是**文件真不在**；④ 回归测试：`test_selfheal.py` 22 断言 + `test_pending_selfheal.py` 扩到 4 场景 28 断言（新增「暂存版本 ≤ 当前 → 只清孤儿标记、不回盖」） ⚠️ 其中「检测配置」功能已于 **v16.6 按用户要求移除**（脚本 `integrity.sh` 一并删除） |
 | **v16.2.1** | ★ **修「刷入后 Web UI 还显示旧版本号」**：v16.2 只改了 `module.prop` 的版本号、**漏跑了 `gen_webui.py`**，打包脚本也不调它，导致打进 zip 的 `webroot/index.html` 是上一次遗留的 16.1 构建（版本角标 + 前端代码都是旧的）。v16.2.1 把 `gen_webui.py` 调进 `pack_module.py` 的打包流程，成为硬步骤（重建失败即中止打包），从此版本号与前端必定同步。功能代码与 v16.2 一致 |
 | **v16.2** | ★ **修「开关是灰的 + 没有执行 / 打开按钮」**：读 KernelSU 源码定位到这是 **`update` 待更新标记**（不是 v16.1 的 `disable`）—— 安装器在 `. customize.sh` 返回**之后**才写 `update`，脚本里删它必失败；且 `update` 存在时 active 目录可能只剩 `module.prop`（缺 `webroot/`/`action.sh`），导致按钮**根本不渲染**。修正：安装脚本就地合并 + 清 `disable`/`remove`，再落一个独立自愈脚本 `setsid` 后台拉起，等 `update` 出现后合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（不重启）。新增 `test_pending_selfheal.py`（22 断言）覆盖该路径 |
 | **v16.1** | ★ **修「模块在 KernelSU 里是灰的 / 启用不了」**：安装脚本现在会主动清掉 `/data/adb/modules/<id>/disable`（KSU 的启用状态就是这个标记文件）——在此之前，KSU 若是**原地安装**，重装模块也**清不掉禁用标记**，用户会以为重装都没用（甚至去重启手机）。同时在「刚从禁用态恢复」时补一次 `ksud services`，让守护不必重启就起来 |

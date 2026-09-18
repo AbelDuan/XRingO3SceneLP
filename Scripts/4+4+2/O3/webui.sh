@@ -24,7 +24,6 @@
 #    mode | modeset <模式>        读模式阶梯 / 切换全局模式（省电|均衡|性能|极速）
 #    profilepush | profilebackup | profilerestore | profilelist
 #                                  传递/备份/恢复/列出调度配置
-#    audit | fixall [scheme]        配置完整性审计（注错文件清单）/ 一键还原
 #    importscene                  从 Scene 一次性导入档位（不实时跟随）
 #    syncmode                     按当前档位表重建线程分配 + 全量落核
 #    ksufix                       删除 KSU 孤儿 update 标记（修复开关点不动）
@@ -880,9 +879,6 @@ case "$1" in
   profilebackup) sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" backup ;;
   profilerestore) shift; sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" restore "$1" ;;
   profilelist)   sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" list ;;
-  # 配置完整性审计（注错文件清单）/ 一键还原到模块基线
-  audit)         sh "$MODDIR/Scripts/4+4+2/O3/integrity.sh" audit ;;
-  fixall)        shift; sh "$MODDIR/Scripts/4+4+2/O3/integrity.sh" restore "$1" ;;
   mode)          cmd_mode ;;
   modeset)       cmd_modeset "$2" ;;
   appmodes)      cmd_appmodes ;;

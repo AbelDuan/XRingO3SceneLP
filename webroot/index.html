@@ -519,7 +519,7 @@ pre.tall { max-height: 62vh; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">16.5 (2026-09-18)</span>
+    <span class="h-ver" id="ver">16.6 (2026-09-18)</span>
     <div class="h-chips">
       <span class="pill" id="conn-chip">连接中…</span>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
@@ -790,11 +790,6 @@ const Api = {
     const a = (pkgs || []).map(p => this.shq(String(p))).join(' ');
     return await this.run('enforcep' + (a ? ' ' + a : ''));
   },
-  /* 配置完整性审计 / 一键还原数据 */
-  async audit() { return String(await this.run('audit') || ''); },
-  async fixall(scheme) {
-    return await this.run('fixall' + (scheme ? ' ' + this.shq(String(scheme)) : ''));
-  },
   /* 调度配置：传递 / 备份 / 恢复 / 列表 */
   async profilepush() { return await this.run('profilepush'); },
   async profilebackup() { return await this.run('profilebackup'); },
@@ -870,8 +865,6 @@ const S = {
   showCount: 100,
   backups: [],        // [{name, files, label}] —— 调度配置备份列表
   fasGov: null,       // {l,m,p} —— Scene 的 FAS 调速器（features/fas.conf 三簇）当前值
-  auditBad: [],       // [{file, cn, why, detail}] —— 配置完整性异常项（注错文件清单）
-  auditAt: '',        // 上次审计时间
   ops: [],
   savedAt: '',
   busy: false, demo: false,
@@ -997,25 +990,6 @@ async function loadModel() {
 }
 
 function globalMode() { return (S.model && S.model.globalMode) || 'balance'; }
-
-/* 配置完整性审计结果解析（后端 integrity.sh audit 的 K=V 输出）
-   BAD=<文件>|<用途>|<问题类型>|<详细说明>   一行一项
-   其余 SCHEME / CHECKED / BAD_N / PRESET_N 等是汇总信息。 */
-function parseAudit(raw) {
-  const out = { bad: [], scheme: '', checked: 0, presetN: 0 };
-  String(raw || '').split('\n').forEach(line => {
-    line = line.trim(); if (!line) return;
-    const i = line.indexOf('='); if (i < 0) return;
-    const k = line.slice(0, i), v = line.slice(i + 1);
-    if (k === 'BAD') {
-      const p = v.split('|');
-      out.bad.push({ file: p[0] || '', cn: p[1] || '', why: p[2] || '异常', detail: p[3] || '' });
-    } else if (k === 'SCHEME') out.scheme = v;
-    else if (k === 'CHECKED') out.checked = parseInt(v, 10) || 0;
-    else if (k === 'PRESET_N') out.presetN = parseInt(v, 10) || 0;
-  });
-  return out;
-}
 
 /* 模式页的频率必须**显示/编辑 Scene 真正会下发的那份** ——
    profile.json 里 <mode>_active / <mode>_inactive 的 @cpu_freq（cpu0/cpu4/cpu8）。
@@ -1520,36 +1494,6 @@ ${(st.SCENE_DYN === 'true' && st.SCENE_SOURCE === 'SOURCE_SCENE_ONLINE') ? '' : 
           : '<option value="">（暂无备份）</option>'}
       </select>
       <button class="btn" data-act="profilerestore">恢复备份</button>
-    </div>
-  </div>
-</div>
-
-<div class="group">
-  <div class="g-title">配置完整性</div>
-  <div class="card" style="padding:12px">
-    ${(S.auditBad || []).length ? `
-      <div class="warnbox" style="margin:0 0 10px">
-        <b>⚠ 发现 ${S.auditBad.length} 个注错文件</b>
-        ${S.auditAt ? '<span style="color:var(--sub)">（' + esc(S.auditAt) + ' 检测）</span>' : ''}
-      </div>
-      <div style="overflow:auto">
-        <table class="modetbl">
-          <thead><tr><th>文件</th><th>用途</th><th>问题</th><th>说明</th></tr></thead>
-          <tbody>${(S.auditBad || []).map(b =>
-            '<tr><td class="mono" style="font-size:11px;white-space:nowrap">' + esc(b.file) + '</td>' +
-            '<td>' + esc(b.cn) + '</td>' +
-            '<td><span class="pill bad">' + esc(b.why) + '</span></td>' +
-            '<td style="color:var(--sub);font-size:11px">' + esc(b.detail) + '</td></tr>').join('')}</tbody>
-        </table>
-      </div>
-    ` : `
-      <div class="kv-row"><div class="k">状态</div><div class="v">
-        <span class="pill ok">${S.auditAt ? '全部正常' : '尚未检测'}</span>
-      </div></div>
-    `}
-    <div class="btn-row" style="padding:12px 0 0">
-      <button class="btn" data-act="audit">检测配置</button>
-      <button class="btn primary" data-act="fixall">一键还原数据</button>
     </div>
   </div>
 </div>
@@ -2173,31 +2117,6 @@ const ACTIONS = {
     toast(/^OK/.test(verdict) ? verdict.slice(3, 100) : ('传递失败：' + verdict.slice(0, 90)));
     await refreshAll();
   },
-  /* ---- 配置完整性：检测 + 一键还原 ---- */
-  audit: async () => {
-    const raw = await busy('正在检测配置…', () => Api.audit());
-    const r = parseAudit(raw);
-    S.auditBad = r.bad;
-    S.auditAt = new Date().toTimeString().slice(0, 8);
-    logOp('🔍 配置检测：核对 ' + r.checked + ' 项，异常 ' + r.bad.length + ' 个' +
-      (r.bad.length ? '（' + r.bad.map(b => b.file).join(', ') + '）' : ''));
-    toast(r.bad.length ? ('发现 ' + r.bad.length + ' 个注错文件') : '配置全部正常');
-    render();
-  },
-  fixall: async () => {
-    if (!confirm('一键还原数据？\n\n' +
-      '会把模块内置的调度配置重新灌进 Scene（profile.json / manifest.json / _Apps.json / ' +
-      '_Games.json / _Camera.json / _ELP.json / powercfg.sh），并重建损坏的模块数据表。\n\n' +
-      '执行前会自动先备份一份当前配置。')) return;
-    const r = await busy('正在一键还原…', () => Api.fixall());
-    const lines = String(r || '').trim().split('\n').filter(Boolean);
-    const verdict = lines.filter(l => /^(OK|ERR)/.test(l))[0] || lines[lines.length - 1] || '';
-    logOp(lines.join(' | ').slice(0, 240));
-    toast(/^OK/.test(verdict) ? verdict.slice(3, 100) : ('还原失败：' + verdict.slice(0, 90)));
-    // 还原后立刻复检，让清单刷新成真实状态
-    try { const a = parseAudit(await Api.audit()); S.auditBad = a.bad; S.auditAt = new Date().toTimeString().slice(0, 8); } catch (e) {}
-    await refreshAll();
-  },
   profilebackup: async () => {
     const r = await busy('正在备份…', () => Api.profilebackup());
     const lines = String(r || '').trim().split('\n').filter(Boolean);
@@ -2679,21 +2598,10 @@ async function refreshAll() {
   await Promise.all([
     loadFreqs(),
     S.model ? Promise.resolve() : loadModel(),
-    loadSceneModes(), loadGames(), loadAppsTpl(), loadBackups(), loadAudit()
+    loadSceneModes(), loadGames(), loadAppsTpl(), loadBackups()
   ]);
   await loadModeFreqFromScene();
   if (S.tab === 'apps') updateAppList(); else render();
-}
-
-/* 配置完整性审计（概览页「注错文件清单」用）
-   ⚠ 只是只读检测，开机跑一次即可；失败就留空，不阻塞上屏。 */
-async function loadAudit() {
-  try {
-    const r = parseAudit(await Api.audit());
-    S.auditBad = r.bad;
-    S.auditAt = new Date().toTimeString().slice(0, 8);
-  } catch (e) { S.auditBad = []; }
-  return S.auditBad;
 }
 
 /* 调度配置备份列表（概览页「恢复备份」下拉用） */
