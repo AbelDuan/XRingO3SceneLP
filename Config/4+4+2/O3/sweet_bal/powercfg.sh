@@ -108,12 +108,15 @@ log "core_ctl cpu8 busy_up_thres=85*2"
 KC=$(pgrep -f kcompactd0 2>/dev/null)
 [ -n "$KC" ] && { echo $KC > /dev/cpuset/foreground/tasks 2>/dev/null; log "kcompactd0 -> foreground"; }
 
-# kswapd 绑到超大核（O3: 8-9，对应蓝本的 6-7）
+# kswapd 绑到**中核**（O3: 4-7，对应蓝本的 6-7）
+#   ⚠ v16.11 从 8-9 改到 4-7：模块现在禁止系统 cpuset 组使用超大核
+#     （bigcore_guard.sh），而 cpuset 要求 child ⊆ parent ——
+#     若 kswapd 仍占 8-9，父组 top-app 就收不到 0-7（内核 EINVAL）。
 mkdir -p /dev/cpuset/top-app/kswapd 2>/dev/null
 echo 0 > /dev/cpuset/top-app/kswapd/mems 2>/dev/null
-echo 8-9 > /dev/cpuset/top-app/kswapd/cpus 2>/dev/null
+echo 4-7 > /dev/cpuset/top-app/kswapd/cpus 2>/dev/null
 KS=$(pgrep kswapd0 2>/dev/null)
-[ -n "$KS" ] && echo $KS > /dev/cpuset/top-app/kswapd/tasks 2>/dev/null && log "kswapd0 -> top-app/kswapd cpus=8-9"
+[ -n "$KS" ] && echo $KS > /dev/cpuset/top-app/kswapd/tasks 2>/dev/null && log "kswapd0 -> top-app/kswapd cpus=4-7"
 
 # ─────────────────────── 6. walt 调度器（XRing 版）───────────────────────
 # 蓝本的 walt 微调多数键在 O3 不存在，只保留 O3 实有的等价项

@@ -240,6 +240,20 @@ while :; do
         #   camera_freq_guard.sh / apply_freq.sh 仍保留在原位，仅作**手动应急工具**，
         #   开机与守护都不再拉起。
 
+        # ---- 6.5) 系统 cpuset 组不使用超大核 8-9（v16.11）----
+        #   用户实测：桌面 / 切换应用时会看到 0-9、4-9 —— 来源不是本模块的落核
+        #   （模块从不把线程放 8-9），而是系统自己的 cpuset 组：
+        #     · top-app/cpus       出厂常见 0-9
+        #     · foreground/boost   常见就是大核簇（4-9）
+        #     · top-app/{main,render,other}  Scene「核心分配」按 v8 的 threads.json 写的
+        #   bigcore_guard.sh 把这些组的 cpus 收到 0-7；父组一旦收到 0-7，
+        #   外部再想给子组写 0-9 会被内核直接拒 → 从根上堵住。
+        #   它读 cpus 全用 shell 内建 read（0 fork），只在需要改时才写，所以放在
+        #   work 轮里几乎不花钱；另加「每 12 轮（60s）兜底」防外部改回去。
+        if [ "$WORK" = "1" ] || [ $(( ROUND % 12 )) -eq 0 ]; then
+            sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
+        fi
+
         # ---- 7) 频率：**不再由本模块处理** ----
         #   CPU 调频权限已交回 Scene（profile.json 的 <mode>_active/inactive @cpu_freq）。
         #   原来这里每当前台一变就跑一次 apply_freq.sh -f "$FG"，已移除。

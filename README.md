@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.10-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.11-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -919,6 +919,8 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 
 | 版本 | 主要内容 |
 |---|---|
+| **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **Scene 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 Scene 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。新增 `test_bigcore_guard.py` **25 断言**（沙盒造假 cpuset 树跑真脚本）。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
+
 | **v16.10** | ★ **修 v16.9 的「越级」bug：负载升级默认不再上超大核** —— 用户实测反馈「应用设为均衡后打开线程显示 **4-9**」。根因是 v16.9 的升级规则写成「基集已含中核时再并 8-9」，而 **`performance` 档的 `other` 本来就是 4-7** → 条件恒真 → 所有忙线程被推上 8-9（真机 40 个目标里 31 个是 performance 档，所以「满屏 4-9」）。这与本项目结论冲突（**C1-Ultra 只在 >2.2GHz 才有能效优势**，而大核频窗 1.1~2.0GHz）。现在忙线程**只并入中核 `{p1_core}`**，升 8-9 改为可选开关 **`LW_HP`（默认 0 = 关）**；另外目标核位**等于基集时不写 hot 条目**（顺带省掉 perf 档应用每 25 秒一次的全线程扫描）。修复后：`powersave`/`balance`(other 0-3) 忙线程 → **0-7**；`performance`(other 4-7) → **无变化**。测试扩到 **22 断言**（新增「不越级」「`LW_HP=1` 才升」） |
 
 | **v16.9** | ★ **移植 Aether OptExt 的「负载感知」与「子进程匹配」**（修用户实测发现的真 bug）—— ① **子进程漏绑**：`enforce_threads.sh` 用的是**精确名匹配**，`com.tencent.mm:appbrand0` ≠ `com.tencent.mm`，真机实测微信 6 个进程里**只有主进程被绑**（5 个子进程共 518 线程全散在系统默认组、掩码 0-9）→ 现在 `ps` 里凡含 `:` 的名字会额外登记成主包的子进程，给主包配的档位**连带它所有子进程**一起生效（两趟处理保证显式子进程条目优先，去重靠 SEEN）。② **负载感知 `load_aware.sh`（新脚本）**：不再只靠名字猜，而是读 `/proc/{tid}/stat` 的 `utime+stime` **差分实测**每个线程的占用率（窗口 25 秒），>60% 升级、≤5% 收缩。★ **升级目标按玄戒 O3 实测调优，没有照搬艇长**：艇长把忙线程并入超大核 8-9，而本项目实测 C1-Ultra **只在 >2.2GHz 才有能效优势**、中核就能跑满 120fps、大核只承担 0.7%~1.7% 计算量 ⇒ **并入中核 4-7**，只有基集已含中核时才再并 8-9。③ 三条安全边界：主线程 / `heaviest_thread` / `heavy_thread` / `comm` 命中的线程**免疫**动态调整（对应艇长 `is_thread_rule` 语义）；hot 表以 **`pid:tid`** 为键（tid 会回收复用）；**有 hot 的进程不跳过缓存**（否则只生效一轮）。④ 关闭开关：`touch /data/adb/SceneO3Tuner/lw_off`。新增 `test_load_aware.py` **21 断言**（把源文件里的 awk 原样抽出来跑，含 2 个边界用例）。⚠ 过程中修掉两个 awk 真坑：核位串末位不加空格导致 `index` 恒不命中（会吐出 `4-9,9` 这种畸形表达式）、以及 `-v NF=` 覆盖 awk 内置变量导致状态文件静默写不出 |

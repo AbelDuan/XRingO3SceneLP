@@ -72,6 +72,9 @@ fi
 pkill -f "O3/guard\.sh" 2>/dev/null
 sleep 1
 # 间隔 5s：守护每轮按模板落核（幂等，值一致时一条命令都不发，开销可忽略）
+# 开机先收一次系统 cpuset 组（禁止 8-9，见 bigcore_guard.sh 头部）
+sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
+
 nohup sh "$MODDIR/Scripts/4+4+2/O3/guard.sh" "${GUARD_INTERVAL:-5}" >> "$LOG_FILE" 2>&1 &
 log "· guard 已启动 (pid $!，间隔 ${GUARD_INTERVAL:-5}s)"
 
