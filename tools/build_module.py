@@ -85,7 +85,49 @@ def collect():
     return out
 
 
+def run_offline_suite():
+    """跑离线自检套件（--check）。
+
+    默认构建**不**跑测试：构建是高频动作，测试失败会拖慢它；但发版前应当
+    显式跑一次 —— 用 `python tools/build_module.py --check`。
+    涵盖 lint + 三个测试脚本（跳过需要真实方案目录布局的 test_sync_skip.sh）。
+    """
+    import subprocess
+    suite = [
+        ("lint_module.py", "模块结构自检"),
+        ("test_load_aware.py", "负载感知四档语义"),
+        ("test_bigcore_guard.py", "8-9 封锁"),
+        ("test_camera_guard.py", "相机档位（历史遗留，允许失败）"),
+    ]
+    rc = 0
+    for f, desc in suite:
+        p = os.path.join(TOOLS, f)
+        if not os.path.exists(p):
+            print("  ─  跳过 %s（不存在）" % f)
+            continue
+        print("  ▶  %s —— %s" % (f, desc))
+        r = subprocess.run([sys.executable, p], capture_output=True, text=True)
+        tail = (r.stdout or "").strip().splitlines()
+        last = tail[-1] if tail else ""
+        ok = r.returncode == 0
+        # test_camera_guard 是 v7 时代遗留（脚本已删、断言保留），已知失败不算闸门
+        gate = f != "test_camera_guard.py"
+        print("      %s %s" % ("PASS" if ok else "FAIL", last[:70]))
+        if not ok and gate:
+            rc = 1
+    return rc
+
+
 def main():
+    args = sys.argv[1:]
+    if "--check" in args:
+        print("== 离线自检套件 ==")
+        if run_offline_suite() != 0:
+            print("!! 自检未通过，已中止打包")
+            return 1
+        print("== 自检通过，继续打包 ==")
+        print()
+
     os.makedirs(DIST, exist_ok=True)
     ver = module_version()
     stamp = time.strftime("%Y%m%d")

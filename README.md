@@ -518,7 +518,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.12-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.16-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -890,16 +890,21 @@ sh $W fasxres              # 一键设成 xres/xres/xres（写完自检 + 重启
 ```bash
 python tools/lint_module.py          # 模块结构自检
 python tools/test_camera_guard.py    # 相机档位逻辑
+python tools/test_load_aware.py      # 负载感知：四档升级目标 / 阈值 / 空闲收缩
+python tools/test_bigcore_guard.py   # 8-9 封锁：收窄 / 冻结 / 重申 / 按模式生效
 bash   tools/test_sync_skip.sh       # 升级覆盖语义
-python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint）
+python tools/build_module.py         # 打 zip + tgz
+python tools/build_module.py --check # 打包前先跑一遍离线自检套件（lint + 测试）
 ```
 
 | 命令 | 覆盖什么 | 规模 |
 |---|---|---|
 | `tools/lint_module.py` | `webui.sh` 函数不重复 / 分发表引用的命令都有实现 / `sh -n` 语法 / 页签与视图函数一一对应 / `data-act` 全覆盖 / 前端调的后端命令都存在 / `index.html` 无预览注入 | 8 组 |
 | `tools/test_camera_guard.py` | 相机档位逻辑（见下） | 6 组 |
+| `tools/test_load_aware.py` | 把 `load_aware.sh` 里的 awk **原样抽出**喂合成 `/proc` 数据：四档升级目标（省电不升 / 流畅·性能 0-7 / 极速 0-9）、空闲收缩开关、阈值数值化回归、`"-"` 占位符、与 `mode_sched_row()` 对齐 | 23 断言 |
+| `tools/test_bigcore_guard.py` | 假 cpuset 树 + 假 mount/umount 跑**真脚本**：收窄 / 原值存出厂值 / **冻结值重申** / **按模式生效（极速解冻）** / restore / 幂等 | 25 断言 |
 | `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
-| `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录） | — |
+| `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，不过就中止打包（`test_camera_guard.py` 是 v7 遗留、已知失败，不作闸门） | — |
 
 > ⚠ `test_sync_skip.sh` 是**唯一**能验证「升级时保留 `threads*.json`」的地方 ——
 > 这条语义是**静默生效**的，写错了在设备上只表现为「某些文件莫名回退」，很难发现。
@@ -918,10 +923,11 @@ python tools/build_module.py         # 打 zip + tgz（内部再跑一次 lint�
 ## 10. 版本历史
 
 | 版本 | 主要内容 |
+| **v16.16** | ★ **四档调度语义按用途重定义 + 修掉三个静默失效** —— 用户按实际用途重定义四档，`lib/util.sh` 新增 **`mode_sched_row()` 作为单一事实源**（「模式 → 升级目标/阈值/间隔」原来散在模板表、`load_aware` 调用参数、各自 `profile.json` 三处，改一档要动三个文件、极易互相矛盾 —— v16.9 的「越级」bug 就是这么来的）：<br>　· **省电** 0-3 小核，忙线程**不升级**（升级就白省电）<br>　· **流畅** 主/渲染 4-7、其余 0-3，忙线程只并 4-7<br>　· **性能** 其余线程也到 4-7，忙线程封顶 4-7（8-9 留给系统）<br>　· **极速** 中低负载线程 0-7 交系统分配（**不做空闲收缩**），只有**高负载线程**上探 **4-9**（中核 ∪ 超大核，内核按频率/热状态自选核）<br>显示名 均衡 → **流畅**（与 `mode_name_cn` 统一）。新增 **`migrate_templates_v14`**：把 fast 从 v13 的「整条 4-9」改为「0-7 基线 + 高负载 4-9」（整条 4-9 会让中低负载线程也落中核/大核）。<br>**三个静默失效**（都在真机/隔离测试里挖出来，且都被调用方的 `2>/dev/null` 吞掉）：<br>① awk `{ print x > F; done = 1 }` 是**语法错误** → 整个程序解析失败、主规则不执行、状态文件空白、**永不升核**；<br>② `lvl >= HOT` 在 `-v` 传参下走**字符串比较**（`lvl=7 >= HOT=9` 为假、`10 >= 12` 也为假，取决于字典序）→ 改 `+0` 强制数值化；<br>③ 冻结组**只读不写**：外部（scene-daemon）写的是 bind-mount 的**后备文件**，被改成 0-9 后守卫不重申意图值 → 「锁在 0-7」变成空话（真机 `top-app`/`foreground` 的 `eff` 实际是 0-9）；现在每轮把意图值写回后备文件（值一致时零写入）。<br>**`bigcore_guard` 按模式生效**：极速档解冻并停用 8-9 封锁（否则高负载线程上不去 4-9），其余档继续锁 0-7；只解冻一次（`bigcore.mode.fast` 标记）避免每轮反复 umount。<br>新增离线测试并登记进 `tools/`：**`test_load_aware.py`（23 断言）**、**`test_bigcore_guard.py`（25 断言）** —— 这两个文件在 v16.11/v16.12 的记账里被声称存在，实际**从未进过仓库**（本版勘误并补齐）。真机验证（16.15 → 16.16，**未重启**）：四档升级目标、8-9 封锁/解冻、v14 迁移幂等，均通过；`lint_module.py` 全过 |
 |---|---|
-| **v16.12** | ★ **揪出「谁在把 0-9 写回」并冻结父组 —— v16.11 的修复其实会被改回去** —— 真机发现跑完 v16.11 后 `top-app`/`foreground` **几秒内自己变回 0-9**。定位方法（可复用）：① 扫 `/proc/*/fd/*` 的 readlink 看谁打开着这些 `cpus` 文件（命中 `vendor.xring.hardware.perfflinger.service`）；② **`kill -STOP` 逐个隔离**（可 `-CONT` 恢复、进程不重启）——**冻结 `scene-daemon` 15 秒 → mtime 完全不动**、冻结 perfflinger → 写入照旧 ⇒ **真正持续重写父组的是 scene-daemon**（周期 3~4 秒，只写 `top-app`/`foreground`）。⚠ 同时**纠正 v16.11 的一处错误结论**：以为「父组收到 0-7 后子组写 0-9 会被内核拒（EINVAL）」——**实测是错的**，子组照样能写成 0-9。真正起作用的是 **`effective_cpus` = 与所有祖先取交集**：父组冻在 0-7 后，`main`/`render`/`other`/`trashy`/`boost` 即使写成 0-9，它们的 `effective_cpus` 全是 0-7，**top-app 里 14 个真实进程的 `Cpus_allowed_list` 全是 0-7** ⇒ **只冻父组就压住整棵子树**。`bigcore_guard.sh` 因此新增：`$STATE_DIR/bigcore.intent` 记「应有值」，下一轮**先做回退检测**（必须在裁剪之前，否则永远检测不到）→ 被改回就升级为 `mount --bind` 冻结；`PREFREEZE="top-app foreground"` 第一轮就冻。`restore` 解冻 + 原值写回，**不用重启**。离线测试扩到 **47 断言**（用 `MOUNT_BIN`/`UMOUNT_BIN` + 假挂载表在无 root 环境复现 bind-mount），过程中抓到 3 个静默失败型 bug（`save_orig` 的 grep 判重被路径反斜杠破坏 → restore 用意图值覆盖出厂值；`freeze_cpus` 无条件写 → 破坏幂等；回退检测顺序反了 → 永不冻结） |
+| **v16.12** | ★ **揪出「谁在把 0-9 写回」并冻结父组 —— v16.11 的修复其实会被改回去** —— 真机发现跑完 v16.11 后 `top-app`/`foreground` **几秒内自己变回 0-9**。定位方法（可复用）：① 扫 `/proc/*/fd/*` 的 readlink 看谁打开着这些 `cpus` 文件（命中 `vendor.xring.hardware.perfflinger.service`）；② **`kill -STOP` 逐个隔离**（可 `-CONT` 恢复、进程不重启）——**冻结 `scene-daemon` 15 秒 → mtime 完全不动**、冻结 perfflinger → 写入照旧 ⇒ **真正持续重写父组的是 scene-daemon**（周期 3~4 秒，只写 `top-app`/`foreground`）。⚠ 同时**纠正 v16.11 的一处错误结论**：以为「父组收到 0-7 后子组写 0-9 会被内核拒（EINVAL）」——**实测是错的**，子组照样能写成 0-9。真正起作用的是 **`effective_cpus` = 与所有祖先取交集**：父组冻在 0-7 后，`main`/`render`/`other`/`trashy`/`boost` 即使写成 0-9，它们的 `effective_cpus` 全是 0-7，**top-app 里 14 个真实进程的 `Cpus_allowed_list` 全是 0-7** ⇒ **只冻父组就压住整棵子树**。`bigcore_guard.sh` 因此新增：`$STATE_DIR/bigcore.intent` 记「应有值」，下一轮**先做回退检测**（必须在裁剪之前，否则永远检测不到）→ 被改回就升级为 `mount --bind` 冻结；`PREFREEZE="top-app foreground"` 第一轮就冻。`restore` 解冻 + 原值写回，**不用重启**。⚠ **勘误（v16.16）**：本行原称「离线测试扩到 47 断言」，但那两个测试文件（`test_bigcore_guard.py` / `test_load_aware.py`）**从未进过仓库**，v16.16 才补齐并登记进 `tools/`。过程中抓到 3 个静默失败型 bug（`save_orig` 的 grep 判重被路径反斜杠破坏 → restore 用意图值覆盖出厂值；`freeze_cpus` 无条件写 → 破坏幂等；回退检测顺序反了 → 永不冻结） |
 
-| **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **Scene 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 Scene 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。新增 `test_bigcore_guard.py` **25 断言**（沙盒造假 cpuset 树跑真脚本）。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
+| **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **Scene 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 Scene 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。⚠ **勘误（v16.16）**：本行原称「新增 `test_bigcore_guard.py` 25 断言」，但该文件**从未进过仓库**，v16.16 才补齐。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
 
 | **v16.10** | ★ **修 v16.9 的「越级」bug：负载升级默认不再上超大核** —— 用户实测反馈「应用设为均衡后打开线程显示 **4-9**」。根因是 v16.9 的升级规则写成「基集已含中核时再并 8-9」，而 **`performance` 档的 `other` 本来就是 4-7** → 条件恒真 → 所有忙线程被推上 8-9（真机 40 个目标里 31 个是 performance 档，所以「满屏 4-9」）。这与本项目结论冲突（**C1-Ultra 只在 >2.2GHz 才有能效优势**，而大核频窗 1.1~2.0GHz）。现在忙线程**只并入中核 `{p1_core}`**，升 8-9 改为可选开关 **`LW_HP`（默认 0 = 关）**；另外目标核位**等于基集时不写 hot 条目**（顺带省掉 perf 档应用每 25 秒一次的全线程扫描）。修复后：`powersave`/`balance`(other 0-3) 忙线程 → **0-7**；`performance`(other 4-7) → **无变化**。测试扩到 **22 断言**（新增「不越级」「`LW_HP=1` 才升」） |
 
