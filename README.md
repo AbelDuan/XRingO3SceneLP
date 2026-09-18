@@ -894,6 +894,7 @@ python tools/test_load_aware.py      # 负载感知：四档升级目标 / 阈�
 python tools/test_bigcore_guard.py   # 8-9 封锁：收窄 / 冻结 / 重申 / 按模式生效
 python tools/test_pin_mode.py        # 落核模式默认值（taskset / cgroup 回退）
 python tools/test_sched_cores.py     # 四档核心集合可自定义（读写往返 + 合法性）
+python tools/test_webui_render.py    # WebUI 五个视图无头渲染（防运行时错误）
 bash   tools/test_sync_skip.sh       # 升级覆盖语义
 python tools/build_module.py         # 打 zip + tgz
 python tools/build_module.py --check # 打包前先跑一遍离线自检套件（lint + 测试）
@@ -907,6 +908,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | `tools/test_bigcore_guard.py` | 假 cpuset 树 + 假 mount/umount 跑**真脚本**：收窄 / 原值存出厂值 / **冻结值重申** / **按模式生效（极速解冻）** / restore / 幂等 | 25 断言 |
 | `tools/test_pin_mode.py` | 落核模式解析：默认 taskset / `pin_cgroup` 标记回退 group / 环境变量覆盖 / taskset 下清理遗留组树 | 8 断言 |
 | `tools/test_sched_cores.py` | 四档核心集合可自定义：缺省不行为变化 / 覆盖生效 / 只收 5 个合法集合 / 目标含 8-9 必须允许上探 / 损坏文件回落 / **后端读写列序往返** | 35 断言 |
+| `tools/test_webui_render.py` | 把 index.html 的脚本抽到 Node + 最小 DOM 里跑**真实渲染函数**：五个视图都不得抛异常且返回非空 HTML；模式页核心集合区块真的渲染出来（≥8 个选择器）；静态断言禁止用 `esc` 当局部变量名 | 8 断言 |
 | `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
 | `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，任一失败就中止打包 | — |
 
@@ -927,6 +929,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 ## 10. 版本历史
 
 | 版本 | 主要内容 |
+| **v16.21** | ★ **修「模式页打不开」** —— v16.18 加核心集合编辑器时，把局部变量命名为 `esc`，**遮蔽了全局转义函数 `esc()`**；下一行 `esc(cn)` 变成"调用字符串"，`viewModes()` 抛 `TypeError: esc is not a function`，整个模式页白屏。`lint_module.py` 只做静态检查（语法/接线/data-act 覆盖），**抓不到这种运行时错误** —— 现在新增 **`tools/test_webui_render.py`**：把 index.html 的内联脚本抽到 Node + 最小 DOM 里，**真实调用五个视图函数**，断言都不抛异常且返回非空 HTML、模式页核心集合区块确实渲染（≥8 选择器），并静态禁止把 `esc` 当变量名。已做红-绿验证（把实现改回遮蔽写法 → 测试立刻复现 `esc is not a function`）。⚠ 写这个测试时也踩了个坑：Node 的 CommonJS 里顶层函数**不是 `globalThis` 属性**，必须按名字直接调用（用 `global[v]` 动态取会让五个视图全报 NOT_A_FUNCTION）|
 | **v16.20b** | ★ **修「WebUI 一直显示 16.12」+ 刷入强制更新** —— 两个真问题：<br>① **前端版本号是硬编码的**：`webroot/index.html` 的标题栏写着 `16.12`，而构建脚本只从 `module.prop` 取版本做**文件名**，从不注入前端 → 模块升到 16.20、界面上仍显示 16.12。现在 `build_module.py` 在**写 zip 时**把 `id="ver"` 的内容替换成 `module.prop` 的版本（**不写源文件**，版本号单一来源），并在构建输出里报告 `已注入版本号`。<br>② **同版本刷入不会更新**：就地合并（免重启自愈）的判据是 `暂存 versionCode > 当前 versionCode`，所以 versionCode 相同就**什么都不做**。本次把 versionCode 提到 `2026091820`（设备原为 `2026091818`）→ 刷入即强制合并。<br>另修一处**静默失败隐患**：自愈合并后的权限恢复只匹配 `*.sh`，而事件驱动辅助是**编译好的 ELF（无 .sh 后缀）**——丢了可执行位会让 `service.sh` 静默跳过它。已在两处自愈分支 + `customize.sh` 显式 `chmod 0755`。<br>验证：包内 `module.prop`=16.20/2026091820、`index.html` 版本行已注入为 16.20、`pinwatch` 二进制 sha256 与源文件**逐字节一致**（ELF 头正确、未被 CRLF 破坏）、可执行位三处齐备（文件系统/git 索引 `100755`/zip 条目 `0755`）、包内全部 `sh -n` 通过、构建闸门 5 套件全绿 |
 | **v16.20** | ★ **pinwatch 目标表刷新策略修正** —— 实测发现 `pinwatch` 可能比守护更早启动，此时 `$TMPD/t.tids`（目标进程表）还没生成，内核侧过滤集合为空 → **一个事件都收不到**；而原来的 60s 刷新周期会让这个「空窗口」持续一分钟。改为**每 10s 刷新 + 表为空时下一轮立即重试**。同时把守护重启后 pinwatch 常驻进程的激活路径真机验证通过（守护 1 个 + pinwatch 常驻 1 个 + helper 在跑） |
 | **v16.19** | ★ **事件驱动落核（eBPF raw_tracepoint）** —— 补上 taskset 模式唯一的硬缺口：**新线程的亲和性不继承**（实测父线程绑 0-3、新建线程 `allowed=0-9`），过去要等守护 work 轮（前台变化才触发）或最长 **120s** 的兜底轮。现在 `Scripts/4+4+2/O3/pinwatch`（freestanding C，静态 aarch64，5.8KB）用 **eBPF raw_tracepoint 挂 `sched_process_fork`**：内核侧判断父进程是否在「目标进程表」里，命中就把事件写进 ringbuf；用户态 `pinwatch.sh` 消费事件、做频次闸门（同进程 3s 内只落一次），再对**涉及的包**跑一次 `enforce_threads.sh <pkg>` —— **策略仍全部在 shell**（四档语义/模板/负载感知零重复实现），eBPF 侧只回答「谁 fork 了」。接入：`service.sh` 起常驻循环、`guard.sh` 每个 work 轮消费一次（无事件时开销≈读一个行数）。关闭：`touch $STATE_DIR/pinwatch_off`；二进制缺失或内核不支持时自身静默退出，不影响主流程。<br>⚠ 开发记录（值得记的坑）：① `raw_tracepoint_open` **必须**用 `BPF_PROG_TYPE_RAW_TRACEPOINT(17)`，用 `TRACEPOINT(5)` 会 EINVAL；而 `perf_event_open`+`PERF_EVENT_IOC_SET_BPF` 那条在本机 `perf_event_paranoid=2` 下是 **EACCES**。② 本内核 `sched_process_fork` 的 tracepoint 布局是 `__data_loc`（`parent_pid@12`/`child_pid@20`），与老源码的固定数组（24/44）**完全不同**，照抄偏移必错。③ 事件文件必须 `O_APPEND`（启动时 `O_TRUNC` 会让消费者的「已读位置」失效 → 丢事件）。④ 已用 BTF 解析器验出 `task_struct` size=4736 / `pid@1816` / `tgid@1820`（备用：需要内核侧读 pid 时可直接用）。<br>⚠ 当前限制：payload 的 tid 字段目前**等于父 pid**（`bpf_get_current_pid_tgid()` 在 raw_tp 里返回的是父进程自己的 tid），所以落核以**包**为单位而非精确到 tid —— 效果一样（都是毫秒级、整包线程一起修正），代价是该包线程多扫一次。精确到 tid 需读 ctx 的 child `task_struct*` + `bpf_probe_read_kernel`（offset 已备），留待后续 |

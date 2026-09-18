@@ -1534,11 +1534,11 @@ function viewModes() {
     const raw = SC['SC_' + k];
     if (!raw) return '';
     const p2 = raw.split('|');
-    const cn = p2[0] || MODE_CN[k], base = p2[1] || '0-3', esc = p2[2] || '-';
+    const cn = p2[0] || MODE_CN[k], base = p2[1] || '0-3', escv = p2[2] || '-';
     return '<tr class="' + (k === cur ? 'cur' : '') + '">' +
       '<td class="mn"><b>' + esc(cn) + '</b><br><span class="mono">' + esc(k) + '</span></td>' +
       '<td>' + scOpts(k, 'base', base) + '</td>' +
-      '<td>' + scOpts(k, 'esc', esc) + '</td></tr>';
+      '<td>' + scOpts(k, 'esc', escv) + '</td></tr>';
   }).join('');
 
   const cell = (k, st, c) => {
