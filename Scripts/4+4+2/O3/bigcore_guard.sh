@@ -341,25 +341,36 @@ do_restore() {
 }
 
 # ------------------------------------------------------------
-#  【按模式生效】（v16.13）—— 必须在 do_restore 等函数定义**之后**
+#  【按模式生效】（v16.13 · v16.24 改为按前台应用）—— 必须在 do_restore 之后
 #    fast（极速）档的设计是「高负载线程上探 4-9」，所以**不能**再把 8-9 锁掉：
 #    否则 load_aware 算出来的 4-9 目标写进 cpus 后，effective_cpus 仍被锁在 0-7，
 #    高负载线程根本上不去 —— v16.12 在真机上「机制是死的」正是这个状态
 #    （实测：bigcore.frozen 里挂着 6 个组、后备文件被写成 0-9、bigcore.log 停在 19:27）。
-#    模式判断用 Scene 的 state（用户选中的模式），方案名兜底 —— 与 lib/util.sh 的
-#    scene_current_mode() 同一套逻辑；本脚本不 source util.sh（保持独立可测）。
 #  其余模式（省电/流畅/性能）继续锁 0-7：符合「性能档 8-9 留给系统」的语义。
 #  ⚠ 只解冻一次（标记 $ST/bigcore.mode.fast），避免 5 秒一轮反复 umount/写回。
+#
+#  ★★ v16.24 修一个真机事故（2026-09-19）：极速是**逐应用**设的，但这里原来只按
+#     「全局模式 / 方案名」判 —— 设备装的方案是 sweet_hq（兜底映射 performance），
+#     于是**前台应用即使在 Scene 里被设成极速，8-9 仍被锁在 0-7**：极速档的高频
+#     （cpu8 4358400）只存在于 8-9 上，用户永远看不到 → 报「设为极速但频率上不去」。
+#     现在优先用 FG_MODE（由 guard.sh 按**前台应用**解析后传入），全局模式/方案名
+#     只作兜底（开机 service.sh 直接调本脚本、或无前台应用时）。
 # ------------------------------------------------------------
 CUR_MODE=""
+# ① 前台应用的档位（guard.sh 用 lib/util.sh 的 scene_app_mode 解析）
+case "${FG_MODE:-}" in
+  powersave|balance|performance|fast) CUR_MODE="$FG_MODE" ;;
+esac
+# ② 兜底：Scene 的 state（用户选中的全局模式）
 _sf="${SCENE_DIR:-/data/data/com.omarea.vtools/files}/state"
-if [ -r "$_sf" ]; then
+if [ -z "$CUR_MODE" ] && [ -r "$_sf" ]; then
     while IFS= read -r _m || [ -n "$_m" ]; do
         case "$_m" in
           powersave|balance|performance|fast) CUR_MODE="$_m"; break ;;
         esac
     done < "$_sf"
 fi
+# ③ 兜底：方案名
 if [ -z "$CUR_MODE" ]; then
     case "$(cat "$ST/active_scheme" 2>/dev/null)" in
       sweet_eco)  CUR_MODE="powersave" ;;

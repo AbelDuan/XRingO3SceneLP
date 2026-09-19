@@ -258,7 +258,12 @@ while :; do
         #   它读 cpus 全用 shell 内建 read（0 fork），只在需要改时才写，所以放在
         #   work 轮里几乎不花钱；另加「每 12 轮（60s）兜底」防外部改回去。
         if [ "$WORK" = "1" ] || [ $(( ROUND % 12 )) -eq 0 ]; then
-            sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
+            # ★ v16.24：8-9 要不要锁，按**前台应用的 Scene 档位**定（极速=解封）。
+            #   ⚠ 不能用全局模式/方案名 —— 那会让「某应用设成极速」永远拿不到大核：
+            #     设备装的 sweet_hq 兜底映射 performance，于是逐应用极速必然失效。
+            #   scene_app_mode 写全局变量（不 fork），拿不到时回落全局默认。
+            scene_app_mode "$FG"; FG_MODE="$SCENE_APP_MODE"
+            FG_MODE="$FG_MODE" sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
         fi
 
         # ---- 7) 频率：**不再由本模块处理** ----

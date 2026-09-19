@@ -76,7 +76,7 @@ class Sandbox:
     def set_scheme(self, s):
         io.open(os.path.join(self.st, "active_scheme"), "w").write(s + "\n")
 
-    def run(self, *args):
+    def run(self, *args, **kw):
         env = dict(os.environ)
         env.update({
             "STATE_DIR": self.st, "CG_ROOT": self.cg,
@@ -85,6 +85,7 @@ class Sandbox:
             "UMOUNT_BIN": os.path.join(self.bin, "umount"),
             "SCENE_DIR": os.path.join(self.dir, "scene"),
         })
+        env.update(kw.get("env") or {})
         r = subprocess.run(["sh", GUARD] + list(args), env=env,
                            capture_output=True, text=True)
         return (r.stdout or "") + (r.stderr or ""), r.returncode
@@ -167,6 +168,24 @@ def main():
     check(not os.path.exists(os.path.join(s.st, "bigcore.mode.fast")), "切回性能档已清标记")
     check(s.cpus("top-app") == "0-7", "性能档重新封锁（top-app=%s）" % s.cpus("top-app"))
 
+    print("\n[5b] ★★ 前台应用档位优先于「全局模式 / 方案名」")
+    #  背景（真机事故 2026-09-19）：极速是**逐应用**设的，但 bigcore_guard 只按
+    #  全局模式或方案名判（sweet_hq → performance）→ 前台应用即使在 Scene 里被设成
+    #  极速，8-9 仍被锁在 0-7，极速档的高频（cpu8 4358400）永远拿不到。
+    #  修法：guard.sh 按**前台应用**的 Scene 档位解析，用 FG_MODE 传给本脚本。
+    s.set_scheme("sweet_hq")            # 方案名兜底 = performance（原本会锁）
+    s.run("quiet", env={"FG_MODE": "fast"})
+    check(os.path.exists(os.path.join(s.st, "bigcore.mode.fast")),
+          "前台应用=极速 → 打 mode.fast 标记（方案是 sweet_hq 也不影响）")
+    check(s.mount_count() == 0, "前台应用=极速 → 已解冻（挂载数 %d）" % s.mount_count())
+    check(s.cpus("top-app") == "0-9", "前台应用=极速 → top-app 放开 0-9（实际 %s）" % s.cpus("top-app"))
+    s.run("quiet", env={"FG_MODE": "balance"})
+    check(not os.path.exists(os.path.join(s.st, "bigcore.mode.fast")),
+          "前台应用=均衡 → 清掉 mode.fast 标记")
+    check(s.cpus("top-app") == "0-7", "前台应用=均衡 → 重新封锁（top-app=%s）" % s.cpus("top-app"))
+    s.run("quiet", env={"FG_MODE": ""})     # 空 = 退回全局/方案兜底
+    check(s.cpus("top-app") == "0-7", "FG_MODE 为空 → 仍走方案兜底封锁（%s）" % s.cpus("top-app"))
+
     print("\n[6] restore：解冻 + 原值写回 + 清清单")
     out, _ = s.run("restore")
     check(s.mount_count() == 0, "挂载已全部解除（%d）" % s.mount_count())
@@ -182,11 +201,42 @@ def main():
     check(s2.cpus("top-app") == "0-9", "存在 allow_bigcore 时不动任何组")
     check(s2.mount_count() == 0, "不建立挂载")
 
-    print("\n[8] 静态检查：极速档判断用的是 Scene state 或方案名兜底")
+    print("\n[8] 静态检查：档位来源必须是「前台应用」，兜底才是 state/方案名")
     text = io.open(GUARD, encoding="utf-8").read()
-    check("scene_current_mode" in text or "state" in text and "sweet_perf" in text,
-          "有模式判断（state / active_scheme 兜底）")
+    check("FG_MODE" in text, "bigcore_guard.sh 接受 FG_MODE（前台应用档位）")
+    check("FG_MODE" in text and text.index("FG_MODE") < text.index("active_scheme"),
+          "FG_MODE 的判断**排在**方案名兜底之前（前台应用优先）")
+    check("sweet_perf" in text, "仍保留方案名兜底（开机/独立调用时用）")
     check("bigcore.mode.fast" in text, "有「已解冻」标记，避免每轮反复 umount")
+
+    print("\n[9] util.sh：scene_app_mode 按前台应用解析档位（退化时回全局默认）")
+    pdir = os.path.join(s.dir, "prefs")
+    os.makedirs(pdir, exist_ok=True)
+    io.open(os.path.join(pdir, "powercfg.xml"), "w", encoding="utf-8").write(
+        "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n<map>\n"
+        '    <string name="*">balance</string>\n'
+        '    <string name="com.a.fast">fast</string>\n'
+        '    <string name="com.b.igoned">igoned</string>\n'
+        "</map>\n")
+    util = os.path.join(MOD, "lib", "util.sh")
+
+    def app_mode(pkg):
+        env = dict(os.environ)
+        env["SCENE_PREFS_DIR"] = pdir
+        r = subprocess.run(
+            ["sh", "-c",
+             '. "%s" >/dev/null 2>&1\nscene_app_mode "$1"\nprintf %%s "$SCENE_APP_MODE"' % util,
+             "x", pkg],
+            env=env, capture_output=True, text=True)
+        return (r.stdout or "").strip()
+
+    check(app_mode("com.a.fast") == "fast", "显式设过极速 → fast（实际 %r）" % app_mode("com.a.fast"))
+    check(app_mode("com.c.unset") == "balance", "没设过的包 → 回全局默认（实际 %r）" % app_mode("com.c.unset"))
+    check(app_mode("com.b.igoned") == "balance", "igoned/none 等非档位值 → 回全局默认（实际 %r）" % app_mode("com.b.igoned"))
+
+    gtext = io.open(os.path.join(MOD, "Scripts", "4+4+2", "O3", "guard.sh"), encoding="utf-8").read()
+    check("scene_app_mode" in gtext and "FG_MODE=" in gtext,
+          "guard.sh 用 scene_app_mode 解析前台档位并传给 bigcore_guard")
 
     print("\n" + "=" * 62)
     if FAILS:

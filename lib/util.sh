@@ -1614,11 +1614,13 @@ gen_app_rules_json()  {
 }
 
 # ---------- 从 Scene 读取「应用 → 模式」与「游戏名单」----------
-SCENE_PREFS_DIR="/data/data/com.omarea.vtools/shared_prefs"
+# ⚠ 用 ${VAR:-默认} 而不是硬赋值：硬赋值会让沙盒测试**静默地**去读真机路径
+#   （与 STATE_DIR 踩过的同一个坑），测试就成了假阳性。
+SCENE_PREFS_DIR="${SCENE_PREFS_DIR:-/data/data/com.omarea.vtools/shared_prefs}"
 SCENE_POWERCFG="${SCENE_PREFS_DIR}/powercfg.xml"
 # 哪些应用被 Scene 当作游戏：shared_prefs/games.xml 里 value="true" 的包。
 # ⚠ 这是权威来源（用户在 Scene 里勾的就是它），WebUI 的游戏板块与线程分配都读它。
-SCENE_GAMES_XML="/data/data/com.omarea.vtools/shared_prefs/games.xml"
+SCENE_GAMES_XML="${SCENE_PREFS_DIR}/games.xml"
 
 scene_mode_map() {   # 输出 "pkg<TAB>mode"，含 "*" 全局默认
     [ -f "$SCENE_POWERCFG" ] || return 1
@@ -1629,6 +1631,19 @@ scene_default_mode() {
     local m; m=$(scene_mode_map 2>/dev/null | awk -F'\t' '$1=="*"{print $2}' | head -1)
     mode_valid "$m" || m=balance
     echo "$m"
+}
+
+# 某个包**生效**的档位：先看 powercfg.xml 里它自己设的，没有（或不是合法档位，
+# 如 igoned/none/disabled）就用全局默认。
+# ⚠ 极速是**逐应用**设的：判「该不该解封 8-9」必须用它，不能用全局模式/方案名
+#   —— 否则「某应用设成极速」永远拿不到大核（真机事故 2026-09-19，见 bigcore_guard.sh）。
+# 写法沿用本文件的「零 fork」风格：结果写全局 SCENE_APP_MODE，**不**用 $( ) 取回
+# （guard.sh 的 work 轮不能为了它多 fork 一次，本机一次 fork 约 10~40ms）。
+scene_app_mode() {   # $1=包名 → 全局 SCENE_APP_MODE
+    local m
+    scene_mode_one_read "$1"; m="$SCENE_MODE_ONE"
+    if ! mode_valid "$m"; then m=$(scene_default_mode); fi
+    SCENE_APP_MODE="$m"
 }
 
 # ============================================================
