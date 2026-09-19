@@ -175,6 +175,22 @@ while :; do
         if [ $(( (ROUND - 1) % 6 )) -eq 0 ]; then WORK=1; else WORK=0; fi
     fi
 
+    # ==== 超大核 8-9 封锁：**亮屏每轮都重申**（v16.25）====
+    #  · 8-9 要不要锁，按**前台应用的 Scene 档位**定（极速=解封）。⚠ 不能用全局模式/
+    #    方案名 —— 那会让「某应用设成极速」永远拿不到大核：设备装的 sweet_hq 兜底映射
+    #    performance，于是逐应用极速必然失效（真机事故 2026-09-19）。
+    #  · scene_app_mode 写全局变量、不 fork；拿不到时回落全局默认。
+    #  · ⚠ 为什么必须每轮：原先把调用放在 WORK 块里 → 只有「前台变化 / 每 24 轮(120s)」
+    #    才重申。而 MIUI（system_server 的 cpuset 控制器）会**持续**把 top-app/foreground
+    #    的 cpus 写回 0-9 —— bind 的后备文件正好就在它写的路径上。真机实测：切档后可能
+    #    停在错误状态长达 120s。改成每轮后 ≤5s 内纠正。
+    #  · 代价：每轮多一个 fork（本机 10~40ms / 5s ≈ 0.2~0.8% 单核）；脚本内部读 cpus
+    #    全是 shell 内建、只在需要改时才写，所以值一致时几乎没有额外开销。
+    if [ "$on" = "1" ]; then
+        scene_app_mode "$FG"; FG_MODE="$SCENE_APP_MODE"
+        FG_MODE="$FG_MODE" sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
+    fi
+
     if [ "$WORK" = "1" ]; then
 
         # 只在「真的干活」时记一行（便于用户/我们判断功耗来源；WORK 轮很少）
@@ -255,16 +271,8 @@ while :; do
         #     · top-app/{main,render,other}  Scene「核心分配」按 v8 的 threads.json 写的
         #   bigcore_guard.sh 把这些组的 cpus 收到 0-7；父组一旦收到 0-7，
         #   外部再想给子组写 0-9 会被内核直接拒 → 从根上堵住。
-        #   它读 cpus 全用 shell 内建 read（0 fork），只在需要改时才写，所以放在
-        #   work 轮里几乎不花钱；另加「每 12 轮（60s）兜底」防外部改回去。
-        if [ "$WORK" = "1" ] || [ $(( ROUND % 12 )) -eq 0 ]; then
-            # ★ v16.24：8-9 要不要锁，按**前台应用的 Scene 档位**定（极速=解封）。
-            #   ⚠ 不能用全局模式/方案名 —— 那会让「某应用设成极速」永远拿不到大核：
-            #     设备装的 sweet_hq 兜底映射 performance，于是逐应用极速必然失效。
-            #   scene_app_mode 写全局变量（不 fork），拿不到时回落全局默认。
-            scene_app_mode "$FG"; FG_MODE="$SCENE_APP_MODE"
-            FG_MODE="$FG_MODE" sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
-        fi
+        #
+        #   ⚠ 重申频率（v16.25 修正）：已移到**亮屏每轮**（在 WORK 块之前，见那里）。
 
         # ---- 7) 频率：**不再由本模块处理** ----
         #   CPU 调频权限已交回 Scene（profile.json 的 <mode>_active/inactive @cpu_freq）。

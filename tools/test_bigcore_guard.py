@@ -238,6 +238,34 @@ def main():
     check("scene_app_mode" in gtext and "FG_MODE=" in gtext,
           "guard.sh 用 scene_app_mode 解析前台档位并传给 bigcore_guard")
 
+    print("\n[10] ★ guard.sh：bigcore 重申**每轮都跑**，不得被 WORK 门控")
+    #  真机实测（2026-09-19）：v16.24 把重申放在 WORK 块里 → 只有「前台变化 /
+    #  每 24 轮(120s)」才重申；而 MIUI 会持续把 top-app/foreground 的 cpus 写回
+    #  0-9（bind 的后备文件就在它写的路径上）→ 切档后可能停在错误状态长达 120s。
+    #  这里用 if/fi 配平算嵌套深度：重申调用必须与前台探测 `FG=$(fg_pkg)` **同层**。
+
+    def block_end(text, start):
+        """start 处是 `if ...; then` → 返回配对的 `fi` 下标（按 if/fi 配平）。"""
+        d = 0
+        i = start
+        for line in text[start:].splitlines(True):
+            for tok in line.split("#")[0].replace(";", " ").split():
+                if tok in ("if", "case"):
+                    d += 1
+                elif tok in ("fi", "esac"):
+                    d -= 1
+                    if d == 0:
+                        return i
+            i += len(line)
+        return len(text)
+
+    INVOKE = 'sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh"'
+    check(gtext.count(INVOKE) == 1, "guard.sh 里只有一处**调用**（实际 %d）" % gtext.count(INVOKE))
+    wo = gtext.index('if [ "$WORK" = "1" ]; then')
+    body = gtext[wo:block_end(gtext, wo)]
+    check(INVOKE not in body,
+          "重申调用在 WORK 块**之外**（每轮都跑）—— 在块内就会跟着 120s 兜底才跑")
+
     print("\n" + "=" * 62)
     if FAILS:
         print("\u274c 未通过 %d 项：" % len(FAILS))
