@@ -116,6 +116,7 @@ def run_offline_suite():
         ("test_templates_v15.py", "流畅/性能核位重排迁移"),
         ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
         ("test_pack_hygiene.py", "打包卫生（不得混入自检沙盒）"),
+        ("test_templates_v17.py", "4-5 字面量迁移（已有安装）"),
     ]
     rc = 0
     for f, desc in suite:

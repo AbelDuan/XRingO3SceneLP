@@ -2333,6 +2333,48 @@ migrate_templates_v16() {
     return 0
 }
 
+# ------------------------------------------------------------
+#  v17：把**已存在**档位表里的字面量 4-5 迁回 {p1_core}（=4-7）
+# ------------------------------------------------------------
+#  ⚠ 这条是**上机调试**才发现的漏网（2026-09-22，lhasa）：
+#    v16.26 把 4-5 从「可选核位白名单 / 内置默认 esc / 新装种子 / v15·v16 迁移」里删掉了，
+#    但 `app_templates.tsv` / `game_templates.tsv` 是**模块状态目录里的活数据**，
+#    安装从不覆盖（见本文件上面「真值在模块状态目录」那条注释）。已有安装里那两行是
+#    v16.22 时代写下的**字面量** `4-5`（不是占位符），而没有任何迁移去改它。
+#    真机证据：v17.1 刷入后 `t.targets` 里 232 个目标仍有 **158 个** heavy_cores=4-5 ——
+#    也就是说「纯负收益、已彻底删除」的那套绑核**还在 158 个应用上生效**。
+#  · 只改**内置行**（powersave/balance/performance/fast），用户自建行一律不动
+#    —— 与 v15/v16 迁移同一惯例。
+#  · 两处都要改：heavy_cores 列，以及 comm 列里的 `4-5=RenderThread,...`。
+#  · 改完由守护重算 threads.json，落核自动跟上。
+TPL_V17_MARK="${STATE_DIR}/tpl_v17"
+migrate_templates_v17() {
+    [ -f "$TPL_V17_MARK" ] && return 0
+    mkdir -p "${STATE_DIR}/backup" "${TMPD}" 2>/dev/null
+
+    local f out n=0
+    for f in "$APP_TPL_FILE" "$GAME_TPL_FILE"; do
+        [ -f "$f" ] || continue
+        case "$f" in */*) ;; *) continue ;; esac
+        grep -q '4-5' "$f" 2>/dev/null || continue
+        cp -f "$f" "${STATE_DIR}/backup/$(basename "$f").pre-v17" 2>/dev/null
+        out="${TMPD}/tpl.v17.$(basename "$f")"
+        awk -F'\t' -v OFS='\t' '
+            /^#/ || NF < 2 { print; next }
+            $1 ~ /^(powersave|balance|performance|fast)$/ { gsub(/4-5/, "{p1_core}") }
+            { print }
+        ' "$f" > "$out" 2>/dev/null
+        if [ -s "$out" ] && ! cmp -s "$out" "$f"; then
+            write_replace "$out" "$f" && chmod 0666 "$f" 2>/dev/null && n=$((n+1))
+        fi
+        rm -f "$out" 2>/dev/null
+    done
+
+    : > "$TPL_V17_MARK" 2>/dev/null
+    [ "$n" -gt 0 ] && log_quiet "webui: 档位表已升级到 v17（内置行的字面量 4-5 → {p1_core}，改了 ${n} 张表）"
+    return 0
+}
+
 # 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
 #   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
 #   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
