@@ -50,8 +50,20 @@ write_pids() {
 }
 
 # 事件 → 包名（与 enforce_threads 的匹配口径一致：cmdline 第一段）
+#
+# ⚠ 2026-09-21 修复：原写法 `tr '\0' '\n' < /proc/$1/cmdline | head -1` 把 toybox tr 的
+#   stdin 直接接到 /proc 文件。eBPF 报上来的是 **fork 事件里的短命进程**，等这里去读时
+#   它常常已经没了，此时 read() 返回 -ESRCH（No such process）；而本机 /system/bin/tr 是
+#   **toybox 0.8.13**，它不把负数返回当作输入结束 —— 原地空转，永不退出。
+#   真机实测（lhasa，两个卡住实例）：rchar 冻结 / wchar=0 / syscr ≈ 500 万次每秒 /
+#   state=R，单个 tr 吃 ~94% 单核；因为它在 $( ) 里，consume() 永不返回 → 事件循环连同
+#   调用它的 guard.sh 一起僵死，且每命中一次就永久烧掉一个核（开机自启后一直在烧）。
+#   对照实测：cat 会报 "No such process" 后正常退出，head 正常退出，**只有 tr 死循环**。
+#   根因是结构性的：tr 的 stdin 直连 /proc 文件时，出错后没有任何东西能给它 EOF。
+#   改法：让 cat 去开 /proc 文件，tr 只吃普通管道 —— cat 一出错退出，管道写端关闭，
+#   tr 立刻读到 EOF 正常退出。匹配语义完全不变。回归测试：tools/test_pinwatch.py
 pkg_of() {
-    _c=$(tr '\0' '\n' < "/proc/$1/cmdline" 2>/dev/null | head -1)
+    _c=$(cat "/proc/$1/cmdline" 2>/dev/null | tr '\0' '\n' | head -1)
     [ -n "$_c" ] || _c=$(cat "/proc/$1/comm" 2>/dev/null)
     printf '%s' "$_c"
 }
