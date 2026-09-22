@@ -22,10 +22,21 @@ DIST = os.path.join(SRC, "dist")
 # 这些不该进包
 SKIP_DIRS = {".git", "dist", "tools", "__pycache__", ".github"}
 SKIP_FILES = {".gitignore", ".gitattributes", "LICENSE", ".DS_Store", "Thumbs.db"}
+# ⚠ 自检沙盒：tools/test_*.py 与 test_sync_skip.sh 会在**仓库根**建临时目录，
+#   .gitignore 明确忽略了它们（测试故意不 rmtree，见 .gitignore 里的说明），
+#   但**本文件不读 .gitignore** —— 而 `--check` 正是「先跑自检、再打包」，
+#   于是 --check 打出来的包必然把沙盒一起装进去（实测 v17.1：84 → 139 条目）。
+#   ⚠ 改这里时同步改 .gitignore；两边口径由 tools/test_pack_hygiene.py 锁住。
+SKIP_PREFIXES = (".test_", "_t_", "_rep_", "scratch")
+
+
+def skip_dir(name):
+    return name in SKIP_DIRS or name.startswith(SKIP_PREFIXES)
 
 
 def skip(name):
-    return name in SKIP_FILES or ".bak-" in name
+    return (name in SKIP_FILES or ".bak-" in name
+            or name.startswith(SKIP_PREFIXES) or name.endswith(".pyc"))
 
 
 def module_version():
@@ -74,7 +85,7 @@ def collect():
     """先只收集 (绝对路径, 相对路径)，不写包 —— 便于先跑闸门。"""
     out = []
     for root, dirs, files in os.walk(SRC):
-        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        dirs[:] = [d for d in dirs if not skip_dir(d)]
         for f in files:
             if skip(f):
                 continue
@@ -104,6 +115,7 @@ def run_offline_suite():
         ("test_webui_render.py", "WebUI 渲染（无头）"),
         ("test_templates_v15.py", "流畅/性能核位重排迁移"),
         ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
+        ("test_pack_hygiene.py", "打包卫生（不得混入自检沙盒）"),
     ]
     rc = 0
     for f, desc in suite:
