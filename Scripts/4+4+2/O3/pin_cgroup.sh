@@ -92,12 +92,15 @@ _evacuate() {   # $1 = 要腾空的组目录
 }
 
 # 把一个 slug（或全部）的树腾空 + 删掉。线程还活着/占用中就先留着，下一轮再收。
+#  ⚠ 跳过 nobig：那是 v17 的「自有受限组」（bigcore_guard.sh 维护），不是 pin_cgroup
+#    的每包子树，--unbind-all 不能误删它（否则 taskset 模式的迁移失去落点）。
 _unbind_tree() {
     [ -d "$CROOT" ] || return 0
     _sel="$1"
     for _d in "$CROOT"/*/; do
         [ -d "$_d" ] || continue
         _s=${_d%/}; _s=${_s##*/}
+        [ "$_s" = "nobig" ] && continue
         [ -n "$_sel" ] && [ "$_s" != "$_sel" ] && continue
         for _sub in "$_d"*/; do [ -d "$_sub" ] && _evacuate "${_sub%/}"; done
         _evacuate "${_d%/}"

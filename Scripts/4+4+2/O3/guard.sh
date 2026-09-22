@@ -175,20 +175,16 @@ while :; do
         if [ $(( (ROUND - 1) % 6 )) -eq 0 ]; then WORK=1; else WORK=0; fi
     fi
 
-    # ==== 超大核 8-9 封锁：**亮屏每轮都重申**（v16.25）====
-    #  · 8-9 要不要锁，按**前台应用的 Scene 档位**定（极速=解封）。⚠ 不能用全局模式/
-    #    方案名 —— 那会让「某应用设成极速」永远拿不到大核：设备装的 sweet_hq 兜底映射
-    #    performance，于是逐应用极速必然失效（真机事故 2026-09-19）。
-    #  · scene_app_mode 写全局变量、不 fork；拿不到时回落全局默认。
-    #  · ⚠ 为什么必须每轮：原先把调用放在 WORK 块里 → 只有「前台变化 / 每 24 轮(120s)」
-    #    才重申。而 MIUI（system_server 的 cpuset 控制器）会**持续**把 top-app/foreground
-    #    的 cpus 写回 0-9 —— bind 的后备文件正好就在它写的路径上。真机实测：切档后可能
-    #    停在错误状态长达 120s。改成每轮后 ≤5s 内纠正。
-    #  · 代价：每轮多一个 fork（本机 10~40ms / 5s ≈ 0.2~0.8% 单核）；脚本内部读 cpus
-    #    全是 shell 内建、只在需要改时才写，所以值一致时几乎没有额外开销。
+    # ==== 超大核 8-9 限制（v17 · 自有 cpuset 组，无每轮打架）====
+    #  · bigcore_guard.sh 自建 /dev/cpuset/SceneO3Tuner/nobig（cpus=0-7），
+    #    由 enforce_threads.sh 把**受管进程**迁进去；top-app/foreground 完全不碰
+    #    → 不再与 scene-daemon（每 3~4s 回写 0-9）互相打架（v16 常驻高占用/卡顿根因）。
+    #  · 本调用只是**幂等维护** nobig 组（读 2 文件、按需写 2 次，≈0 fork），
+    #    不再扫 15 个系统组、不再每轮写后备文件。每轮跑很便宜。
+    #  · 极速档（要上 8-9）的逐应用放行在 enforce_threads 里按目标核位判定，
+    #    本脚本无需感知前台档位。
     if [ "$on" = "1" ]; then
-        scene_app_mode "$FG"; FG_MODE="$SCENE_APP_MODE"
-        FG_MODE="$FG_MODE" sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
+        sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
     fi
 
     if [ "$WORK" = "1" ]; then

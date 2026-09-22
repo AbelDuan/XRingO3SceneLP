@@ -58,6 +58,8 @@ migrate_templates_v13
 migrate_templates_v14
 # v15：流畅 主/渲染 → 4-5；性能 轻线程 → 0-3（按本机 4-7 共频实测重排）
 migrate_templates_v15
+# v16：性能 轻线程 → 0-7（修「澎湃桌面 4 被卡 0-3 小核 → 70% CPU + 锁 90Hz」）
+migrate_templates_v16
 
 # 3) 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 if [ -f "$SCENE_POWERCFG" ]; then

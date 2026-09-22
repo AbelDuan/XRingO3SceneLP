@@ -1914,7 +1914,7 @@ seed_game_templates() {
     #   其余真·高负载线程由 load_aware 按实测占用率上探 4-9。
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
     printf 'balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n'
-    printf 'performance\t性能\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
+    printf 'performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
     printf 'fast\t极速\t{e_core},{p1_core}\t\t{p_core}\tUnityGfx\t{p_core}\t\n'
   } > "$GAME_TPL_FILE" 2>/dev/null
   chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
@@ -2239,6 +2239,81 @@ migrate_templates_v15() {
     return 0
 }
 
+# ============================================================
+#  档位迁移 v16（2026-09-22）—— 「性能」档放开轻线程到 0-7
+# ------------------------------------------------------------
+#  【真机实测根因：桌面被卡死在小核】
+#    v15 给「性能」档的 other 是 {e_core}（0-3 纯小核），heavy 只有 RenderThread→4-7。
+#    但 com.miui.home（澎湃桌面 4，Flutter + Rust，102 线程）被分在 performance 档 ——
+#    它的渲染线程叫 2.raster / rt-launcher-main / hp-frb，**不在 RenderThread 里**，
+#    于是 102 个线程**全部**落在 0-3。
+#    实测（lhasa / 2026-09-22，v16.25 在跑）：
+#        com.miui.home  Cpus_allowed_list = 0-3，102 线程全 0-3
+#        top: com.miui.home 70.9% CPU、surfaceflinger 48%、composer3 29%
+#        → 桌面渲染管线在小核上追不上 → 狂占 CPU → 掉帧卡顿
+#        → HyperOS 智能刷新率检测到异常占用 → **锁 90Hz**（用户观察到的症状）
+#    A/B 验证（同机、手改 affinity）：把桌面放开到 0-7 后 20s，
+#        com.miui.home 从 70.9% 掉出 top10（<3.5%），surfaceflinger 50% 保持。
+#    ⇒ 根因坐实：**0-3 这 4 个小核扛不住 Flutter 架构桌面的渲染管线**。
+#
+#  【为什么放开到 0-7 而不是 4-9】
+#    · 桌面是常驻前台，给它 8-9 会长期霸占仅有的 2 个超大核（热与功耗都不划算）；
+#    · 0-7 = 小核 + 中核，渲染线程有 4 个中核可用，轻线程仍留小核 → 能效与流畅兼顾；
+#    · 与 WebUI 模型（webui_model.seed.json 的 performance.cpuset: main=0-7/other=0-7）
+#      **本来就是一致的** —— 落后的是 tsv 种子，这次把两处对齐。
+#
+#  【同时修正】heavy_thread 从只认 RenderThread 扩展：
+#    Flutter/Rust 桌面的光栅线程是 2.raster（Chromium 风格命名），加上它才能让
+#    光栅化线程稳定落在中核。旧表里 heavy 只有 RenderThread，桌面对不上。
+#
+#  幂等：$STATE_DIR/tpl_v16 标记；只改 performance 一行；旧表备份到 backup/*.pre-v16。
+#  ⚠ 重写内容必须与 seed_app_templates() 逐字一致。
+# ============================================================
+TPL_V16_MARK="${STATE_DIR}/tpl_v16"
+
+migrate_templates_v16() {
+    [ -f "$TPL_V16_MARK" ] && return 0
+    mkdir -p "${STATE_DIR}/backup" 2>/dev/null
+
+    # ---- 应用表：performance 档轻线程 0-3 → 0-7，并补 Flutter 光栅线程 ----
+    if [ -f "$APP_TPL_FILE" ]; then
+        cp -f "$APP_TPL_FILE" "${STATE_DIR}/backup/$(basename "$APP_TPL_FILE").pre-v16" 2>/dev/null
+        awk -F'\t' '
+          /^#/ { print; next }
+          $1 == "performance" {
+              printf "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tRenderThread,2.raster,rt-launcher\t{p1_core}\t\n"
+              next
+          }
+          { print }
+        ' "$APP_TPL_FILE" > "${TMPD}/tpl.v16.app" 2>/dev/null
+        if [ -s "${TMPD}/tpl.v16.app" ] && ! cmp -s "${TMPD}/tpl.v16.app" "$APP_TPL_FILE"; then
+            write_replace "${TMPD}/tpl.v16.app" "$APP_TPL_FILE" && chmod 0666 "$APP_TPL_FILE" 2>/dev/null
+        fi
+        rm -f "${TMPD}/tpl.v16.app" 2>/dev/null
+    fi
+
+    # ---- 游戏表：同步放开轻线程（游戏后台/加载线程同样受益，主线程核位不动）----
+    if [ -f "$GAME_TPL_FILE" ]; then
+        cp -f "$GAME_TPL_FILE" "${STATE_DIR}/backup/$(basename "$GAME_TPL_FILE").pre-v16" 2>/dev/null
+        awk -F'\t' '
+          /^#/ { print; next }
+          $1 == "performance" {
+              printf "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n"
+              next
+          }
+          { print }
+        ' "$GAME_TPL_FILE" > "${TMPD}/tpl.v16.game" 2>/dev/null
+        if [ -s "${TMPD}/tpl.v16.game" ] && ! cmp -s "${TMPD}/tpl.v16.game" "$GAME_TPL_FILE"; then
+            write_replace "${TMPD}/tpl.v16.game" "$GAME_TPL_FILE" && chmod 0666 "$GAME_TPL_FILE" 2>/dev/null
+        fi
+        rm -f "${TMPD}/tpl.v16.game" 2>/dev/null
+    fi
+
+    : > "$TPL_V16_MARK" 2>/dev/null
+    log_quiet "webui: 档位表已升级到 v16（性能档轻线程 0-3 → 0-7，修桌面被卡小核）"
+    return 0
+}
+
 # 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
 #   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
 #   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
@@ -2336,11 +2411,14 @@ seed_app_templates() {
     # 流畅（v16.22）：轻线程 0-3；主线程/渲染线程并到 **4-5**（2 核够日常偏重，更省电）。
     #   4-5 不在 WebUI 的 5 个可选值里 —— 用户要自定义仍用原来的选项，改的是内置默认。
     printf 'balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n'
-    # 性能：王者荣耀/金铲铲这类中低要求游戏 —— 其余线程也升到 Premium(4-7)，
+    # 性能：王者荣耀/金铲铲这类中低要求游戏 —— 轻线程给 0-7（含中核），
     #   应对浏览器/WebView/游戏的多进程并发；8-9 不碰（留给系统级任务与热余量）。
-    # 性能（v16.22）：轻线程压 0-3（原来整条都在 4-7，是最费电的一档）；
-    #   主线程/渲染线程并到 **4-7**（4 核余量，给王者/金铲铲这类中低要求游戏）。
-    printf 'performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n'
+    # 性能（v16）：轻线程 {e_core} → **{e_core},{p1_core}（0-7）**。
+    #   原因见 migrate_templates_v16 头部的真机实测：Flutter 架构桌面（澎湃桌面 4）
+    #   的渲染线程名是 2.raster / rt-launcher-main，不在 RenderThread 里 →
+    #   102 线程全落 0-3 → 桌面 70.9% CPU、锁 90Hz。放开中核后掉出 top10。
+    #   heavy 补上 2.raster / rt-launcher（Chromium/Flutter 风格光栅线程名）。
+    printf 'performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tRenderThread,2.raster,rt-launcher\t{p1_core}\t\n'
     # 极速：中低负载线程统一 0-7 由系统分配，**只有高负载线程**由 load_aware
     #   按实测占用率上探 4-9（中核 ∪ 超大核，内核按频率/热状态自选核）。
     #   为什么不整条给 4-9：binding 全进程到 4-9 会让「中低负载线程」也落在中核/大核，

@@ -44,12 +44,21 @@ def sh(script):
     return (r.stdout or ""), (r.stderr or "")
 
 
-APP_NEW = ("balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t"
+# v15 迁移的产出（migrate_templates_v15 负责）
+APP_V15 = ("balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t"
            "{e_core}=Worker,Job,Async,Pool\n"
            "performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n")
+# v16 之后 seed_*_templates 的新默认（seed 只维护一份，必须是**最新**值）
+#   ⚠ 这条只用于 [6] 的「seed 与迁移脚本不漂移」断言：
+#     migrate_templates_v15 产出 v15 值 → 随后 migrate_templates_v16 再升到 v16 值，
+#     两段各司其职。seed 直接给最终值，所以两者不同名不同值是**预期**的。
+APP_NEW = ("balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t"
+           "{e_core}=Worker,Job,Async,Pool\n"
+           "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\t"
+           "RenderThread,2.raster,rt-launcher\t{p1_core}\t\n")
 GAME_NEW = ("balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t"
             "{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n"
-            "performance\t性能\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t"
+            "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t"
             "{e_core}=Audio,FMOD,Http\n")
 # v14 时代的旧值（迁移前）
 APP_OLD = ("balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t"
@@ -142,7 +151,7 @@ def main():
     d, st, tpl, app, game = make_env(old_with_custom)
     run_migration(d, st, tpl, app, game)
     got = rows_of(app, {"balance", "performance"})
-    check(got == APP_NEW, "应用表两档已改为新值（实际：%r）" % got[:60])
+    check(got == APP_V15, "应用表两档已改为 v15 值（实际：%r）" % got[:60])
     custom = rows_of(app, {"myapp"})
     check(custom.strip().endswith("4-7"), "用户自建行未被改动")
     check(os.path.exists(os.path.join(st, "tpl_v15")), "已落 tpl_v15 标记")
@@ -152,14 +161,14 @@ def main():
           "旧表已备份到 $STATE_DIR/backup/*.pre-v15（实际：%s）" % (baks or "空"))
 
     print("\n[4] 幂等：已迁移过（有标记）再跑不动表")
-    d2, st2, tpl2, app2, game2 = make_env(APP_NEW, marker=True)
+    d2, st2, tpl2, app2, game2 = make_env(APP_V15, marker=True)
     before = io.open(app2, encoding="utf-8").read()
     run_migration(d2, st2, tpl2, app2, game2)
     after = io.open(app2, encoding="utf-8").read()
     check(before == after, "有标记时表内容不变")
 
-    print("\n[5] 新表再跑一次迁移也幂等（表已是新值 → 无 diff）")
-    d3, st3, tpl3, app3, game3 = make_env(APP_NEW)
+    print("\n[5] 新表再跑一次迁移也幂等（表已是 v15 值 → 无 diff）")
+    d3, st3, tpl3, app3, game3 = make_env(APP_V15)
     before = io.open(app3, encoding="utf-8").read()
     run_migration(d3, st3, tpl3, app3, game3)
     after = io.open(app3, encoding="utf-8").read()

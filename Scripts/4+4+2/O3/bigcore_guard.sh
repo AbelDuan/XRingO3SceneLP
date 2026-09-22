@@ -1,69 +1,49 @@
 #!/system/bin/sh
 # ============================================================
-#  bigcore_guard —— 让系统 cpuset 组**不使用超大核 8-9**
+#  bigcore_guard —— 禁止「受管线程」使用超大核 8-9（v17 · 自有 cpuset 组）
 # ------------------------------------------------------------
-#  【为什么需要】
-#  用户观察：桌面 / 切换应用时会看到线程掩码是 0-9 和 4-9。
-#  原因**不在本模块的落核**（模块从不把线程放 8-9），而在系统自己的 cpuset 组：
-#    · /dev/cpuset/top-app/cpus        —— 前台大类，出厂 0-9
-#    · /dev/cpuset/foreground/boost    —— 「提权」组，出厂 4-9/0-9
-#    · /dev/cpuset/misf、foreground_window、camera-daemon —— 0-9 / 4-9
-#    · /dev/cpuset/top-app/{main,render,other,trashy} —— Scene 的「核心分配」写的子组
-#  于是**桌面、SystemUI、正在启动的应用**都会用到 8-9。
+#  【v17 重构：不再冻结系统组，改用自己的 cpuset 组】
+#   旧方案（v16）把 /dev/cpuset/top-app、/dev/cpuset/foreground 的 cpus 用
+#   bind 挂载冻到 0-7。但 scene-daemon 每 3~4 秒会把这两个父组写回 0-9，
+#   于是本脚本每 5 秒一轮「重申 0-7」→ 与 scene-daemon **互相打架**：
+#     · 双守护都被对方唤醒，常驻 CPU 占用高、卡顿；
+#     · bigcore.log 每轮记一行「重申 0-9→0-7」，长期刷屏。
+#   实测（lhasa / 2026-09-21）：scene-daemon 累计 CPU 8+ 分钟、bigcore 751 行重申。
 #
-#  【真凶：scene-daemon 会持续把父组写回 0-9】（2026-09-18 实测）
-#  用 SIGSTOP 逐个隔离嫌疑进程：冻结 scene-daemon 15 秒 → cpus 的 mtime **完全不动**；
-#  冻结 vendor.xring.hardware.perfflinger.service（它持有 fd）→ 写入照旧。
-#  ⇒ **写入者是 scene-daemon**，周期约 3~4 秒，且只重写 top-app / foreground 两个父组。
-#  （perfflinger 只是持有这 5 个 cpus 文件的 fd，不是写入者。）
+#   艇长 NetizenNemo/Aether_OptExt 的同款问题用 Rust+eBPF 解决：**不碰系统组**，
+#   自建 /dev/cpuset/OptExt/* 并把受管线程迁进去。本脚本照搬这个思路：
+#     · 自建 /dev/cpuset/SceneO3Tuner/nobig（cpus = 0-7，即在线的 0-7）；
+#     · 只把**本模块受管的进程**迁进 nobig（enforce_threads.sh 负责）；
+#     · top-app / foreground 完全不动 → scene-daemon 无的放矢，打架消失。
+#   线程落在 nobig 后，其 cgroup 预算就是 0-7；enforce_threads 的逐线程 taskset
+#   再把目标与预算取交集，天然把大核 8-9 挡在门外，且新线程自动继承 0-7。
 #
-#  【做法：两步】
-#  ① 裁剪：把各组的 cpus 与「允许集 0-7」取交集（先二级子组、再一级组）。
-#     只在**确实含 8 或 9** 时才写（幂等）。读 cpus 全用内建 read → 0 fork。
-#  ② 冻结：对**会被外部持续重写**的组做 `mount --bind`（后备文件在 $FSDIR/）。
-#     这样外部写进的是后备文件，真实 cgroup 值不再变。
+#  【为什么比冻结更安全】
+#   冻结改的是系统全局组（影响所有 app，含 SystemUI）→ 一旦逻辑出错，整机行为异常；
+#   自有组只影响**本模块登记过的受管进程**，且只限制到 0-7（进程仍能跑，只是不上大核）。
+#   最坏情况（组建不出来）= 不限制，退化为「不过问」，不会让任何进程卡死。
 #
-#  【为什么「冻结父组」就够了 —— cpuset 的 effective_cpus 语义】
-#  ⚠ v16.11 这里写错了：以为「父组收到 0-7 后，外部给子组写 0-9 会被内核拒（EINVAL）」。
-#  **实测是错的** —— 子组的 cpus 照样能写成 0-9（写入返回 0）。
-#  真正起作用的是 **effective_cpus = 与所有祖先取交集**：
-#      top-app/cpus      = 0-7（被我们冻结）
-#      top-app/main/cpus = 0-9（Scene 写的）
-#      → main 的 effective_cpus = 0-7，实际跑在上面的进程 Cpus_allowed_list:0-7 ✓
-#  实测印证：故意把 main/render/other/trashy/boost 全写成 0-9，
-#  它们的 effective_cpus 全部是 0-7，top-app 里 8 个真实进程的
-#  Cpus_allowed_list 全是 0-7。⇒ **冻结父组即可压住整棵子树**。
+#  【极速档（需要 8-9）怎么办】
+#   旧方案是「极速时解冻 top-app」。现在改为**逐应用**判定：enforce_threads.sh 看到
+#   某应用的目标核位含 8/9（fast 档）→ 不把它迁进 nobig，留在 top-app（预算 0-9），
+#   于是 taskset 可以设到 4-9。切换档位时再迁回 nobig。无需本脚本感知模式。
 #
-#  【自动升级冻结】
-#  每轮把「应有值」记到 $INTENT；下一轮若发现某组的 cpus 与它不符（被外部改回），
-#  就把该组升级为冻结。所以即使换手机 / Scene 改了行为，也会在 1~2 轮内自动锁住。
-#  另外 $PREFREEZE 里的两个组（已知被 scene-daemon 重写）从第一轮就直接冻结。
+#  【开销】建组 + 幂等维护：读 2 个文件、按需写 2 次，≈0 fork。守护每轮调用本脚本
+#   现在近乎免费（不再扫 15 个系统组、不再每轮写后备文件）。
 #
-#  【开销】读 cpus / 读挂载表全用内建 read（0 fork）；只在需要改时才写。
-#         正常一轮 ≈ 0 fork（+1 次 mv 写意图表）。可以放心每 60s 跑一次。
-#
-#  用法: bigcore_guard.sh [quiet]      应用/校正（quiet = 不往 stdout 打日志）
-#        bigcore_guard.sh status       打印各组 cpus / effective_cpus / 冻结态（只读）
-#        bigcore_guard.sh restore      解冻 + 把 bigcore.saved 的原值写回（**不用重启**）
-#  关闭: touch $STATE_DIR/allow_bigcore     （模块不再动这些组）
-#  全冻: touch $STATE_DIR/bigcore_freeze    （把所有触到的组都 bind-mount 冻结）
-#  离线测试覆写: CG_ROOT / STATE_DIR / TMPD / MOUNTS_FILE / MOUNT_BIN / UMOUNT_BIN
-#    （test_bigcore_guard.py 用假 cpuset 树 + 假 mount/umount shim 跑真脚本，47 断言）
+#  用法: bigcore_guard.sh [quiet]       维护 nobig 组（quiet = 不往 stdout 打日志）
+#        bigcore_guard.sh status        打印自有组 + 遗留冻结态（只读）
+#        bigcore_guard.sh restore       解组 + 迁回线程 + 清遗留冻结（不用重启）
+#  关闭: touch $STATE_DIR/allow_bigcore     （模块不再动任何 cpuset）
+#  离线测试覆写: CG_ROOT / STATE_DIR / TMPD / ALLOW_HI / NOBIG_CPUS
 # ============================================================
 ST="${STATE_DIR:-/data/adb/SceneO3Tuner}"
 CG="${CG_ROOT:-/dev/cpuset}"
-TMP="${TMPD:-$ST/tmp}"
-SAVED="$ST/bigcore.saved"        # 原值存档（restore 用）
-INTENT="$ST/bigcore.intent"      # 上一轮「应有值」
-FROZENF="$ST/bigcore.frozen"     # 已冻结：cpus路径<TAB>后备文件
-FSDIR="$ST/bigcore_fs"           # 后备文件目录
+OUR="${CG_NAME:-SceneO3Tuner}"
+NOBIG="$CG/$OUR/nobig"
 LOG="$ST/bigcore.log"
-ALLOW_HI=7                 # 允许使用的最大核号（0-7，不含超大核 8-9）
-FALLBACK="4-7"             # 整段都在 8-9 时的落点（中核）
-PREFREEZE="top-app foreground"   # 已知会被外部重写的父组
-MOUNTS_FILE="${MOUNTS_FILE:-/proc/mounts}"
-MOUNT_BIN="${MOUNT_BIN:-mount}"       # 测试可覆写成假 mount
-UMOUNT_BIN="${UMOUNT_BIN:-umount}"    # 测试可覆写成假 umount
+ALLOW_HI="${ALLOW_HI:-7}"                 # 允许使用的最大核号（0-7，不含超大核 8-9）
+RMDIR_BIN="${RMDIR_BIN:-rmdir}"            # 真机删 cpuset cgroup（无视内部文件）；离线测试可覆写成 rm -rf
 TAB="$(printf '\t')"
 
 mkdir -p "$ST" 2>/dev/null
@@ -71,7 +51,6 @@ QUIET=0
 [ "$1" = "quiet" ] && QUIET=1
 
 say() { [ "$QUIET" = "1" ] || echo "$@"; echo "$@" >> "$LOG"; }
-
 # 日志超过 64KB 就清一次（避免长期堆积）。只在真的要写日志时才查一次大小。
 _log_rotate() {
     _sz=$(wc -c < "$LOG" 2>/dev/null)
@@ -79,318 +58,171 @@ _log_rotate() {
 }
 sayq() { say "$@"; _log_rotate; }
 
-# ------------------------------------------------------------
-#  cpus 表达式 → 裁到 ALLOW_HI（**只用内建字符串操作 + $(())**，不 fork）
-#  结果放全局 SHRUNK；返回 0 = 有变化，1 = 无需改
-#  ⚠ 纯字符串替换会踩坑：`8-9` 也会匹配 `*-9` → 变成 `87`。
-#    所以按「逗号分段 → 解析上下界 → 算术裁剪」做。
-# ------------------------------------------------------------
-shrink() {
-    _o=""; _r="$1"
-    while [ -n "$_r" ]; do
-        case "$_r" in
-            *,*) _p="${_r%%,*}"; _r="${_r#*,}" ;;
-            *)   _p="$_r"; _r="" ;;
+# 在线核（零 fork 读 /sys，回退 0-9）
+online_cpus() {
+    local o=""
+    [ -r /sys/devices/system/cpu/online ] && read -r o < /sys/devices/system/cpu/online
+    [ -n "$o" ] || o="0-9"
+    echo "$o"
+}
+
+# 把 "0-9" 与在线核表达式取交集，输出紧凑区间（纯 shell，零 fork）
+#   先展开在线核为单个核号集合，再保留 0..ALLOW_HI 中在线的部分，
+#   最后把连续核号压成 "0-7" 这种区间写法（cpuset 原生格式，也与本模块
+#   其它脚本硬写的 "0-7" 一致）。在线核若有空洞（如某核离线）也会如实
+#   压成 "0-2,4-7" 之类，避免写出不存在的核。
+nobig_cpus() {
+    _onl="$1"; _set=""; _rest="$_onl"
+    while [ -n "$_rest" ]; do
+        case "$_rest" in
+          *,*) _seg="${_rest%%,*}"; _rest="${_rest#*,}" ;;
+          *)   _seg="$_rest"; _rest="" ;;
         esac
-        case "$_p" in
-            *-*) _lo="${_p%-*}"; _hi="${_p#*-}" ;;
-            *)   _lo="$_p"; _hi="$_p" ;;
+        case "$_seg" in
+          *-*) _lo="${_seg%-*}"; _hi="${_seg#*-}" ;;
+          *)   _lo="$_seg"; _hi="$_seg" ;;
         esac
-        case "$_lo" in ''|*[!0-9]*) continue ;; esac
-        case "$_hi" in ''|*[!0-9]*) continue ;; esac
-        [ "$_hi" -gt "$ALLOW_HI" ] && _hi="$ALLOW_HI"
-        [ "$_lo" -gt "$ALLOW_HI" ] && continue          # 整段都在 8-9 → 丢掉
-        if [ "$_lo" -eq "$_hi" ]; then _seg="$_lo"; else _seg="$_lo-$_hi"; fi
-        _o="${_o:+$_o,}$_seg"
+        case "$_lo$_hi" in *[!0-9]*) continue ;; esac
+        _i="$_lo"
+        while [ "$_i" -le "$_hi" ]; do _set="$_set $_i"; _i=$((_i+1)); done
     done
-    SHRUNK="$_o"
-    [ "$SHRUNK" = "$1" ] && return 1
-    return 0
-}
-
-# 挂载表一次性读进 MOUNTS（内建 read → 0 fork）
-read_mounts() {
-    MOUNTS=" "
-    [ -r "$MOUNTS_FILE" ] || return 0
-    while IFS= read -r _l; do MOUNTS="$MOUNTS$_l "; done < "$MOUNTS_FILE"
-}
-is_mounted() {   # $1 = 绝对路径
-    case "$MOUNTS" in *" $1 "*) return 0 ;; esac
-    return 1
-}
-
-# 保存原值（每个组只存第一次，便于 restore）
-#  ⚠ 这里**不能用 grep 做「已存在」判断**：路径里含反斜杠（Windows 沙盒测试）时，
-#    BRE 会把 `\U` 当转义 → 模式永远匹配不上 → 同一条目被写两遍 → restore 时
-#    后写的（意图值）覆盖先写的（出厂值）。改用内建 read 循环比对（顺带 0 fork）。
-save_orig() {   # $1=组路径 $2=当前值
-    [ -n "$2" ] || return 0
-    [ -f "$SAVED" ] || : > "$SAVED"
-    while IFS="$TAB" read -r _a _b; do
-        [ "$_a" = "$1" ] && return 0
-    done < "$SAVED"
-    echo "$1$TAB$2" >> "$SAVED"
-}
-
-# 已冻结？是则 FT = 后备文件路径
-frozen_tmp() {   # $1 = cpus 路径
-    FT=""
-    [ -f "$FROZENF" ] || return 1
-    while IFS="$TAB" read -r _a _b; do
-        [ "$_a" = "$1" ] && { FT="$_b"; return 0; }
-    done < "$FROZENF"
-    return 1
-}
-
-# 从意图表取「应有值」→ IV     $1 = cpus 路径   $2 = 表文件（默认 $INTENT）
-intent_lookup() {
-    _lf="${2:-$INTENT}"
-    IV=""
-    [ -f "$_lf" ] || return 1
-    while IFS="$TAB" read -r _a _b; do
-        [ "$_a" = "$1" ] && { IV="$_b"; return 0; }
-    done < "$_lf"
-    return 1
-}
-
-# ------------------------------------------------------------
-#  冻结：把 $1(cpus 文件) 固定为 $2
-#    · 已冻结且挂载还在 → 只刷新后备文件内容（让 `cat cpus` 显示我们定的值）
-#    · 已冻结但挂载没了（被 umount）→ 复用同一后备文件重新挂
-#    · 未冻结 → 先把真实值写成 $2，再 mount --bind
-# ------------------------------------------------------------
-freeze_cpus() {
-    _f="$1"; _want="$2"
-    [ -f "$_f" ] || return 0
-    [ -n "$_want" ] || return 0
-    case "$_f" in *"/SceneO3Tuner/"*) return 0 ;; esac
-    if frozen_tmp "$_f"; then
-        if is_mounted "$_f"; then
-            # ★ 值真的变了才写（否则每轮都写 → 破坏幂等，也让 mtime 无意义）
-            if [ -n "$FT" ]; then
-                read -r _tv < "$FT" 2>/dev/null
-                [ "$_tv" = "$_want" ] || printf '%s\n' "$_want" > "$FT" 2>/dev/null
+    _start=""; _prev=""; _out=""
+    _i=0
+    while [ "$_i" -le "$ALLOW_HI" ]; do
+        _on=0
+        case " $_set " in *" $_i "*) _on=1 ;; esac
+        if [ "$_on" = 1 ]; then
+            [ -z "$_start" ] && _start="$_i"
+        else
+            if [ -n "$_start" ]; then
+                if [ "$_start" = "$_prev" ]; then _seg="$_start"; else _seg="$_start-$_prev"; fi
+                _out="${_out:+$_out,}$_seg"
+                _start=""
             fi
-            return 0
         fi
-        _t="$FT"
-    else
-        _t="$FSDIR/$(printf '%s' "$_f" | tr '/ ' '__')"
+        _prev="$_i"
+        _i=$((_i+1))
+    done
+    if [ -n "$_start" ]; then
+        if [ "$_start" = "$_prev" ]; then _seg="$_start"; else _seg="$_start-$_prev"; fi
+        _out="${_out:+$_out,}$_seg"
     fi
-    mkdir -p "$FSDIR" 2>/dev/null
-    # ⚠ 只有值真的不同才写真实 cgroup —— 否则每轮都会写一次，破坏幂等
-    read -r _cv < "$_f" 2>/dev/null
-    [ "$_cv" = "$_want" ] || printf '%s\n' "$_want" > "$_f" 2>/dev/null
-    printf '%s\n' "$_want" > "$_t" 2>/dev/null || return 0
-    if "$MOUNT_BIN" --bind "$_t" "$_f" 2>/dev/null; then
-        frozen_tmp "$_f" || echo "$_f$TAB$_t" >> "$FROZENF"
-        sayq "no-bigcore: 冻结 ${_f}（锁定为 ${_want}）"
+    [ -n "$_out" ] && echo "$_out" || echo "0-$ALLOW_HI"
+}
+
+# cpuset.mems（父组的 mems；新子组必须 ≤ 父 mems）。读不到回退 "0"
+mems_of() {
+    local m=""
+    [ -r "$1/cpuset.mems" ] && read -r m < "$1/cpuset.mems" 2>/dev/null
+    [ -n "$m" ] && echo "$m" || echo "0"
+}
+
+# 确保一个 cpuset 组存在且 cpus==$2（幂等，只在必要时写）
+ensure_group() {   # $1=组目录 $2=cpus
+    [ -d "$1" ] || mkdir -p "$1" 2>/dev/null
+    [ -d "$1" ] || return 0
+    # mems 必须先于 cpus（新建组时 cpus 在 mems 空时会 EINVAL）
+    [ -f "$1/mems" ] || printf '%s\n' "$MEMS" > "$1/mems" 2>/dev/null
+    _c=""
+    [ -f "$1/cpus" ] && read -r _c < "$1/cpus" 2>/dev/null
+    if [ "$_c" != "$2" ]; then
+        printf '%s\n' "$2" > "$1/cpus" 2>/dev/null \
+            && sayq "no-bigcore: 组 $1 设为 $2"
     fi
     return 0
 }
 
-# ------------------------------------------------------------
-#  处理一个组：裁剪 + 记意图
-# ------------------------------------------------------------
-fix_group() {   # $1 = 组目录（带斜杠）
-    _d="$1"
-    [ -d "$_d" ] || return 0
-    _f="${_d}cpus"
-    [ -f "$_f" ] || return 0
-    case "$_f" in
-        *"/SceneO3Tuner/"*) return 0 ;;            # 我们自己的树，不动
-        *"/cpuset/cpus")    return 0 ;;            # 根组必须保持全核（它是父）
-    esac
-    if frozen_tmp "$_f"; then
-        # 已冻结：cpus 读到的是后备文件（可能被外部写成 0-9）→ 意图沿用上一轮，别被污染
-        intent_lookup "$_f" && echo "$_f$TAB$IV" >> "$INTENT.new"
-        return 0
-    fi
-    read -r _cur < "$_f" 2>/dev/null
-    [ -n "$_cur" ] || return 0
-    case "$_cur" in
-        *8*|*9*) ;;
-        *) echo "$_f$TAB$_cur" >> "$INTENT.new"; return 0 ;;   # 干净 → 只记意图
-    esac
-    shrink "$_cur" || { echo "$_f$TAB$_cur" >> "$INTENT.new"; return 0; }
-    [ -n "$SHRUNK" ] || SHRUNK="$FALLBACK"
-    save_orig "$_f" "$_cur"
-    if printf '%s\n' "$SHRUNK" > "$_f" 2>/dev/null; then
-        sayq "no-bigcore: $_f  $_cur → $SHRUNK"
-    else
-        sayq "no-bigcore: $_f  $_cur → $SHRUNK 写失败"
-    fi
-    echo "$_f$TAB$SHRUNK" >> "$INTENT.new"
-    return 0
+# 把一个 pid 迁回标准组（按 oom_score_adj 选 top-app/foreground/background）
+_std_group_for() {
+    _pid="$1"; _adj=""
+    read -r _adj < "/proc/$_pid/oom_score_adj" 2>/dev/null
+    case "$_adj" in ''|*[!0-9-]*) echo "$CG_ROOT"; return ;; esac
+    if   [ "$_adj" -le -800 ] 2>/dev/null && [ -d "$CG_ROOT/top-app" ]; then echo "$CG_ROOT/top-app"
+    elif [ "$_adj" -le 100 ] 2>/dev/null && [ -d "$CG_ROOT/foreground" ]; then echo "$CG_ROOT/foreground"
+    elif [ -d "$CG_ROOT/background" ]; then echo "$CG_ROOT/background"
+    else echo "$CG_ROOT"; fi
 }
 
-# 回退检测：上一轮记了意图、这一轮值不对 → 升级为冻结
-pass_revert() {
-    [ -s "$INTENT" ] || return 0
-    while IFS="$TAB" read -r _p _v; do
-        [ -n "$_p" ] && [ -n "$_v" ] || continue
-        [ -f "$_p" ] || continue
-        case "$_p" in
-            *"/SceneO3Tuner/"*) continue ;;
-            *"/cpuset/cpus")    continue ;;
-        esac
-        frozen_tmp "$_p" && continue          # 已冻结的跳过
-        read -r _cur < "$_p" 2>/dev/null
-        [ "$_cur" = "$_v" ] && continue        # 正常
-        save_orig "$_p" "$_v"
-        freeze_cpus "$_p" "$_v"
-    done < "$INTENT"
+# 解组前把组内线程迁回标准组（先快照再迁，避免 tasks 实时变化漏项）
+_evacuate() {
+    _d="$1"; [ -d "$_d" ] || return 0
+    for _f in tasks cgroup.procs; do
+        [ -r "$_d/$_f" ] || continue
+        _snap="${TMPD:-$ST/tmp}/evac.$$"
+        mkdir -p "${TMPD:-$ST/tmp}" 2>/dev/null
+        cat "$_d/$_f" > "$_snap" 2>/dev/null
+        while IFS= read -r _t; do
+            [ -n "$_t" ] || continue
+            kill -0 "$_t" 2>/dev/null || continue
+            _g=$(_std_group_for "$_t")
+            echo "$_t" > "$_g/$_f" 2>/dev/null || echo "$_t" > "$CG_ROOT/$_f" 2>/dev/null
+        done < "$_snap"
+        rm -f "$_snap" 2>/dev/null
+    done
     return 0
 }
 
 do_apply() {
-    if [ -f "$ST/allow_bigcore" ]; then
-        [ "$QUIET" = "1" ] || echo "no-bigcore: 已关闭（存在 $ST/allow_bigcore）"
-        return 0
-    fi
+    [ -f "$ST/allow_bigcore" ] && { [ "$QUIET" = "1" ] || echo "no-bigcore: 已关闭（存在 $ST/allow_bigcore）"; return 0; }
     [ -d "$CG" ] || return 0
-    read_mounts
-    : > "$INTENT.new"
-    # ⓪ ★★ 回退检测必须在「修正」之前 —— 否则 fix_group 已经把值改回 0-7，
-    #    再比对意图就成了「没被改回」，永远升级不到冻结。这是本脚本的关键顺序。
-    pass_revert
-    # ① 二级子组优先（可能要做 child ⊆ parent，先小后大）
-    for d in "$CG"/*/*/; do [ -d "$d" ] || continue; fix_group "$d"; done
-    # ② 再一级组
-    for d in "$CG"/*/;   do [ -d "$d" ] || continue; fix_group "$d"; done
-    # ③ 已知会被外部（scene-daemon）重写的父组 → 直接冻结（用刚记下的意图）
-    for _g in $PREFREEZE; do
-        _f="$CG/$_g/cpus"
-        [ -f "$_f" ] || continue
-        intent_lookup "$_f" "$INTENT.new" && freeze_cpus "$_f" "$IV"
-    done
-    # ④ 可选：把剩余触到的组也全冻
-    if [ -f "$ST/bigcore_freeze" ] && [ -s "$INTENT.new" ]; then
-        while IFS="$TAB" read -r _p _v; do
-            [ -n "$_p" ] && [ -n "$_v" ] || continue
-            freeze_cpus "$_p" "$_v"
-        done < "$INTENT.new"
-    fi
-    mv -f "$INTENT.new" "$INTENT" 2>/dev/null
-    # ⑤ ★ v16.13：冻结组**重新断言**意图值。
-    #   为什么必须单独做：bind-mount 之后，外部（scene-daemon）写 cpus 实际写的是
-    #   我们的**后备文件**，于是 `cat cpus` 读到的是被污染的 0-9。而冻结分支
-    #   （fix_group 的 frozen 早退 + freeze_cpus 的 is_mounted 早退）都只**读**不**写**，
-    #   结果「锁在 0-7」变成一句空话 —— 真机上 top-app/foreground 的 eff 会回到 0-9，
-    #   高负载线程照样能上大核，与档位语义冲突（实测复现）。
-    #   修法：每轮把意图值写回后备文件。值一致时零写入，幂等。
-    if [ -s "$FROZENF" ] && [ -s "$INTENT" ]; then
-        while IFS="$TAB" read -r _p _t; do
-            [ -n "$_p" ] && [ -n "$_t" ] || continue
-            [ -f "$_t" ] || continue
-            intent_lookup "$_p" || continue
-            read -r _tv < "$_t" 2>/dev/null
-            [ "$_tv" = "$IV" ] || {
-                printf '%s\n' "$IV" > "$_t" 2>/dev/null
-                sayq "no-bigcore: 重申 ${_p} 锁定值 ${_tv:-空} → ${IV}（后备文件被外部改写）"
-            }
-        done < "$FROZENF"
-    fi
+    MEMS="$(mems_of "$CG")"
+    ONL="$(online_cpus)"
+    NOBIG_WANT="${NOBIG_CPUS:-$(nobig_cpus "$ONL")}"
+    # ① 父组（cpus=全在线，mems）
+    ensure_group "$CG/$OUR" "$ONL"
+    # ② 受限组（cpus=0-7 ∩ 在线）
+    ensure_group "$NOBIG" "$NOBIG_WANT"
+    [ "$QUIET" = "1" ] || echo "no-bigcore: nobig 组就绪（$NOBIG_WANT；受管线程将迁入）"
     return 0
 }
 
 do_status() {
-    echo "=== $CG 各组（cpus / effective_cpus / 冻结）==="
-    read_mounts
-    for d in "$CG"/ "$CG"/*/ "$CG"/*/*/; do
-        [ -d "$d" ] || continue
-        [ -f "${d}cpus" ] || continue
-        read -r v < "${d}cpus" 2>/dev/null
-        read -r e < "${d}effective_cpus" 2>/dev/null
-        if frozen_tmp "${d}cpus"; then _z="冻结"; else
-            case "$e" in *8*|*9*) _z="★ 含 8/9";; *) _z="-";; esac
-        fi
-        printf "  %-46s cpus=%-8s eff=%-8s %s\n" "$d" "$v" "$e" "$_z"
-    done
+    echo "=== 自有 cpuset 组（v17，不碰系统组）==="
+    if [ -d "$NOBIG" ]; then
+        read -r v < "$NOBIG/cpus" 2>/dev/null
+        read -r e < "$NOBIG/effective_cpus" 2>/dev/null
+        echo "  $NOBIG"
+        echo "      cpus=$([ -n "$v" ] && echo "$v" || echo ?)  eff=$([ -n "$e" ] && echo "$e" || echo ?)"
+        nt=$(grep -c . "$NOBIG/tasks" 2>/dev/null)
+        echo "      线程数=$nt"
+    else
+        echo "  （nobig 组未建立）"
+    fi
     echo
-    echo "原值存档 : $([ -f "$SAVED" ]  && wc -l < "$SAVED"  || echo 0) 条"
-    echo "已冻结组 : $([ -f "$FROZENF" ] && wc -l < "$FROZENF" || echo 0) 个"
-    echo "关闭标记 allow_bigcore  : $([ -f "$ST/allow_bigcore" ]  && echo 存在 || echo 无)"
-    echo "全冻标记 bigcore_freeze : $([ -f "$ST/bigcore_freeze" ] && echo 存在 || echo 无)"
-    echo "（判断是否生效看 eff 列 —— 冻结组的 cpus 列显示的是后备文件内容，可能被外部写入污染）"
+    echo "关闭标记 allow_bigcore : $([ -f "$ST/allow_bigcore" ] && echo 存在 || echo 无)"
+    # 遗留冻结（v16 升级残留）
+    if [ -f "$ST/bigcore.frozen" ]; then
+        echo "⚠ 检测到 v16 遗留冻结清单："; cat "$ST/bigcore.frozen" 2>/dev/null
+        echo "  建议执行 bigcore_guard.sh restore 清理"
+    else
+        echo "遗留冻结：无"
+    fi
 }
 
 do_restore() {
     n=0; m=0
-    # ① 解冻
-    if [ -s "$FROZENF" ]; then
+    # ① 解自有组（迁回标准组 + 删组）
+    if [ -d "$NOBIG" ]; then
+        _evacuate "$NOBIG"
+        ${RMDIR_BIN:-rmdir} "$NOBIG" 2>/dev/null && n=$((n+1))
+    fi
+    if [ -d "$CG/$OUR" ]; then
+        for _sub in "$CG/$OUR"/*/; do [ -d "$_sub" ] && _evacuate "${_sub%/}"; done
+        ${RMDIR_BIN:-rmdir} "$CG/$OUR" 2>/dev/null && n=$((n+1))
+    fi
+    # ② 解 v16 遗留冻结（bind 挂载的后备文件）
+    if [ -s "$ST/bigcore.frozen" ]; then
         while IFS="$TAB" read -r _p _t; do
             [ -n "$_p" ] || continue
-            "$UMOUNT_BIN" "$_p" 2>/dev/null && n=$((n+1))
+            ${UMOUNT_BIN:-umount} "$_p" 2>/dev/null && n=$((n+1))
             [ -n "$_t" ] && rm -f "$_t" 2>/dev/null
-        done < "$FROZENF"
-        rm -f "$FROZENF"
+        done < "$ST/bigcore.frozen"
+        rm -f "$ST/bigcore.frozen"
     fi
-    # ② 原值写回
-    if [ -s "$SAVED" ]; then
-        while IFS="$TAB" read -r _p _v; do
-            [ -n "$_p" ] && [ -n "$_v" ] || continue
-            "$UMOUNT_BIN" "$_p" 2>/dev/null
-            printf '%s\n' "$_v" > "$_p" 2>/dev/null && m=$((m+1))
-        done < "$SAVED"
-        rm -f "$SAVED"
-    fi
-    rm -f "$INTENT" "$ST/bigcore.intent.new" 2>/dev/null
-    rmdir "$FSDIR" 2>/dev/null
-    echo "已解冻 $n 个组，还原 $m 个组的 cpus（不用重启）"
+    [ -s "$ST/bigcore.saved" ] && rm -f "$ST/bigcore.saved"
+    rm -f "$ST/bigcore.intent" "$ST/bigcore.intent.new" "$ST/bigcore.mode.fast" 2>/dev/null
+    echo "已解组 $n 个、清理遗留冻结；受管线程已迁回标准组（不用重启）"
 }
-
-# ------------------------------------------------------------
-#  【按模式生效】（v16.13 · v16.24 改为按前台应用）—— 必须在 do_restore 之后
-#    fast（极速）档的设计是「高负载线程上探 4-9」，所以**不能**再把 8-9 锁掉：
-#    否则 load_aware 算出来的 4-9 目标写进 cpus 后，effective_cpus 仍被锁在 0-7，
-#    高负载线程根本上不去 —— v16.12 在真机上「机制是死的」正是这个状态
-#    （实测：bigcore.frozen 里挂着 6 个组、后备文件被写成 0-9、bigcore.log 停在 19:27）。
-#  其余模式（省电/流畅/性能）继续锁 0-7：符合「性能档 8-9 留给系统」的语义。
-#  ⚠ 只解冻一次（标记 $ST/bigcore.mode.fast），避免 5 秒一轮反复 umount/写回。
-#
-#  ★★ v16.24 修一个真机事故（2026-09-19）：极速是**逐应用**设的，但这里原来只按
-#     「全局模式 / 方案名」判 —— 设备装的方案是 sweet_hq（兜底映射 performance），
-#     于是**前台应用即使在 Scene 里被设成极速，8-9 仍被锁在 0-7**：极速档的高频
-#     （cpu8 4358400）只存在于 8-9 上，用户永远看不到 → 报「设为极速但频率上不去」。
-#     现在优先用 FG_MODE（由 guard.sh 按**前台应用**解析后传入），全局模式/方案名
-#     只作兜底（开机 service.sh 直接调本脚本、或无前台应用时）。
-# ------------------------------------------------------------
-CUR_MODE=""
-# ① 前台应用的档位（guard.sh 用 lib/util.sh 的 scene_app_mode 解析）
-case "${FG_MODE:-}" in
-  powersave|balance|performance|fast) CUR_MODE="$FG_MODE" ;;
-esac
-# ② 兜底：Scene 的 state（用户选中的全局模式）
-_sf="${SCENE_DIR:-/data/data/com.omarea.vtools/files}/state"
-if [ -z "$CUR_MODE" ] && [ -r "$_sf" ]; then
-    while IFS= read -r _m || [ -n "$_m" ]; do
-        case "$_m" in
-          powersave|balance|performance|fast) CUR_MODE="$_m"; break ;;
-        esac
-    done < "$_sf"
-fi
-# ③ 兜底：方案名
-if [ -z "$CUR_MODE" ]; then
-    case "$(cat "$ST/active_scheme" 2>/dev/null)" in
-      sweet_eco)  CUR_MODE="powersave" ;;
-      sweet_bal)  CUR_MODE="balance" ;;
-      sweet_hq)   CUR_MODE="performance" ;;
-      sweet_perf) CUR_MODE="fast" ;;
-    esac
-fi
-
-if [ "$1" != "status" ] && [ "$1" != "restore" ] && [ "$CUR_MODE" = "fast" ]; then
-    if [ ! -f "$ST/bigcore.mode.fast" ]; then
-        read_mounts
-        do_restore >/dev/null 2>&1
-        : > "$ST/bigcore.mode.fast" 2>/dev/null
-        [ "$QUIET" = "1" ] || echo "no-bigcore: 极速档 → 已解冻并停用 8-9 封锁（高负载线程要上探 4-9）"
-    fi
-    exit 0
-fi
-# 非极速档：清掉标记，让封锁在下一轮自动恢复
-[ -f "$ST/bigcore.mode.fast" ] && rm -f "$ST/bigcore.mode.fast" 2>/dev/null
 
 case "$1" in
     status)  do_status ;;
