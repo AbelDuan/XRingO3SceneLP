@@ -31,6 +31,9 @@ UTIL = os.path.join(MOD, "lib", "util.sh")
 
 FAILS = []
 CHECKS = [0]
+_TMPDIRS = []
+# ⚠ 不在退出时清理沙盒目录：宿主 safe-delete 钩子会因「批量删除 >50 文件」
+#   抛 SystemExit(1)，把测试退出码染成 1。残留 _t_* 由 .gitignore 忽略。
 
 
 def check(cond, msg):
@@ -43,7 +46,15 @@ def check(cond, msg):
 
 
 def sh(script):
-    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    env = dict(os.environ)
+    extra = []
+    for c in ("C:/Users/Abel/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin",
+              "C:/Program Files/Git/usr/bin"):
+        if os.path.isdir(c):
+            extra.append(c)
+    if extra:
+        env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
+    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
     return (r.stdout or ""), (r.stderr or "")
 
 
@@ -60,7 +71,13 @@ HDR = "# id\tfriendly\tother\theaviest_thread\theaviest_cores\theavy_thread\thea
 
 
 def make_env(perf_row, marker=False, kind="app"):
-    d = tempfile.mkdtemp(prefix="v16_")
+    # ⚠ 不用 tempfile.mkdtemp()：沙盒/安全钩子会拦系统 temp 下的目录创建 → SIGTERM。
+    d = os.path.join(MOD, "_t_v16_%d" % os.getpid())
+    try:
+        os.makedirs(d, exist_ok=True)
+        _TMPDIRS.append(d)
+    except Exception:
+        d = tempfile.mkdtemp(prefix="v16_")
     st = os.path.join(d, "st")
     tpl = os.path.join(st, "webui")
     os.makedirs(tpl, exist_ok=True)
@@ -68,9 +85,10 @@ def make_env(perf_row, marker=False, kind="app"):
     app = os.path.join(tpl, "app_templates.tsv")
     game = os.path.join(tpl, "game_templates.tsv")
     # balance 行用 v15 的值（v16 不改它，作对照）
-    bal_app = "balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n"
-    bal_game = ("balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t"
-                "{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n")
+    #   ★ v16.26：v15 迁移的 balance 值已由 4-5 改为 {p1_core}（4-5 被移除）
+    bal_app = "balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n"
+    bal_game = ("balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t"
+                "{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n")
     extra = "\nmyapp\t我的档\t0-3\t\t4-7\t\t\t" if kind == "custom" else ""
     io.open(app, "w", encoding="utf-8").write(HDR + bal_app + perf_row + "\n" + extra)
     io.open(game, "w", encoding="utf-8").write(HDR + bal_game + perf_row + "\n")

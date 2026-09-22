@@ -743,11 +743,15 @@ mode_valid() { case " $MODE_LIST " in *" $1 "*) return 0 ;; *) return 1 ;; esac;
 # ------------------------------------------------------------
 #  四档核心集合适配（v16.18 · 用户可在 WebUI 自定义）
 # ------------------------------------------------------------
-#  用户可选的**核心集合**只有这 6 个（不允许 0-9 —— 那会让中低负载也打到
+#  用户可选的**核心集合**只有这 5 个（不允许 0-9 —— 那会让中低负载也打到
 #  超大核，违背四档语义；也不允许任意表达式，防手滑）。
-#  v16.23：4-5 从「仅内置默认」提升为**用户可选**（用户要求同步进模式列表），
-#  于是 sched_cores_valid 不再需要与 builtin_ok 分成两个口径。
-SCHED_CORES_VALID="0-3 4-5 4-7 8-9 0-7 4-9"
+#  ★ v16.26：移除 **4-5**（原 v16.23 曾把它提升为用户可选）。它在 O3 上是纯负收益：
+#    · cpu4/core_ctl min_cpus=max_cpus=4 → 中核 4 颗被锁死常在线，限到 4-5 省不到漏电；
+#    · 本次实测（2026-09-22）推翻旧注释里的「4-7 同域共频」结论 ——
+#      cpu4=988800 / cpu5=835200 / cpu6=988800 / cpu7=1142400，**每核独立 PLL**，
+#      所以 4-5 也无法靠「少核共频拉高」省电；
+#    · 唯一实际效果是把可调度核数从 4 降到 2，重载线程 ≥3 时排队。
+SCHED_CORES_VALID="0-3 4-7 8-9 0-7 4-9"
 #  自定义配置文件（WebUI「模式」页读写）；不存在时一律用下面的内置默认。
 SCHED_CORES_FILE="${SCHED_CORES_FILE:-${WEBUI_DIR}/sched_cores.conf}"
 
@@ -755,15 +759,15 @@ SCHED_CORES_FILE="${SCHED_CORES_FILE:-${WEBUI_DIR}/sched_cores.conf}"
 #  四档**内置默认**核位（v16.22 · 单一来源，webui.sh 的 sched_cores_template_other
 #  与 mode_sched_row 都从这里取，避免两处漂移）
 # ------------------------------------------------------------
-#  2026-09-18 按用户要求重排：让「重载线程少」的档用窄核位省电、
-#  「重载线程多」的档留宽核位保并行。依据是本机实测：
-#    · 4-7 是**同一个频率域**（policy4 的 related_cpus=4-7），四核共频；
-#    · cpu4/core_ctl min=max=4 → 4-7 被强制保持在线、不会自动下线空核。
-#  所以限制到 4-5 的收益是「少 2 个核的漏电」，代价是重载线程 ≥3 时要排队
-#  拉高频（同域共频下反而更费电）—— 正好对应「中低要求游戏」这个档。
-#    流畅(均衡)  基线 0-3，重载并到 **4-5**（2 核，够日常偏重，更省）
-#    性能        基线 0-3，重载并到 **4-7**（4 核余量，给中低要求游戏）
-#  其余两档不变：省电全压 0-3；极速 0-7 基线 + 重载上探 4-9。
+#  ★ v16.26 重排（推翻 2026-09-18 那版「4-7 同域共频」依据）：
+#    旧依据是「4-7 是同一个频率域、共频」，故把流畅档的高负载目标收到 4-5
+#    以求「少 2 核漏电」。本次实测证明该前提**不成立**：
+#      · cpu4/5/6/7 各自有独立 PLL（实测同刻 988800/835200/988800/1142400），
+#        并非共频，收窄核数不会让剩下 2 核跑更高频；
+#      · cpu4/core_ctl min_cpus=max_cpus=4 → 4 颗中核常在线，收窄省不到漏电；
+#      · 净效果只有「并行度 4→2」，重载线程 ≥3 排队。
+#    所以三档高负载目标一律回到**整簇**（4-7）；极速仍上探 4-9。
+#    省电档不变（全压 0-3，且不升级）。
 sched_cores_default_base() {   # 该档「中低负载基线」的内置默认
     case "$1" in
       powersave)   echo "0-3" ;;
@@ -776,7 +780,7 @@ sched_cores_default_base() {   # 该档「中低负载基线」的内置默认
 sched_cores_default_esc() {    # 该档「高负载升级目标」的内置默认（"-" = 不升级）
     case "$1" in
       powersave)   echo "-" ;;
-      balance)     echo "4-5" ;;
+      balance)     echo "4-7" ;;
       performance) echo "4-7" ;;
       fast)        echo "4-9" ;;
       *)           echo "4-7" ;;
@@ -816,34 +820,46 @@ sched_cores_lookup() {   # $1=mode $2=列号(1..7) → 全局 SCV
 mode_sched_row() {
     case "$1" in
       # 核位来自 sched_cores_default_*（单一来源）；其余列是该档调参
-      powersave)   _def="powersave 省电 $(sched_cores_default_esc powersave) 0 15 10 4 0" ;;
-      balance)     _def="balance 流畅 $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
-      performance) _def="performance 性能 $(sched_cores_default_esc performance) 0 10 9 4 0" ;;
-      fast)        _def="fast 极速 $(sched_cores_default_esc fast) 1 8 8 4 1" ;;
-      *)           _def="balance 流畅 $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
+      #  ★ v16.26：第 3 列改为**基线核位**（此前缺这一列，导致下游没有任何地方
+      #    能拿到「基线」；load_aware 的空闲收缩只能用 SE(e_core) 顶替）。
+      powersave)   _def="powersave 省电 $(sched_cores_default_base powersave) $(sched_cores_default_esc powersave) 0 15 10 4 0" ;;
+      balance)     _def="balance 流畅 $(sched_cores_default_base balance) $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
+      performance) _def="performance 性能 $(sched_cores_default_base performance) $(sched_cores_default_esc performance) 0 10 9 4 0" ;;
+      fast)        _def="fast 极速 $(sched_cores_default_base fast) $(sched_cores_default_esc fast) 1 8 8 4 1" ;;
+      *)           _def="balance 流畅 $(sched_cores_default_base balance) $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
     esac
     case "$1" in powersave|balance|performance|fast) ;; *) echo "$_def"; return 0 ;; esac
 
     # 逐列用自定义值覆盖；任一列非法/缺失就保留**该档的**默认列（绝不产出畸形行）
     #  ⚠ 默认值必须逐档从 _def 里取，不能图省事写成通用 12/10/4/0 ——
     #    那样会悄悄改掉每档调参（测试第 1 节就是防这个，实测抓到过）。
-    _esc=$(printf '%s' "$_def" | cut -d' ' -f3)
-    _ho=$(printf '%s' "$_def" | cut -d' ' -f4)
-    _it=$(printf '%s' "$_def" | cut -d' ' -f5)
-    _hot=$(printf '%s' "$_def" | cut -d' ' -f6)
-    _idle=$(printf '%s' "$_def" | cut -d' ' -f7)
-    _io=$(printf '%s' "$_def" | cut -d' ' -f8)
-    sched_cores_lookup "$1" 1 && sched_cores_valid "$SCV" && _esc="$SCV"
-    sched_cores_lookup "$1" 2 && case "$SCV" in 0|1) _ho="$SCV" ;; esac
-    sched_cores_lookup "$1" 3 && [ "$SCV" -ge 2 ] 2>/dev/null && [ "$SCV" -le 120 ] && _it="$SCV"
-    sched_cores_lookup "$1" 4 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _hot="$SCV"
-    sched_cores_lookup "$1" 5 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _idle="$SCV"
-    sched_cores_lookup "$1" 6 && case "$SCV" in 0|1) _io="$SCV" ;; esac
+    _base=$(printf '%s' "$_def" | cut -d' ' -f3)
+    _esc=$(printf '%s' "$_def" | cut -d' ' -f4)
+    _ho=$(printf '%s' "$_def" | cut -d' ' -f5)
+    _it=$(printf '%s' "$_def" | cut -d' ' -f6)
+    _hot=$(printf '%s' "$_def" | cut -d' ' -f7)
+    _idle=$(printf '%s' "$_def" | cut -d' ' -f8)
+    _io=$(printf '%s' "$_def" | cut -d' ' -f9)
+    #  ★★ v16.26 修复「核心集合不生效」的**主因**：列序接反。
+    #     sched_cores.conf 由 cmd_setschedcores 写成 `<mode>\t<base>\t<esc>`（两列），
+    #     而旧代码把列1 当 esc、列2 当 hotok 读 —— 于是：
+    #       · 列1(base, 如 0-3) 被当成「升级目标」→ 设了 4-5 升级也永远升不上去；
+    #       · 列2(esc, 如 4-5) 被 case 0|1 拒掉 → hotok 永远保持默认。
+    #     现在列号与文件列序一一对齐：1=base 2=esc 3=hotok 4=interval 5=hot 6=idle 7=ioff。
+    sched_cores_lookup "$1" 1 && sched_cores_valid "$SCV" && _base="$SCV"
+    sched_cores_lookup "$1" 2 && sched_cores_valid "$SCV" && _esc="$SCV"
+    sched_cores_lookup "$1" 3 && case "$SCV" in 0|1) _ho="$SCV" ;; esac
+    sched_cores_lookup "$1" 4 && [ "$SCV" -ge 2 ] 2>/dev/null && [ "$SCV" -le 120 ] && _it="$SCV"
+    sched_cores_lookup "$1" 5 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _hot="$SCV"
+    sched_cores_lookup "$1" 6 && [ "$SCV" -ge 0 ] 2>/dev/null && [ "$SCV" -le 100 ] && _idle="$SCV"
+    sched_cores_lookup "$1" 7 && case "$SCV" in 0|1) _io="$SCV" ;; esac
     # 自洽：升级目标含 8/9 时必须允许上探，否则目标永远到不了 → 自动置 1
     case "$_esc" in *8*|*9*) _ho=1 ;; esac
     # 不升级的档：清掉上探标志
     [ "$_esc" = "-" ] && _ho=0
-    echo "$1 $(mode_name_cn "$1") $_esc $_ho $_it $_hot $_idle $_io"
+    # 基线为空（自定义写坏）时回落到该档内置默认，绝不输出空列
+    [ -n "$_base" ] || _base=$(sched_cores_default_base "$1")
+    echo "$1 $(mode_name_cn "$1") $_base $_esc $_ho $_it $_hot $_idle $_io"
 }
 
 # 列名 → 值。用法: mode_sched_get <mode> <esc_target|hotok|interval|hot|idle|idleoff>
@@ -853,30 +869,32 @@ mode_sched_get() {
         _ms_n=$((_ms_n + 1))
         [ "$_ms_n" -le 2 ] && continue          # 前两列是 id 与中文名
         case "$_ms_n" in
-          3) [ "$2" = esc_target ] && { echo "$_ms_c"; return 0; } ;;
-          4) [ "$2" = hotok ]      && { echo "$_ms_c"; return 0; } ;;
-          5) [ "$2" = interval ]   && { echo "$_ms_c"; return 0; } ;;
-          6) [ "$2" = hot ]        && { echo "$_ms_c"; return 0; } ;;
-          7) [ "$2" = idle ]       && { echo "$_ms_c"; return 0; } ;;
-          8) [ "$2" = idleoff ]    && { echo "$_ms_c"; return 0; } ;;
+          3) [ "$2" = base ]       && { echo "$_ms_c"; return 0; } ;;
+          4) [ "$2" = esc_target ] && { echo "$_ms_c"; return 0; } ;;
+          5) [ "$2" = hotok ]      && { echo "$_ms_c"; return 0; } ;;
+          6) [ "$2" = interval ]   && { echo "$_ms_c"; return 0; } ;;
+          7) [ "$2" = hot ]        && { echo "$_ms_c"; return 0; } ;;
+          8) [ "$2" = idle ]       && { echo "$_ms_c"; return 0; } ;;
+          9) [ "$2" = idleoff ]    && { echo "$_ms_c"; return 0; } ;;
         esac
     done
     return 1
 }
 
-# 零 fork 版：读进全局 MS_ESC MS_HOTOK MS_INT MS_HOT MS_IDLE MS_IDLEOFF
+# 零 fork 版：读进全局 MS_BASE MS_ESC MS_HOTOK MS_INT MS_HOT MS_IDLE MS_IDLEOFF
 mode_sched_read() {   # $1 = powersave|balance|performance|fast
-    MS_ESC=""; MS_HOTOK="0"; MS_INT="12"; MS_HOT="10"; MS_IDLE="4"; MS_IDLEOFF="0"
+    MS_BASE=""; MS_ESC=""; MS_HOTOK="0"; MS_INT="12"; MS_HOT="10"; MS_IDLE="4"; MS_IDLEOFF="0"
     _ms_n=0
     for _ms_c in $(mode_sched_row "$1"); do
         _ms_n=$((_ms_n + 1))
         case "$_ms_n" in
-          3) MS_ESC="$_ms_c" ;;
-          4) MS_HOTOK="$_ms_c" ;;
-          5) MS_INT="$_ms_c" ;;
-          6) MS_HOT="$_ms_c" ;;
-          7) MS_IDLE="$_ms_c" ;;
-          8) MS_IDLEOFF="$_ms_c" ;;
+          3) MS_BASE="$_ms_c" ;;
+          4) MS_ESC="$_ms_c" ;;
+          5) MS_HOTOK="$_ms_c" ;;
+          6) MS_INT="$_ms_c" ;;
+          7) MS_HOT="$_ms_c" ;;
+          8) MS_IDLE="$_ms_c" ;;
+          9) MS_IDLEOFF="$_ms_c" ;;
         esac
     done
     return 0
@@ -1913,7 +1931,7 @@ seed_game_templates() {
     #   直接上 4-9（王者/金铲铲实测 UnityMain 占 87%、渲染是最重的持续负载），
     #   其余真·高负载线程由 load_aware 按实测占用率上探 4-9。
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
-    printf 'balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n'
+    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n'
     printf 'performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n'
     printf 'fast\t极速\t{e_core},{p1_core}\t\t{p_core}\tUnityGfx\t{p_core}\t\n'
   } > "$GAME_TPL_FILE" 2>/dev/null
@@ -2190,11 +2208,12 @@ migrate_templates_v14() {
 # ------------------------------------------------------------
 #  依据本机实测：4-7 是**同一个频率域**（policy4 related_cpus=4-7，四核共频），
 #  且 cpu4/core_ctl min=max=4 → 4-7 强制在线、不会自动下线空核。
-#  所以「限制到 4-5」的收益是少 2 个核的漏电，代价是重载线程 ≥3 时要排队拉高频
-#  （同域共频下反而更费电）—— 正好把窄核位留给「重载线程少」的档。
+#  ⚠ v16.26 更正：上面「四核共频」的旧结论已被真机实测推翻
+#     （cpu4=988800 / cpu5=835200 / cpu6=988800 / cpu7=1142400，各自独立 PLL）。
+#     故本迁移里「流畅 → 4-5」的旧目标已改回 {p1_core}（4-7），见 SCHED_CORES_VALID 头部注释。
 #
 #  改两档（只改核位列，调参不动）：
-#    流畅：轻线程 0-3（不变）；主线程/渲染线程 4-7 → **4-5**
+#    流畅：轻线程 0-3（不变）；主线程/渲染线程 → **{p1_core}（4-7）**
 #    性能：轻线程 4-7 → **0-3**（原来整条都在 4-7，是最费电的一档）；
 #          主线程/渲染线程 4-7（不变）
 #  其余两档（省电、极速）不动。
@@ -2216,14 +2235,14 @@ migrate_templates_v15() {
         if [ "$t" = "$APP_TPL_FILE" ]; then
             awk -F'\t' '
               /^#/ { print; next }
-              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n"; next }
+              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n"; next }
               $1 == "performance" { printf "performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n"; next }
               { print }
             ' "$t" > "${TMPD}/tpl.v15" 2>/dev/null
         else
             awk -F'\t' '
               /^#/ { print; next }
-              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n"; next }
+              $1 == "balance"     { printf "balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n"; next }
               $1 == "performance" { printf "performance\t性能\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t{e_core}=Audio,FMOD,Http\n"; next }
               { print }
             ' "$t" > "${TMPD}/tpl.v15" 2>/dev/null
@@ -2235,7 +2254,7 @@ migrate_templates_v15() {
     done
 
     : > "$TPL_V15_MARK" 2>/dev/null
-    log_quiet "webui: 档位表已升级到 v15（流畅 4-5 / 性能 轻线程 0-3）"
+    log_quiet "webui: 档位表已升级到 v15（流畅主/渲染 4-7 / 性能 轻线程 0-3）"
     return 0
 }
 
@@ -2408,9 +2427,12 @@ seed_app_templates() {
     printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
     # 流畅：日常较重负载也要覆盖 —— 主线程与渲染线程上 Premium(4-7)，其余压 Pro。
     #   Worker/Job/Async/Pool 留 Pro 省电（它们是突发型，不是持续重载）。
-    # 流畅（v16.22）：轻线程 0-3；主线程/渲染线程并到 **4-5**（2 核够日常偏重，更省电）。
-    #   4-5 不在 WebUI 的 5 个可选值里 —— 用户要自定义仍用原来的选项，改的是内置默认。
-    printf 'balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t{e_core}=Worker,Job,Async,Pool\n'
+    # 流畅（v16.26）：轻线程 0-3；主线程/渲染线程用 **4-7**（整条中核）。
+    #   ⚠ v16.22 曾把这里收到 4-5，依据是「4-7 同域共频、少 2 核共频更省电」——
+    #     该依据已被真机实测推翻（cpu4/5/6/7 各自独立 PLL，见 SCHED_CORES_VALID 头部注释），
+    #     且 cpu4/core_ctl min=max=4 已把 4-7 锁死常在线，限到 4-5 省不到漏电。
+    #     故 4-5 已从可选核位中移除，这里回归 4-7。
+    printf 'balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t{e_core}=Worker,Job,Async,Pool\n'
     # 性能：王者荣耀/金铲铲这类中低要求游戏 —— 轻线程给 0-7（含中核），
     #   应对浏览器/WebView/游戏的多进程并发；8-9 不碰（留给系统级任务与热余量）。
     # 性能（v16）：轻线程 {e_core} → **{e_core},{p1_core}（0-7）**。

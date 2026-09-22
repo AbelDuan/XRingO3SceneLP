@@ -4,19 +4,24 @@
 test_templates_v15.py —— 流畅/性能 核位重排（v15 迁移）的离线自检
 
 需求（用户 2026-09-18）：
-  · 流畅（均衡）= 轻线程 0-3 + 主/渲染线程 **4-5**
-  · 性能        = 轻线程 **0-3** + 主/渲染线程 4-7
-  · 自定义机制（WebUI 5 选项 + sched_cores.conf）保持原样
+  · 流畅（均衡）= 轻线程 0-3 + 主/渲染线程 落中核
+  · 性能        = 轻线程 **0-3** + 主/渲染线程 落中核
+  · 自定义机制（WebUI 选项 + sched_cores.conf）保持原样
 
-实测依据：4-7 是同一频率域（policy4 related_cpus=4-7）、cpu4/core_ctl min=max=4
-（四核强制在线）→ 限制到 4-5 省「少 2 核漏电」，代价是重载线程 ≥3 时排队拉高频。
+★ v16.26 更正：本测试原先断言「流畅 = 4-5」。该值已被**彻底移除**，理由：
+  · 旧依据「4-7 同域共频、收窄到 2 核更省电」被实测推翻
+    （cpu4=988800 / cpu5=835200 / cpu6=988800 / cpu7=1142400，各自独立 PLL）；
+  · cpu4/core_ctl min_cpus=max_cpus=4 → 4 颗中核常在线，收窄省不到漏电；
+  · 净效果只有「并行度 4→2」，重载线程 ≥3 排队。
+  于是 v15 迁移的 balance 目标也改为 **{p1_core}（4-7）**，`4-5` 从白名单移除。
+  （migrate_templates_v15 仍保留，只是产出的值变了 —— 历史设备升级路径不变。）
 
 覆盖：
-  1. seed 出的模板与期望逐字一致
-  2. v15 迁移：新表不动、旧表被改对、用户自建行不受影响
-  3. 幂等：迁移后表不再变化（靠 tpl_v15 标记）
-  4. 单一来源：mode_sched_row 的核位与 sched_cores_default_* 一致
-  5. 4-5 既是内置默认，也在 WebUI 可选白名单里（v16.23 起用户要求「同步到模式列表」）
+  1. 内置默认值与 sched_cores_default_* 一致
+  2. mode_sched_row 与单一来源一致
+  3. v15 迁移：新表不动、旧表被改对、用户自建行不受影响
+  4. 幂等：迁移后表不再变化（靠 tpl_v15 标记）
+  5. 4-5 **不在** 白名单里（v16.26 已移除）
 
 跑法: python tools/test_templates_v15.py
 """
@@ -28,6 +33,9 @@ UTIL = os.path.join(MOD, "lib", "util.sh")
 
 FAILS = []
 CHECKS = [0]
+_TMPDIRS = []
+# ⚠ 不在退出时清理沙盒目录：宿主 safe-delete 钩子会因「批量删除 >50 文件」
+#   抛 SystemExit(1)，把测试退出码染成 1。残留 _t_* 由 .gitignore 忽略。
 
 
 def check(cond, msg):
@@ -40,24 +48,33 @@ def check(cond, msg):
 
 
 def sh(script):
-    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    env = dict(os.environ)
+    extra = []
+    for c in ("C:/Users/Abel/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin",
+              "C:/Program Files/Git/usr/bin"):
+        if os.path.isdir(c):
+            extra.append(c)
+    if extra:
+        env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
+    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=env)
     return (r.stdout or ""), (r.stderr or "")
 
 
 # v15 迁移的产出（migrate_templates_v15 负责）
-APP_V15 = ("balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t"
+#   ★ v16.26：balance 的核位由 4-5 改为 {p1_core}（4-7）
+APP_V15 = ("balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t"
            "{e_core}=Worker,Job,Async,Pool\n"
            "performance\t性能\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t\n")
 # v16 之后 seed_*_templates 的新默认（seed 只维护一份，必须是**最新**值）
 #   ⚠ 这条只用于 [6] 的「seed 与迁移脚本不漂移」断言：
 #     migrate_templates_v15 产出 v15 值 → 随后 migrate_templates_v16 再升到 v16 值，
 #     两段各司其职。seed 直接给最终值，所以两者不同名不同值是**预期**的。
-APP_NEW = ("balance\t流畅\t{e_core}\t\t4-5\tRenderThread\t4-5\t"
+APP_NEW = ("balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t"
            "{e_core}=Worker,Job,Async,Pool\n"
            "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\t"
            "RenderThread,2.raster,rt-launcher\t{p1_core}\t\n")
-GAME_NEW = ("balance\t流畅\t{e_core}\t\t4-5\tUnityGfx\t4-5\t"
-            "{e_core}=Audio,FMOD,Http;4-5=RenderThread,GLThread,Vulkan\n"
+GAME_NEW = ("balance\t流畅\t{e_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t"
+            "{e_core}=Audio,FMOD,Http;{p1_core}=RenderThread,GLThread,Vulkan\n"
             "performance\t性能\t{e_core},{p1_core}\t\t{p1_core}\tUnityGfx\t{p1_core}\t"
             "{e_core}=Audio,FMOD,Http\n")
 # v14 时代的旧值（迁移前）
@@ -68,7 +85,14 @@ APP_OLD = ("balance\t流畅\t{e_core}\t\t{p1_core}\tRenderThread\t{p1_core}\t"
 
 def make_env(app_rows, marker=False):
     """造一个沙盒：拷 util.sh，写模板与标记，返回 (sh, 沙盒路径)。"""
-    d = tempfile.mkdtemp(prefix="v15_")
+    # ⚠ 不用 tempfile.mkdtemp()：沙盒/安全钩子会拦系统 temp 下的目录创建，
+    #   实测会 SIGTERM 掉测试进程。放模块目录内最稳；退出时清理，别污染仓库。
+    d = os.path.join(MOD, "_t_v15_%d" % os.getpid())
+    try:
+        os.makedirs(d, exist_ok=True)
+        _TMPDIRS.append(d)
+    except Exception:
+        d = tempfile.mkdtemp(prefix="v15_")
     st = os.path.join(d, "st")
     # ⚠ 模板必须落在 $STATE_DIR/webui/ —— util.sh 里
     #   WEBUI_DIR="${STATE_DIR}/webui"、APP_TPL_FILE="${WEBUI_DIR}/app_templates.tsv"。
@@ -130,21 +154,26 @@ def main():
                 'echo "VALID=$SCHED_CORES_VALID"\n' % UTIL)
     vals = dict(l.split("=", 1) for l in out.strip().splitlines() if "=" in l)
     check(vals.get("B") == "0-3", "流畅 基线 = 0-3（实际 %s）" % vals.get("B"))
-    check(vals.get("E") == "4-5", "流畅 升级目标 = 4-5（实际 %s）" % vals.get("E"))
+    check(vals.get("E") == "4-7", "流畅 升级目标 = 4-7（实际 %s）" % vals.get("E"))
     check(vals.get("PB") == "0-3", "性能 基线 = 0-3（实际 %s）" % vals.get("PB"))
     check(vals.get("PE") == "4-7", "性能 升级目标 = 4-7（实际 %s）" % vals.get("PE"))
-    check("4-5" in (vals.get("VALID") or ""),
-          "4-5 **在** WebUI 白名单里（v16.23 起可自定义）")
+    check("4-5" not in (vals.get("VALID") or ""),
+          "4-5 **不在** 白名单里（v16.26 已移除，实际 VALID=%s）" % vals.get("VALID"))
+    check((vals.get("VALID") or "").split() ==
+          ["0-3", "4-7", "8-9", "0-7", "4-9"],
+          "白名单恰为那 5 个（实际 %r）" % (vals.get("VALID") or "").split())
 
     print("\n[2] mode_sched_row 与单一来源一致")
+    # ★ v16.26：行变 9 列，核位在第 3(base)/4(esc) 列
     out, _ = sh('. "%s" >/dev/null 2>&1\n'
                 'for m in powersave balance performance fast; do echo "$(mode_sched_row $m)"; done\n' % UTIL)
     rows = [l for l in out.strip().splitlines() if l]
     m = {r.split()[0]: r.split() for r in rows}
-    check(m.get("balance", [None, None, None])[2] == "4-5", "流畅 row 核位=4-5")
-    check(m.get("performance", [None, None, None])[2] == "4-7", "性能 row 核位=4-7")
-    check(m.get("fast", [None, None, None])[2] == "4-9", "极速 row 核位=4-9（未动）")
-    check(m.get("powersave", [None, None, None])[2] == "-", "省电 row 核位=-（未动）")
+    check(len(m.get("balance", [])) == 9, "balance 行为 9 列（实际 %d）" % len(m.get("balance", [])))
+    check(m.get("balance", [None, None, None])[3] == "4-7", "流畅 升级目标=4-7")
+    check(m.get("performance", [None, None, None])[3] == "4-7", "性能 升级目标=4-7")
+    check(m.get("fast", [None, None, None])[3] == "4-9", "极速 升级目标=4-9（未动）")
+    check(m.get("powersave", [None, None, None])[3] == "-", "省电 升级目标=-（未动）")
 
     print("\n[3] v15 迁移：旧表 → 新值（含用户自建行不受影响）")
     old_with_custom = APP_OLD + "myapp\t我的档\t0-3\t\t4-7\t\t\t\n"

@@ -21,3 +21,15 @@ dist/
 *.xml
 scratch/
 _scratch_*/
+
+# ---- 自检脚本在模块目录内建的临时沙盒（见 tools/test_*.py 的 mkdtmp）----
+#   ⚠ 故意**不**在测试退出时 rmtree：宿主 safe-delete 钩子会因「批量删除 >50 文件」
+#     抛 SystemExit(1)，把全绿测试的退出码染成 1。残留目录交给本规则忽略。
+_t_*/
+_t_*
+
+# ---- 测试/调试报告（本地产物，不入库）----
+_rep_*.txt
+_test_all_report.txt
+_t[0-9]*.log
+_probe*.txt

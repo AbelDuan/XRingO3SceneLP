@@ -24,7 +24,8 @@
 #     与 O3 结论冲突（大核频窗 1.1~2.0GHz 在低效区）且违背档位语义 → 改为默认不升。
 #
 #  用法: load_aware.sh <tids文件> <hot输出文件> <p1表达式> <hp表达式> <e表达式> \
-#                       <模式> <升级目标> <允许上探4-9> <间隔> <忙阈值> <闲阈值> <禁用空闲收缩>
+#                       <模式> <升级目标> <允许上探4-9> <间隔> <忙阈值> <闲阈值> <禁用空闲收缩> \
+#                       <基线核位>              ← ★ v16.26 新增第 13 参（SBASE）
 #  状态: $TMP/lw.state（tid<TAB>ticks）+ $TMP/lw.ts（上次采样时间戳）
 #  关闭: touch $STATE_DIR/lw_off   （默认开启）
 #  ★ v16.13：升级目标/阈值不再写死，由调用方按**当前模式**从 lib/util.sh 的
@@ -49,6 +50,10 @@ INTERVAL="${9:-12}"
 HOTVAL="${10:-10}"
 IDLEVAL="${11:-4}"
 IDLEOFF="${12:-0}"
+#  ★ v16.26：基线核位（空闲收缩锚点）。缺省回落 SE（e_core），兼容旧调用。
+#    这是「WebUI 模式页 → 核心集合 → 基线」真正生效的地方：
+#    设了基线 0-3 的档，中低负载线程就该收在 0-3，而不是固定收在 e_core。
+SBASE="${13:-}"
 [ -s "$TIDS" ] || { : > "$OUT" 2>/dev/null; exit 0; }
 [ -n "$OUT" ] || OUT="$TMP/lw.hot"
 
@@ -106,7 +111,7 @@ ETICKS=$(( WIN * 100 ))     # USER_HZ=100
 #   （测试实测：状态文件根本写不出来）。这里用 STNW / HOTF。
 } | awk -v SP1="$SP1" -v SHP="$SHP" -v SE="$SE" -v SESC="$SESC" \
         -v ET="$ETICKS" -v FIRST="$FIRST" -v HOT="$LW_HOT" -v IDLE="$LW_IDLE" \
-        -v LWHP="$LW_HP" -v IDLEOFF="$LW_IDLEOFF" -v MODE="$MODE" \
+        -v LWHP="$LW_HP" -v IDLEOFF="$LW_IDLEOFF" -v MODE="$MODE" -v SBASE="$SBASE" \
         -v STF="$STATEF" -v STNW="$NEWF" -v HOTF="$OUT" '
 #   ⚠⚠ 这三个函数的字符串**首尾都必须带空格**（" 4 5 6 7 "），
 #      否则 `index(s, " 7 ")` 对**最后一个元素**恒为 0 —— 实测踩过：
@@ -171,6 +176,10 @@ function added(baseList, addList,   _n,_a,_i) {
 }
 BEGIN {
     L_P1 = listof(SP1); L_HP = listof(SHP); L_E = listof(SE)
+    #  ★ v16.26：空闲收缩的锚点。优先用调用方给的「基线核位」（WebUI 可配），
+    #    缺省才回落 SE（e_core）。这是「核心集合 → 基线」真正生效的地方。
+    L_BASE = (SBASE != "" ? listof(SBASE) : L_E)
+    SHRINK = list2expr(L_BASE)
     while ((getline l < STF) > 0) {
         n = split(l, a, "\t")
         if (n >= 2 && a[1] != "") PREV[a[1]] = a[2] + 0
@@ -239,6 +248,8 @@ BEGIN {
             upL = listof(SESC)
             if (LWHP == 1) upL = merge(upL, merge(L_P1, L_HP))
             if (added(baseL, upL)) {
+                # 目标 = 基线 ∪ 升级目标（区间记法由 list2expr 归一）。
+                #   例：base 0-3 + esc 4-7 → "0-7"（不是逐核 "0,1,2,3,4,5,6,7"）。
                 t = merge(baseL, upL); te = list2expr(t)
                 # ⚠⚠ `print ... > FILE` 的重定向会**吃掉后面的分号表达式**：
                 #   `{ print x > F; done = 1 }` 是 awk 语法错误（实测踩过）——
@@ -247,10 +258,11 @@ BEGIN {
                 if (te != "" && te != be) print tid " " curPid " " te > HOTF
             }
         }
-    } else if (lvlN <= idleN && L_E != "" && IDLEOFF != 1) {
-        # 空闲线程：收缩到能效核（仅当基集本来就更大时才动）
-        #   fast（极速）档 IDLEOFF=1：中低负载线程保持在 0-7 由系统分配，不收缩回 0-3。
-        ee = list2expr(L_E)
+    } else if (lvlN <= idleN && SHRINK != "" && IDLEOFF != 1) {
+        # 空闲线程：收缩到**基线核位**（★ v16.26：不再固定 SE，而是 WebUI 可配的基线）
+        #   fast（极速）档 IDLEOFF=1：中低负载线程保持在 0-7 由系统分配，不收缩。
+        #   ⚠ 只有「当前不在基线内」的线程才值得发命令（幂等短路，省电）。
+        ee = SHRINK
         if (on_esc || hasany(baseL, L_P1) || hasany(baseL, L_HP))
             if (ee != "" && ee != be) print tid " " curPid " " ee > HOTF
     }

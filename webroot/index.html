@@ -528,7 +528,7 @@ pre.tall { max-height: 62vh; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">16.12 (2026-09-18)</span>
+    <span class="h-ver" id="ver">17.1 (2026-09-22)</span>
     <div class="h-chips">
       <span class="pill" id="conn-chip">连接中…</span>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
@@ -1526,7 +1526,7 @@ function freqArr(cluster) {
     .split(/\s+/).filter(Boolean).map(Number).sort((a, b) => a - b);
 }
 /* 四档核心集合：后端 SC_<mode> = 中文|基线|升级|基线默认|升级默认 */
-const SC_OUT = ['0-3', '4-5', '4-7', '8-9', '0-7', '4-9'];
+const SC_OUT = ['0-3', '4-7', '8-9', '0-7', '4-9'];
 function scSaved(m) {
   const p = String((S.schedcores || {})['SC_' + m] || '').split('|');
   return { cn: p[0] || MODE_CN[m], base: p[1] || '0-3', esc: p[2] || '-' };
@@ -1606,7 +1606,7 @@ function viewModes() {
 <div class="group">
   <div class="g-title">模式 → 核心集合</div>
   <div class="mono" style="font-size:11px;opacity:.65;padding:0 0 6px">
-    每档可选 6 个核位：<b>0-3</b>（Pro 小核）/ <b>4-5</b>（Premium 中核 · 窄）/
+    每档可选 5 个核位：<b>0-3</b>（Pro 小核）/
     <b>4-7</b>（Premium 中核 · 全）/ <b>8-9</b>（Ultra 超大核）/ <b>0-7</b> / <b>4-9</b>。<br>
     「基线」= 中低负载线程落哪；「高负载升级到」= 实测占用率超阈值后并入哪。
     选「不升级」则该档忙线程也留在基线内。

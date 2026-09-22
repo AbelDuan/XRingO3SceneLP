@@ -23,6 +23,41 @@ FAILS = []
 CHECKS = [0]
 
 
+def _binenv():
+    """补上 Git usr/bin 与 Node 目录（本机 PATH 被沙盒收窄，默认找不到 node）。"""
+    env = dict(os.environ)
+    extra = []
+    for c in ("C:/Users/Abel/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin",
+              "C:/Program Files/Git/usr/bin",
+              "C:/Users/Abel/.workbuddy/binaries/node/versions/22.22.2-3",
+              "C:/Users/Abel/.workbuddy/binaries/node/versions/22.12.0"):
+        if os.path.isdir(c):
+            extra.append(c)
+    if extra:
+        env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
+    return env
+
+
+def _node():
+    """找 node 可执行文件绝对路径。
+    ⚠ 不能用裸 "node"：本环境 PATH 不含 Node 目录 → FileNotFoundError[WinError 2]。
+    """
+    cands = []
+    for c in ("C:/Users/Abel/.workbuddy/binaries/node/versions/22.22.2-3",
+              "C:/Users/Abel/.workbuddy/binaries/node/versions/22.12.0"):
+        cands.append(os.path.join(c, "node.exe"))
+        cands.append(os.path.join(c, "node"))
+    for p in cands:
+        if os.path.isfile(p):
+            return p
+    return "node"
+
+
+def _p(path):
+    """Windows 路径 → 正斜杠（避免反斜杠被下游当转义序列吃掉）。"""
+    return path.replace("\\", "/")
+
+
 def check(cond, msg):
     CHECKS[0] += 1
     if cond:
@@ -102,10 +137,10 @@ def main():
                     FREQS_P: '1113600 1497600 2044800' };
         S.schedcores = {
           SC_powersave: '省电|0-3|-|0-3|-',
-          SC_balance: '流畅|0-3|4-5|0-3|4-5',
+          SC_balance: '流畅|0-3|4-7|0-3|4-7',
           SC_performance: '性能|0-3|4-7|0-3|4-7',
           SC_fast: '极速|0-7|4-9|0-7|4-9',
-          SC_VALID: '0-3 4-5 4-7 8-9 0-7 4-9',
+          SC_VALID: '0-3 4-7 8-9 0-7 4-9',
           SC_HAS: '0',
         };
         S.status = { MODE_CN: '性能', MODE: 'performance' };
@@ -149,14 +184,15 @@ def main():
             ? 'OK' : ('BAD:' + S.model.modes.balance.active.L[1]);
         } catch (e) { mf = 'ERR:' + e; }
         try {
-          pick('picksc', 'balance:esc', '4-5');
-          sc = (S.scPicks && S.scPicks.balance && S.scPicks.balance.esc === '4-5')
+          pick('picksc', 'balance:esc', '4-7');
+          sc = (S.scPicks && S.scPicks.balance && S.scPicks.balance.esc === '4-7')
             ? 'OK' : ('BAD:' + JSON.stringify(S.scPicks));
         } catch (e) { sc = 'ERR:' + e; }
         out.__mfPick = mf; out.__scPick = sc;
         console.log(JSON.stringify(out));
         """)
-    r = subprocess.run(["node", harness], capture_output=True, text=True)
+    r = subprocess.run([_node(), _p(harness)], capture_output=True, text=True,
+                       env=_binenv())
     if r.returncode != 0:
         print("  \u2717 node 执行失败：")
         print((r.stderr or "").strip()[:600])

@@ -486,13 +486,24 @@ printf '%s' "$buf" > "$TIDS"
 #      performance → 4-7（8-9 不碰）
 #      fast        → 4-9（只有高负载线程才上探；且不做空闲收缩）
 #    参数全部来自 lib/util.sh 的 mode_sched_row()（单一事实源）。
-#  产出 $TMP/lw.hot 供 pin_cgroup.sh 消费；不在间隔内则零开销直接返回。
+#  产出 $TMP/lw.hot；不在间隔内则零开销直接返回。
 #  ⚠ 必须在 5a) 之前跑：pin_cgroup 依赖它决定组集合与是否跳过缓存。
+#  ★★ v16.26 修复（「核心集合不生效」的根因之一）★★
+#    v16.17 把 PIN_MODE 默认从 group 改成 taskset 后，这里加了
+#    `[ "$PIN_MODE" = "group" ]` 门 → **taskset 下 load_aware 完全不跑**，
+#    于是「高负载升级」与「空闲收缩」两个功能同时静默失效，
+#    WebUI「模式 → 核心集合」设的升级核位也就永远看不到效果。
+#    现在两种情况都跑：
+#      · group  模式：产物 lw.hot 由 pin_cgroup.sh 消费（原路径，不变）
+#      · taskset 模式：产物 lw.hot 由下面新增的 6.5) 段翻译成 taskset 命令消费
+#    另：MS_BASE（基线核位）也传进去，作为**空闲收缩**的锚点 ——
+#    这样「闲时缩到基线、忙时并按需放开」的能效语义才闭环。
 # ============================================================
-if [ "$PIN_MODE" = "group" ] && [ $# -eq 0 ]; then
+if [ $# -eq 0 ]; then
     sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TIDS" "$TMP/lw.hot" \
         "$SEM_p1" "$SEM_hp" "$SEM_e" \
         "$CUR_MODE" "$SESC" "$MS_HOTOK" "$MS_INT" "$MS_HOT" "$MS_IDLE" "$MS_IDLEOFF" \
+        "$MS_BASE" \
         >/dev/null 2>&1
 fi
 
@@ -679,6 +690,82 @@ function matchsub(s, n) { return index(s, n) > 0 }
 # 6) 执行（只有真的需要改的命令才会在这里）
 if [ -s "$CMDS" ]; then
     sh "$CMDS" >/dev/null 2>&1
+fi
+
+# ============================================================
+#  6.5) ★ v16.26 新增：taskset 通路消费 load_aware 的负载决策
+# ------------------------------------------------------------
+#  背景：v16.17 把 PIN_MODE 默认改成 taskset 后，load_aware 被 `PIN_MODE=group`
+#        门挡住**完全不跑**（4.5 节已放开）。放开之后，它产出的 $TMP/lw.hot
+#        在 taskset 通路里**没人消费** —— pin_cgroup.sh 只在 group 模式读它。
+#        于是「核心集合」的升级/收缩依然看不到效果 = 用户报的 bug 本体。
+#
+#  这里把 lw.hot 直接翻译成 taskset 命令，**覆盖**上面静态模板的决策：
+#    lw.hot 每行 "tid pid expr"（expr = 该线程本轮应落的核位表达式）
+#    → 只对「当前 affinity 与 expr 不一致」的 tid 发命令（幂等短路，省电）
+#  ⚠ 掩码计算与上面 5b) 的 listof/maskof 语义必须一致；这里用独立 awk，
+#    读 /proc/<tid>/status 的 Cpus_allowed_list 做比对。
+#  ⚠ 只在 taskset 模式（CG_OK != 1）下跑 —— group 模式下 lw.hot 由
+#    pin_cgroup.sh 消费，重复下发会互相打架。
+# ============================================================
+if [ "$CG_OK" != "1" ] && [ -s "$TMP/lw.hot" ]; then
+awk '
+function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
+function listof(e,   _i,_n,_a,_lo,_hi,_c,_out,_b) {
+    _out = ""
+    _n = split(e, _a, ",")
+    for (_i = 1; _i <= _n; _i++) {
+        _a[_i] = trim(_a[_i]); if (_a[_i] == "") continue
+        if (_a[_i] ~ /^[0-9]+-[0-9]+$/) { split(_a[_i], _b, "-"); _lo = _b[1]+0; _hi = _b[2]+0 }
+        else if (_a[_i] ~ /^[0-9]+$/)    { _lo = _a[_i]+0; _hi = _lo }
+        else continue
+        for (_c = _lo; _c <= _hi; _c++) if (!(_c in _S)) { _S[_c] = 1; _out = _out " " _c }
+    }
+    for (_i in _S) delete _S[_i]
+    return _out
+}
+function maskof(l,   _i,_n,_a,_m) {
+    _m = 0
+    _n = split(l, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "") _m += 2^_a[_i]
+    return sprintf("%x", _m)
+}
+function affof(f,   _l) {
+    while ((getline _l < f) > 0) {
+        if (_l ~ /^Cpus_allowed_list:/) {
+            sub(/^Cpus_allowed_list:[ \t]*/, "", _l)
+            sub(/[ \t\r\n].*$/, "", _l)
+            close(f); return _l
+        }
+    }
+    close(f); return ""
+}
+# 存活检查：/proc/<tid>/stat 读不到 → 线程已退出。
+#   ⚠ lw.hot 可能含已退出的 tid；不检查就会对死 tid 白发 taskset。
+function alive(t,   _l) {
+    _l = ""
+    if ((getline _l < ("/proc/" t "/stat")) > 0) { close("/proc/" t "/stat"); return 1 }
+    close("/proc/" t "/stat")
+    return 0
+}
+{
+    tid = $1 + 0; e = $3
+    if (tid <= 0 || e == "") next
+    if (!(tid in M)) M[tid] = maskof(listof(e))
+}
+END {
+    for (t in M) {
+        want = M[t]
+        if (want == "" || want == "0") continue
+        if (!alive(t)) continue          # ← 已退出的 tid 直接跳过
+        cur = maskof(listof(affof("/proc/" t "/status")))
+        if (cur != want) printf "taskset -p %s %s\n", want, t
+    }
+}
+' "$TMP/lw.hot" > "$TMP/lw.cmds" 2>/dev/null
+    if [ -s "$TMP/lw.cmds" ]; then
+        sh "$TMP/lw.cmds" >/dev/null 2>&1
+    fi
 fi
 fi   # end of 5b
 

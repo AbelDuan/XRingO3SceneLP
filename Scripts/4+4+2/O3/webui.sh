@@ -727,7 +727,8 @@ cmd_schedcores() {
     for m in $MODE_LIST; do
         local row esc esc_def base base_def cn
         row=$(mode_sched_row "$m")
-        esc_def=$(printf '%s' "$row" | cut -d' ' -f3)
+        #  ★ v16.26：mode_sched_row 输出 9 列（新增第 3 列 base），esc 前移到第 4 列。
+        esc_def=$(printf '%s' "$row" | cut -d' ' -f4)
         base_def=$(sched_cores_template_other "$m")
         esc="$esc_def"; base="$base_def"
         # ⚠ 列序：文件是 <base>\t<esc>，所以第 1 列 → base、第 2 列 → esc
@@ -773,7 +774,7 @@ cmd_setschedcores() {   # $1=mode $2=baseline $3=esc
         else
             # ⚠ 文件列序是 <base>\t<esc>，别接反（真机实测接反过）
             b2=$(sched_cores_template_other "$x")
-            e2=$(mode_sched_row "$x" | cut -d' ' -f3)
+            e2=$(mode_sched_row "$x" | cut -d' ' -f4)   # ★ v16.26：esc 在第 4 列
             sched_cores_lookup "$x" 1 && sched_cores_valid "$SCV" && b2="$SCV"
             sched_cores_lookup "$x" 2 && sched_cores_valid "$SCV" && e2="$SCV"
         fi

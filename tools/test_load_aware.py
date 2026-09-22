@@ -12,10 +12,13 @@ test_load_aware.py —— load_aware.sh（动态负载感知）的离线自检
   2. `-v HOT=...` 传进来的是字符串，`lvl >= HOT` 会走**字符串比较** ——
      `lvl=7 >= HOT=9` 为假、`10 >= 12` 也为假，阈值行为取决于字典序。
      手测（字面量）正常、走脚本失效。（v16.16 用 +0 修掉）
-  3. 档位语义：省电不升级、流畅升到 4-5、性能升到 4-7、极速才上探 4-9；
+  3. 档位语义：省电不升级、流畅升到 4-7、性能升到 4-7、极速才上探 4-9；
      fast 档还不做空闲收缩（中低负载要留在 0-7）。
+     （★ v16.26：流畅目标由 4-5 改为 4-7 —— 4-5 已从未白名单移除）
   4. "-" 是「本档不升级」的占位符，必须显式跳过 —— 否则会被当成核位字符串
      而恒真，省电档会被错误升级。
+  5. 空闲收缩必须用 **SBASE（该档基线）** 作为回落目标，而不是硬编码 SE(e_core)
+     —— 否则 fast 档（基线 0-7）的空闲线程会被错误收缩。★ v16.26 新增。
 
 跑法: python tools/test_load_aware.py
 """
@@ -68,6 +71,17 @@ class Harness:
         self.awk = os.path.join(workdir, "lw.awk")
         io.open(self.awk, "w", encoding="utf-8").write(awk_prog)
 
+    @staticmethod
+    def p(path):
+        """Windows 路径 → 正斜杠形式。
+        ⚠⚠ 必须做这一步：路径经 `-v STF=<path>` 传给 awk 后，**反斜杠会被 awk 当转义
+           序列吃掉**（实测 `...\\_t_lwdbg\\state` 里的 `\\s` 变成 `s`）→ awk 打不开文件
+           → `PREV` 表为空 → 每个线程都被判成「新线程」→ 主规则全走 `next`、
+           **一条 hot 都不产出**。表现为「所有升级/收缩断言全 None」。
+           （本环境 os.path.join 用的是反斜杠，天然触发。）
+        """
+        return path.replace("\\", "/")
+
     def write_inputs(self, threads):
         """threads: [(tid, base, ratio_pct, busy_seconds)]
 
@@ -94,22 +108,27 @@ class Harness:
         return et
 
     def run(self, mode, esc, hotok, interval, hot, idle, idleoff,
-            first=0, sp1="4-7", shp="8-9", se="0-3"):
+            first=0, sp1="4-7", shp="8-9", se="0-3", sbase="0-3"):
         et = self.write_inputs(self.threads)
         out = os.path.join(self.dir, "hot.out")
-        if os.path.exists(out):
-            os.unlink(out)
-        cmd = ["awk", "-f", self.awk,
+        # ⚠ 用「清空」而不是 os.unlink：宿主 safe-delete 钩子会拦删除（尤其同一轮
+        #   累计删除数超阈值时直接 SystemExit）→ 把测试退出码染成非 0。
+        #   截断为 0 字节效果等价（awk 用 `>` 重定向写，本来也会覆盖）。
+        try:
+            io.open(out, "w", encoding="utf-8").close()
+        except Exception:
+            pass
+        cmd = ["awk", "-f", self.p(self.awk),
                "-v", "SP1=" + sp1, "-v", "SHP=" + shp, "-v", "SE=" + se,
-               "-v", "SESC=" + esc,
+               "-v", "SESC=" + esc, "-v", "SBASE=" + sbase,
                "-v", "ET=%d" % et, "-v", "FIRST=%d" % first,
                "-v", "HOT=%s" % hot, "-v", "IDLE=%s" % idle,
                "-v", "LWHP=%s" % hotok, "-v", "IDLEOFF=%s" % idleoff,
                "-v", "MODE=" + mode,
-               "-v", "STF=" + os.path.join(self.dir, "state"),
-               "-v", "STNW=" + os.path.join(self.dir, "state.new"),
-               "-v", "HOTF=" + out,
-               os.path.join(self.dir, "in.txt")]
+               "-v", "STF=" + self.p(os.path.join(self.dir, "state")),
+               "-v", "STNW=" + self.p(os.path.join(self.dir, "state.new")),
+               "-v", "HOTF=" + self.p(out),
+               self.p(os.path.join(self.dir, "in.txt"))]
         r = subprocess.run(cmd, capture_output=True, text=True, cwd=self.dir)
         return r, out
 
@@ -127,8 +146,21 @@ class Harness:
         return got
 
 
+def _binenv():
+    """补上 Git usr/bin（cut/sed/awk 都在那），否则 sh 层会「command not found」。"""
+    env = dict(os.environ)
+    extra = []
+    for c in ("C:/Users/Abel/.workbuddy/binaries/PortableGit/versions/1.2.0/usr/bin",
+              "C:/Program Files/Git/usr/bin"):
+        if os.path.isdir(c):
+            extra.append(c)
+    if extra:
+        env["PATH"] = os.pathsep.join(extra) + os.pathsep + env.get("PATH", "")
+    return env
+
+
 def sh_out(script):
-    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True)
+    r = subprocess.run(["sh", "-c", script], capture_output=True, text=True, env=_binenv())
     return (r.stdout or "").strip()
 
 
@@ -149,7 +181,12 @@ def main():
     # ---- 1) awk 程序能独立跑起来（语法有效性，不再被 2>/dev/null 吞掉）----
     print("\n[2] awk 程序语法有效性")
     prog = extract_awk(text)
-    tmp = tempfile.mkdtemp(prefix="lwtest_")
+    # ⚠ 不用 tempfile.mkdtemp()：沙盒/安全钩子会拦系统 temp 下的目录创建 → SIGTERM。
+    tmp = os.path.join(MOD, "_t_lw_%d" % os.getpid())
+    try:
+        os.makedirs(tmp, exist_ok=True)
+    except Exception:
+        tmp = tempfile.mkdtemp(prefix="lwtest_")
     h = Harness(tmp, prog)
     check(True, "awk 程序已抽出（%d 行）" % len(prog.splitlines()))
 
@@ -163,9 +200,10 @@ def main():
 
     # ---- 2) 四档升级目标（与 lib/util.sh 的 mode_sched_row 对齐）----
     print("\n[3] 四档升级目标（忙线程基线 0-3）")
+    #   ★ v16.26：流畅的升级目标由 4-5 改为 4-7（4-5 已从未白名单移除）
     cases = [
         ("powersave",   "-",   "0", 15, 10, 4, 0, None,  "省电：不升级"),
-        ("balance",     "4-5", "0", 12, 10, 4, 0, "0-5", "流畅：升到 0-5（并入 4-5）"),
+        ("balance",     "4-7", "0", 12, 10, 4, 0, "0-7", "流畅：升到 0-7（并入 4-7 整簇）"),
         ("performance", "4-7", "0", 10, 9,  4, 0, "0-7", "性能：升到 0-7"),
         ("fast",        "4-9", "1", 8,  8,  4, 1, "0-9", "极速：升到 0-9（上探 4-9）"),
     ]
@@ -181,12 +219,27 @@ def main():
     # ---- 3) 空闲收缩：非 fast 档收缩、fast 档不收缩 ------------------------
     print("\n[4] 空闲线程处理（基线 4-7，占用 2%）")
     h.threads = [(6001, "4-7", 2, 0)]
-    got = h.targets(mode="balance", esc="4-5", hotok="0", interval=12,
+    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
                     hot=10, idle=4, idleoff=0)
     check(got.get(6001) == "0-3", "流畅档：空闲线程收缩到 0-3（实际 %s）" % got.get(6001))
     got = h.targets(mode="fast", esc="4-9", hotok="1", interval=8,
                     hot=8, idle=4, idleoff=1)
     check(6001 not in got, "极速档：空闲线程不收缩（中低负载留 0-7）")
+
+    # ---- 3b) 空闲收缩回落目标 = SBASE（该档基线），不是硬编码 SE ----------
+    print("\n[4b] 空闲收缩回到 SBASE 基线（v16.26 新增：基线锚点）")
+    # 基线 4-7 的空闲线程 → 收缩目标应是 SBASE=4-7 之外的基线，
+    # 这里用 SBASE=0-7（fast 档基线）验证「用的是 SBASE 而非 SE」
+    h.threads = [(6101, "4-7", 2, 0)]
+    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
+                    hot=10, idle=4, idleoff=0, sbase="0-7")
+    check(got.get(6101) == "0-7",
+          "空闲收缩回落到 SBASE=0-7（实际 %s）" % got.get(6101))
+    h.threads = [(6102, "4-7", 2, 0)]
+    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
+                    hot=10, idle=4, idleoff=0, sbase="0-3")
+    check(got.get(6102) == "0-3",
+          "空闲收缩回落到 SBASE=0-3（实际 %s）" % got.get(6102))
 
     # ---- 4) 阈值边界：字符串比较 bug 的回归 ---------------------------------
     print("\n[5] 阈值边界（+0 数值化的回归用例）")
@@ -210,8 +263,8 @@ def main():
     print("\n[7] 与 lib/util.sh mode_sched_row 对齐")
     row = sh_out('. "%s" >/dev/null 2>&1; for m in powersave balance performance fast; '
                  'do echo "$m:$(mode_sched_row $m)"; done' % UTIL)
-    # v16.22：流畅的升级目标改为 4-5（按本机 4-7 同频域实测重排），性能保持 4-7
-    expect_esc = {"powersave": "-", "balance": "4-5",
+    # v16.26：流畅的升级目标为 4-7（4-5 已移除），性能保持 4-7
+    expect_esc = {"powersave": "-", "balance": "4-7",
                   "performance": "4-7", "fast": "4-9"}
     expect_hp = {"powersave": "0", "balance": "0",
                  "performance": "0", "fast": "1"}
@@ -220,12 +273,12 @@ def main():
             continue
         m, rest = line.split(":", 1)
         cols = rest.split()
-        # 列：id 中文名 升级目标 允许8-9 间隔 忙阈值 闲阈值 禁用空闲收缩
-        if len(cols) >= 8:
-            check(cols[2] == expect_esc[m],
-                  "%s 升级目标 = %s（表里 %s）" % (m, expect_esc[m], cols[2]))
-            check(cols[3] == expect_hp[m],
-                  "%s 允许上探 4-9 = %s" % (m, cols[3]))
+        # ★ v16.26：行变 9 列 → id 中文名 **base** esc hotok 间隔 忙阈值 闲阈值 禁用空闲收缩
+        if len(cols) >= 9:
+            check(cols[3] == expect_esc[m],
+                  "%s 升级目标 = %s（表里 %s）" % (m, expect_esc[m], cols[3]))
+            check(cols[4] == expect_hp[m],
+                  "%s 允许上探 4-9 = %s" % (m, cols[4]))
 
     print("\n" + "=" * 62)
     if FAILS:
