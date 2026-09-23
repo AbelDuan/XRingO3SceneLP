@@ -63,6 +63,9 @@ migrate_templates_v16
 # v17：把**已有安装**档位表里的字面量 4-5 迁回 {p1_core}（v16.26 只删了白名单/默认/新装种子，
 #      漏了状态目录里那份活数据 —— 上机实测 158 个应用的 heavy_cores 仍是 4-5）
 migrate_templates_v17
+# v18：省电档补 RenderThread → {p1_core} 窄出口（真机事故：微信 333/333 线程
+#      被硬锁 0-3 → 进聊天卡顿/内容重载；tpl_v18 新标记，理由见 util.sh）
+migrate_templates_v18
 
 # 3) 按模板重建线程分配 → 写进 Scene 的 files/threads.json
 if [ -f "$SCENE_POWERCFG" ]; then

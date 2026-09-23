@@ -117,6 +117,13 @@ def run_offline_suite():
         ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
         ("test_pack_hygiene.py", "打包卫生（不得混入自检沙盒）"),
         ("test_templates_v17.py", "4-5 字面量迁移（已有安装）"),
+        # —— 近几轮新增的套件（2026-09-23 补登记：漏登 = 打包闸门看不见它们）——
+        ("test_templates_v18.py", "省电档窄出口迁移（已有安装）"),
+        ("test_import_sync.py", "从 Scene 导入档位（真同步 + scene 剪枝）"),
+        ("test_assign_mark.py", "分配表 scene 标记的保存往返"),
+        ("test_action_import.py", "KSU 动作按钮 = 一键同步（无头）"),
+        ("test_migrate_nobig.py", "nobig 大核迁移的区间成员判定"),
+        ("test_release_unbind.py", "离表即释放（旧绑核回收）"),
     ]
     rc = 0
     for f, desc in suite:

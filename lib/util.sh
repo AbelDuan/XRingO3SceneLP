@@ -2429,6 +2429,46 @@ migrate_templates_v17() {
     return 0
 }
 
+# ------------------------------------------------------------
+#  v18：省电档补「窄出口」—— powersave 行加 RenderThread → {p1_core}
+# ------------------------------------------------------------
+#  ★ 真机事故（lhasa · 微信）：省电档把整应用 **333/333** 个线程（含
+#    RenderThread 与主线程）硬锁在 0-3，且该档升级目标是 "-"、模板没有
+#    heavy 分流 —— 没有任何出口：进聊天/内容加载时 4 个小核扛不住，
+#    表现为滑动卡顿、内容重载。
+#  · 只改**内置 powersave 一行**：other/主线程仍 {e_core}（0-3），
+#    heavy_thread=RenderThread → heavy_cores={p1_core}（4-7）＝窄出口；
+#    升级目标 "-"、comm 规则、balance/performance/fast 三行一律不动。
+#    游戏表也不动（本次事故是普通应用；范围 = APP_TPL_FILE）。
+#  · 为什么是**新标记 tpl_v18** 而不是扩展 v17：真机上 **tpl_v17 标记已存在**
+#    （v17.x 已刷入）—— 扩展进 v17 函数会被 `[ -f "$TPL_V17_MARK" ] && return 0`
+#    直接挡掉、在这台设备上永远不再执行，已有安装就拿不到新行。
+#  · 幂等：$STATE_DIR/tpl_v18；改前备份 backup/*.pre-v18（与 v15/v16 同惯例）；
+#    ⚠ 重写内容必须与 seed_app_templates() 逐字一致。
+TPL_V18_MARK="${STATE_DIR}/tpl_v18"
+migrate_templates_v18() {
+    [ -f "$TPL_V18_MARK" ] && return 0
+    mkdir -p "${STATE_DIR}/backup" "${TMPD}" 2>/dev/null
+    if [ -f "$APP_TPL_FILE" ]; then
+        cp -f "$APP_TPL_FILE" "${STATE_DIR}/backup/$(basename "$APP_TPL_FILE").pre-v18" 2>/dev/null
+        awk -F'\t' '
+          /^#/ { print; next }
+          $1 == "powersave" {
+              printf "powersave\t省电\t{e_core}\t\t{e_core}\tRenderThread\t{p1_core}\t\n"
+              next
+          }
+          { print }
+        ' "$APP_TPL_FILE" > "${TMPD}/tpl.v18.app" 2>/dev/null
+        if [ -s "${TMPD}/tpl.v18.app" ] && ! cmp -s "${TMPD}/tpl.v18.app" "$APP_TPL_FILE"; then
+            write_replace "${TMPD}/tpl.v18.app" "$APP_TPL_FILE" && chmod 0666 "$APP_TPL_FILE" 2>/dev/null
+            log_quiet "webui: 档位表已升级到 v18（省电档 RenderThread → {p1_core} 窄出口）"
+        fi
+        rm -f "${TMPD}/tpl.v18.app" 2>/dev/null
+    fi
+    : > "$TPL_V18_MARK" 2>/dev/null
+    return 0
+}
+
 # 应用（非游戏）线程档位表：与模式同名同义，共 4 档。
 #   O3 = 2×C1-Ultra(8-9) + 4×C1-Premium(4-7) + 4×C1-Pro(0-3)，无小核。
 #   · Pro(0-3) 负责低功耗场景 → 「其余线程」默认压这里，能效最优
@@ -2519,8 +2559,16 @@ seed_app_templates() {
   mkdir -p "$(dirname "$APP_TPL_FILE")" 2>/dev/null
   {
     printf '# id\tfriendly\tother\theaviest_thread\theaviest_cores\theavy_thread\theavy_cores\tcomm\n'
-    # 省电：整条应用压 Pro 小核（主线程/其余都在 0-3）。低功耗场景能效最优。
-    printf 'powersave\t省电\t{e_core}\t\t{e_core}\t\t\t\n'
+    # 省电：轻线程与主线程仍压 Pro 小核（{e_core}=0-3，省电语义不变），
+    #   只给 **RenderThread** 留一条通向中核 {p1_core}（4-7）的**窄出口**。
+    #   ★ 真机事故（微信）：旧省电行没有 heavy 分流 → 整应用 **333/333** 个线程
+    #     （含 RenderThread、主线程）全被硬锁 0-3，而该档升级目标是 "-"、
+    #     模板又无 heavy 分流 → 没有任何出口：进聊天/内容加载时 4 个小核扛不住，
+    #     表现为滑动卡顿、内容重载。
+    #   other/主线程列、comm 规则一律不动（其余线程仍 0-3，省电语义保持）。
+    #   ⚠ 配套：load_aware 的空闲收缩已改为「静态落位 ∩ 基线」——
+    #     否则这条 4-7 出口会在闲时被收缩回 0-3（SESC="-" 永远追不回来）。
+    printf 'powersave\t省电\t{e_core}\t\t{e_core}\tRenderThread\t{p1_core}\t\n'
     # 流畅：日常较重负载也要覆盖 —— 主线程与渲染线程上 Premium(4-7)，其余压 Pro。
     #   Worker/Job/Async/Pool 留 Pro 省电（它们是突发型，不是持续重载）。
     # 流畅（v16.26）：轻线程 0-3；主线程/渲染线程用 **4-7**（整条中核）。

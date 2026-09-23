@@ -89,6 +89,8 @@
       },
       "cpuset": {
         "main_thread": "0-3",
+        "heavy_thread": "RenderThread",
+        "heavy_cores": "{p1_core}",
         "other": "0-3"
       }
     },

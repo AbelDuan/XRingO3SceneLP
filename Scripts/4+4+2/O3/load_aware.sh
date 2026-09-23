@@ -108,7 +108,10 @@ ETICKS=$(( WIN * 100 ))     # USER_HZ=100
   while IFS='|' read -r p o m h ht hr cm uni tl pkg tier; do
       [ -n "$p" ] || continue
       [ -d "/proc/$p" ] || continue
-      echo "@$p|$o"
+      # ★ 把**整行模板列**（o/m/h/ht/hr/cm）随 @ 行带给 awk —— idle 分支要按
+      #   线程角色算「静态落位」（此前只带 o=行 other：静态 4-7 的 RenderThread
+      #   与普通线程无法区分，闲时一律朝档位基线收缩 → 窄出口被撤销，见下方 idle 注释）。
+      echo "@$p|$o|$m|$h|$ht|$hr|$cm"
       cat "/proc/$p/task"/*/stat 2>/dev/null
   done < "$TIDS"
 # ⚠ 输出文件用的变量名**绝不能叫 NF / NR / FS / OFS** 这些 awk 内置名 ——
@@ -118,9 +121,9 @@ ETICKS=$(( WIN * 100 ))     # USER_HZ=100
         -v ET="$ETICKS" -v FIRST="$FIRST" -v HOT="$LW_HOT" -v IDLE="$LW_IDLE" \
         -v LWHP="$LW_HP" -v IDLEOFF="$LW_IDLEOFF" -v MODE="$MODE" -v SBASE="$SBASE" \
         -v STF="$STATEF" -v STNW="$NEWF" -v HOTF="$OUT" '
-#   ⚠⚠ 这三个函数的字符串**首尾都必须带空格**（" 4 5 6 7 "），
+#   ⚠⚠ 下面这些函数（listof/merge/added…）的字符串**首尾都必须带空格**（" 4 5 6 7 "），
 #      否则 `index(s, " 7 ")` 对**最后一个元素**恒为 0 —— 实测踩过：
-#      末位核位判不出来 → hasany 误判为假、merge 把已有的核位又加一遍
+#      末位核位判不出来 → 边界判定误判为假、merge 把已有的核位又加一遍
 #      → 生成 "4-7,7" 这种畸形表达式（内核直接 EINVAL）。
 function listof(e,   _i,_n,_a,_lo,_hi,_c,_out,_b) {
     _out = ""
@@ -154,11 +157,45 @@ function list2expr(s,   _i,_n,_a,_st,_pv,_out) {
     if (_st != "") _out = _out (_st == _pv ? _st : _st "-" _pv)
     return _out
 }
-function hasany(baseList, addList,   _n,_a,_i) {
-    _n = split(addList, _a, " ")
-    for (_i = 1; _i <= _n; _i++)
-        if (_a[_i] != "" && index(" " baseList " ", " " _a[_i] " ") > 0) return 1
-    return 0
+#  集合求交（" 4 5 6 7 " ∩ " 0 1 2 3 " → " 4 5 6 7 " 里落在对方中的核位）。
+#  与 enforce_threads §5b 的 inter() 同源（awk 函数跨进程不能共享，按既有惯例
+#  复制一份；语义必须与那边一致）。BSET 清扫用**局部** _i 迭代 —— 漏清会让
+#  上一次调用的核位残留进这一次的交集（错误结果却完全静默）。
+function inter(a, b,   _n,_a,_i,_out) {
+    for (_i in BSET) delete BSET[_i]
+    _n = split(b, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "") BSET[_a[_i]] = 1
+    _out = ""
+    _n = split(a, _a, " ")
+    for (_i = 1; _i <= _n; _i++) if (_a[_i] != "" && (_a[_i] in BSET)) _out = _out " " _a[_i]
+    return _out
+}
+#  该线程的**静态落位**核位表达式 —— 与 enforce_threads §5b 慢路径同源、语义一致：
+#      comm 命中 comm 规则 → 该规则核位（最高，覆盖其余）
+#      > comm 含 heavy_thread → heavy_cores
+#      > comm 含 heaviest_thread → 主线程核位
+#      > tid==pid（主线程）→ 主线程核位；其余 → 行的 other；空值回落 other。
+#  输入走全局 cur*（@ 行携带的模板行）与本 stat 行的 tid/comm。
+#  ★★ 为什么 idle 分支需要它（真机事故 · 微信 333/333 线程锁 0-3）★★
+#    powersave 行新加的 RenderThread→{p1_core}(4-7) 窄出口，若空闲收缩仍朝
+#    档位基线(0-3)收 —— 静态 4-7 的 RenderThread 闲时就被拉回 0-3，而省电档
+#    SESC="-" 永远不会再升回来 → 模板改动被静默撤销（成了空操作）。
+function staticof(t, c,   _w,_n,_cps,_k,_at,_tn,_tm) {
+    _w = curBase
+    if (t == curPid) _w = curMain
+    if (c != "" && curHeavy != "" && index(c, curHeavy) > 0) _w = curHC
+    if (c != "" && curHT != "" && index(c, curHT) > 0) _w = curMain
+    if (curCM != "" && c != "") {
+        _n = split(curCM, _cps, ",")
+        for (_k = 1; _k <= _n; _k++) {
+            if (_cps[_k] == "") continue
+            _at = index(_cps[_k], "@"); if (_at < 1) continue
+            _tn = substr(_cps[_k], 1, _at - 1); _tm = substr(_cps[_k], _at + 1)
+            if (_tn != "" && index(c, _tn) > 0) { _w = _tm; break }
+        }
+    }
+    if (_w == "") _w = curBase
+    return _w
 }
 function merge(baseList, addList,   _n,_a,_i,_out) {
     _out = " " baseList " "
@@ -194,6 +231,9 @@ BEGIN {
 /^@/ {
     split(substr($0, 2), b, "|")
     curPid = b[1]; curBase = b[2]
+    # ★ 行的其余模板列随行带下来，供 staticof() 按线程角色算静态落位
+    #   （字段序 = 生产端 `echo "@$p|$o|$m|$h|$ht|$hr|$cm"`）。
+    curMain = b[3]; curHC = b[4]; curHT = b[5]; curHeavy = b[6]; curCM = b[7]
     next
 }
 {
@@ -202,6 +242,10 @@ BEGIN {
     if (curPid == "") next
     i = index($0, ")")
     if (i == 0) next
+    # comm = 首个左括号与首个右括号之间。⚠ tid 位数不定（5001 占 4 位），
+    #   不能写死 substr($0, 2, ...)。
+    lp = index($0, "(")
+    comm = (lp > 0 && i > lp) ? substr($0, lp + 1, i - lp - 1) : ""
     tid = $1 + 0
     if (tid <= 0) next
     rest = substr($0, i + 2)
@@ -229,10 +273,6 @@ BEGIN {
     #   手测时字面量是 number → 数值比较，所以「手测正常、走脚本失效」。
     #   这是上游移植时就带的隐患（v16.13 一并修掉）。
     lvlN = lvl + 0; hotN = HOT + 0; idleN = IDLE + 0
-    # 该线程是否正停在「上一轮被我们升级过」的核位上（base == 本档升级目标）。
-    #   空闲时要能收回来，否则它会被永久钉在中核/大核上（热点过去也不下来）。
-    esce = list2expr(listof(SESC))
-    on_esc = (esce != "" && be == esce) ? 1 : 0
     if (lvlN >= hotN) {
         # 忙线程：升到**本档的升级目标**（SESC，由调用方从 mode_sched_row() 取）。
         #   powersave   SESC="-"   → **本档不升级**（线程一律留在 0-3 小核省电）
@@ -264,12 +304,20 @@ BEGIN {
             }
         }
     } else if (lvlN <= idleN && SHRINK != "" && IDLEOFF != 1) {
-        # 空闲线程：收缩到**基线核位**（★ v16.26：不再固定 SE，而是 WebUI 可配的基线）
-        #   fast（极速）档 IDLEOFF=1：中低负载线程保持在 0-7 由系统分配，不收缩。
-        #   ⚠ 只有「当前不在基线内」的线程才值得发命令（幂等短路，省电）。
-        ee = SHRINK
-        if (on_esc || hasany(baseL, L_P1) || hasany(baseL, L_HP))
-            if (ee != "" && ee != be) print tid " " curPid " " ee > HOTF
+        # 空闲线程：收缩到 **「该线程自己的静态落位 ∩ 本档基线」** —— 绝不越出静态落位。
+        #   ★★ 真机事故（微信 333/333 线程锁 0-3 → 进聊天卡顿/内容重载）★★
+        #   旧逻辑一律朝**档位基线**（SBASE → SHRINK）收缩，守卫只看 on_esc /
+        #   baseL 是否含中核 —— 于是静态放在 4-7 的 RenderThread（powersave 新加
+        #   的窄出口，及 balance/performance 的 heavy 分流）只要实测负载 ≤ 闲阈值
+        #   就被拉回 0-3；省电档 SESC="-" 永远不会再把它升回去 → 模板改动被静默撤销。
+        #   新规则两条都满足：
+        #     · 普通线程（静态 0-7 ⊇ 基线 0-3）→ 交集 0-3 → 照旧 0-7 → 0-3 收缩；
+        #     · 静态重载线程（静态 4-7）→ 与基线 0-3 交集为空 → 不发命令，
+        #       留在 4-7（等价于「shrink to 4-7 == 当前位 → 跳过」）。
+        #   ⚠ 只有「当前不在目标内」才发命令（幂等短路，省电）。
+        #   fast 档 IDLEOFF=1：整段跳过，中低负载线程留 0-7 由系统分配（不变）。
+        ee = list2expr(inter(listof(staticof(tid, comm)), L_BASE))
+        if (ee != "" && ee != be) print tid " " curPid " " ee > HOTF
     }
 }
 END {

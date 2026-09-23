@@ -17,8 +17,17 @@ test_load_aware.py —— load_aware.sh（动态负载感知）的离线自检
      （★ v16.26：流畅目标由 4-5 改为 4-7 —— 4-5 已从未白名单移除）
   4. "-" 是「本档不升级」的占位符，必须显式跳过 —— 否则会被当成核位字符串
      而恒真，省电档会被错误升级。
-  5. 空闲收缩必须用 **SBASE（该档基线）** 作为回落目标，而不是硬编码 SE(e_core)
-     —— 否则 fast 档（基线 0-7）的空闲线程会被错误收缩。★ v16.26 新增。
+  5. 空闲收缩的锚点必须是 **SBASE（该档基线）**，而不是硬编码 SE(e_core)。
+     ★ v16.26 新增；本次进一步改为：**收缩目标 = 该线程自己的静态落位 ∩ SBASE**。
+  6. ★★★ 真机事故（微信 333/333 线程锁 0-3 → 进聊天卡顿/内容重载）★★★
+     省电档旧模板把整应用（含 RenderThread、主线程）全锁 0-3，且该档升级目标是
+     "-"、模板无 heavy 分流 —— 没有任何出口。修复 = powersave 行加
+     RenderThread → {p1_core}(4-7) 的窄出口；但**空闲收缩若仍朝档位基线收缩**，
+     静态放在 4-7 的 RenderThread 闲时就会被拉回 0-3，而 SESC="-" 永远升不回来
+     → 窄出口被静默撤销（改动 1 变成空操作）。所以：
+       · 静态落位 4-7 的线程：idle 分支**不发命令**（留 4-7）；
+       · 普通线程（静态 0-7 ⊇ 基线 0-3）：仍照旧 0-7 → 0-3；
+       · fast 档 IDLEOFF=1：仍整段不收缩。
 
 跑法: python tools/test_load_aware.py
 """
@@ -83,7 +92,13 @@ class Harness:
         return path.replace("\\", "/")
 
     def write_inputs(self, threads):
-        """threads: [(tid, base, ratio_pct, busy_seconds)]
+        """threads: [(tid, base, ratio_pct, busy_seconds[, row_extra])]
+
+        row_extra（可选 dict）覆盖该 tid 所在**模板行的列**，用来模拟
+        「同一行里不同角色的线程」—— 正是真机上 RenderThread 与普通线程的差别：
+          comm 线程名（默认 t<tid>）、m 主线程核位（默认=base）、h 重载核位、
+          ht heaviest 线程名、hr heavy 线程名、cm comm 规则（"名@核位,..."）。
+        @ 行字段序与生产端 load_aware.sh 的 `@$p|$o|$m|$h|$ht|$hr|$cm` 一致。
 
         ratio = delta*100/ET，ET = 窗口秒数 × 100（USER_HZ=100）。
         所以 delta_ticks = ratio_pct * ET / 100 / 100 × 100 … 直接算：
@@ -94,17 +109,31 @@ class Harness:
         lines_tids = []
         lines_stat = []
         state = []
-        for tid, base, ratio, _ in threads:
-            lines_tids.append("@%d|%s|%s|||RenderThread||0||com.test.p%d"
-                              % (tid, base, base, tid))
+        for item in threads:
+            tid, base, ratio = item[0], item[1], item[2]
+            ex = item[4] if len(item) > 4 else {}
+            comm = ex.get("comm", "t%d" % tid)
+            m = ex.get("m", base)
+            h = ex.get("h", "")
+            ht = ex.get("ht", "")
+            hr = ex.get("hr", "RenderThread")
+            cm = ex.get("cm", "")
+            lines_tids.append("@%d|%s|%s|%s|%s|%s|%s|0||com.test.p%d"
+                              % (tid, base, m, h, ht, hr, cm, tid))
             # 每个 tid 单独占一个"进程"，避免 awk 按 pid 分组时错位
             tick = int(ratio * win)          # ET=win*100 → delta/ET*100 = ratio
-            lines_stat.append("%d (t%d) S 1 1 1 0 -1 0 0 0 0 0 %d 0 0 0" % (tid, tid, tick))
+            lines_stat.append("%d (%s) S 1 1 1 0 -1 0 0 0 0 0 %d 0 0 0"
+                              % (tid, comm, tick))
             state.append("%d\t0" % tid)
         io.open(os.path.join(self.dir, "state"), "w", encoding="utf-8").write(
             "\n".join(state) + "\n")
+        # ⚠ 必须**按线程交错**（@行 + 该进程的 stat 紧挨着）—— 生产端就是
+        #   `echo @行; cat /proc/<p>/task/*/stat` 逐行交替写进管道的。
+        #   旧版把所有 @ 行堆在前面：awk 只保留**最后一个** @ 的 cur* 上下文，
+        #   于是多线程同跑时每个 tid 都按最后一行模板列判角色 —— 单线程用例
+        #   侥幸通过，同行对照（RenderThread vs 普通线程）这类用例必错。
         io.open(os.path.join(self.dir, "in.txt"), "w", encoding="utf-8").write(
-            "\n".join(lines_tids + lines_stat) + "\n")
+            "\n".join(t + "\n" + s for t, s in zip(lines_tids, lines_stat)) + "\n")
         return et
 
     def run(self, mode, esc, hotok, interval, hot, idle, idleoff,
@@ -177,6 +206,9 @@ def main():
     check('addList == "-"' in text or "addList == \"-\"" in text,
           "added() 显式识别 \"-\" 占位符（本档不升级）")
     check("IDLEOFF" in text, "支持 IDLEOFF（fast 档不做空闲收缩）")
+    check("staticof" in text,
+          "awk 有 staticof()：按行内 o/m/h/ht/hr/cm + comm 算每线程静态落位")
+    check("inter(" in text, "idle 收缩目标走 inter(静态落位, SBASE)（不再朝基线盲收缩）")
 
     # ---- 1) awk 程序能独立跑起来（语法有效性，不再被 2>/dev/null 吞掉）----
     print("\n[2] awk 程序语法有效性")
@@ -216,30 +248,56 @@ def main():
             check(got.get(5001) == expect,
                   "%s（实际 %s）" % (label, got.get(5001)))
 
-    # ---- 3) 空闲收缩：非 fast 档收缩、fast 档不收缩 ------------------------
-    print("\n[4] 空闲线程处理（基线 4-7，占用 2%）")
+    # ---- 3) (b) 静态落位 4-7 的线程：空闲也不发收缩命令 -------------------
+    #   ★ 真机事故的修复本体：powersave 行新加的 RenderThread→{p1_core}(4-7)
+    #     窄出口，若 idle 分支仍朝档位基线(0-3)收缩就会被静默撤销 ——
+    #     而省电档 SESC="-" 永远不会再把它升回来。
+    print("\n[4] 空闲收缩只朝「静态落位 ∩ 基线」（静态 4-7 不再被拉回 0-3）")
     h.threads = [(6001, "4-7", 2, 0)]
     got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
                     hot=10, idle=4, idleoff=0)
-    check(got.get(6001) == "0-3", "流畅档：空闲线程收缩到 0-3（实际 %s）" % got.get(6001))
+    check(6001 not in got,
+          "流畅档：静态 4-7 的空闲线程不收缩，留在 4-7（实际 %s）" % got.get(6001))
     got = h.targets(mode="fast", esc="4-9", hotok="1", interval=8,
                     hot=8, idle=4, idleoff=1)
     check(6001 not in got, "极速档：空闲线程不收缩（中低负载留 0-7）")
 
-    # ---- 3b) 空闲收缩回落目标 = SBASE（该档基线），不是硬编码 SE ----------
-    print("\n[4b] 空闲收缩回到 SBASE 基线（v16.26 新增：基线锚点）")
-    # 基线 4-7 的空闲线程 → 收缩目标应是 SBASE=4-7 之外的基线，
-    # 这里用 SBASE=0-7（fast 档基线）验证「用的是 SBASE 而非 SE」
-    h.threads = [(6101, "4-7", 2, 0)]
-    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
-                    hot=10, idle=4, idleoff=0, sbase="0-7")
-    check(got.get(6101) == "0-7",
-          "空闲收缩回落到 SBASE=0-7（实际 %s）" % got.get(6101))
-    h.threads = [(6102, "4-7", 2, 0)]
-    got = h.targets(mode="balance", esc="4-7", hotok="0", interval=12,
+    # ---- 3b) (b) 真机形态：同一行 other=0-7，只有 RenderThread 被 heavy
+    #        分流到 4-7 —— 必须按 comm 区分，不能只看行的 other 列 --------
+    print("\n[4b] 同行对照：RenderThread(静态4-7) 不收缩，普通线程(0-7) 照收")
+    h.threads = [
+        (6005, "0-7", 2, 0, {"comm": "RenderThread", "m": "0-7",
+                             "h": "4-7", "hr": "RenderThread"}),
+        (6006, "0-7", 2, 0),                      # 同行普通线程（对照）
+    ]
+    got = h.targets(mode="performance", esc="4-7", hotok="0", interval=10,
                     hot=10, idle=4, idleoff=0, sbase="0-3")
-    check(got.get(6102) == "0-3",
-          "空闲收缩回落到 SBASE=0-3（实际 %s）" % got.get(6102))
+    check(6005 not in got,
+          "RenderThread 静态 4-7 → 无收缩命令（实际 %s）" % got.get(6005))
+    check(got.get(6006) == "0-3",
+          "同行普通线程仍 0-7 → 0-3（对照，实际 %s）" % got.get(6006))
+
+    # ---- 3c) (c) 普通线程仍照旧 0-7 → 0-3；收缩锚点仍是 SBASE ------------
+    print("\n[4c] 普通线程 0-7 → 0-3（非回归）+ 收缩锚点 = SBASE")
+    h.threads = [(6101, "0-7", 2, 0)]
+    got = h.targets(mode="performance", esc="4-7", hotok="0", interval=10,
+                    hot=10, idle=4, idleoff=0, sbase="0-3")
+    check(got.get(6101) == "0-3",
+          "性能档：普通线程空闲收缩 0-7 → 0-3（实际 %s）" % got.get(6101))
+    # 锚点必须跟 SBASE 走：0-7 ∩ 4-7 = 4-7（SE/e_core 是 0-3，硬编码会错）
+    h.threads = [(6102, "0-7", 2, 0)]
+    got = h.targets(mode="performance", esc="4-7", hotok="0", interval=10,
+                    hot=10, idle=4, idleoff=0, sbase="4-7")
+    check(got.get(6102) == "4-7",
+          "收缩锚点 = SBASE（0-7 ∩ 4-7 → 4-7，非硬编码 0-3，实际 %s）"
+          % got.get(6102))
+
+    # ---- 3d) (d) fast（IDLEOFF=1）任何静态都不收缩 ------------------------
+    print("\n[4d] fast 档 IDLEOFF=1：普通静态 0-7 也不收缩")
+    h.threads = [(6201, "0-7", 2, 0)]
+    got = h.targets(mode="fast", esc="4-9", hotok="1", interval=8,
+                    hot=8, idle=4, idleoff=1)
+    check(6201 not in got, "极速档：空闲线程不收缩（实际 %s）" % got.get(6201))
 
     # ---- 4) 阈值边界：字符串比较 bug 的回归 ---------------------------------
     print("\n[5] 阈值边界（+0 数值化的回归用例）")
