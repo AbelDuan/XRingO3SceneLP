@@ -53,6 +53,13 @@ mkdir -p "$WEB_DIR" "$BKDIR" "$TMPD" 2>/dev/null
 #  否则零开销直接返回。
 selfheal_pending_update
 
+# ---------- 访问即自愈：模板迁移也跑一次（免重启）----------
+#  service.sh 里的 migrate_templates_* 只在**开机**执行，而本机禁止重启 ——
+#  不接这一处的话，新模板改动（如 v18 给省电档加的 RenderThread→4-7 窄出口）
+#  刷完新包后仍不落地，表现为「版本号变了、档位行还是旧的」。
+#  迁移自带 tpl_v18 幂等标记，已有标记时零开销直接返回，每次访问都调用没有成本。
+migrate_templates_v18
+
 has(){ command -v "$1" >/dev/null 2>&1; }
 
 # ---------- 文件 ID → 真实路径（白名单，杜绝任意路径写入）----------
