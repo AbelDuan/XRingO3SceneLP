@@ -824,7 +824,7 @@ mode_sched_row() {
       #    能拿到「基线」；load_aware 的空闲收缩只能用 SE(e_core) 顶替）。
       powersave)   _def="powersave 省电 $(sched_cores_default_base powersave) $(sched_cores_default_esc powersave) 0 15 10 4 0" ;;
       balance)     _def="balance 流畅 $(sched_cores_default_base balance) $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
-      performance) _def="performance 性能 $(sched_cores_default_base performance) $(sched_cores_default_esc performance) 0 10 9 4 0" ;;
+      performance) _def="performance 性能 $(sched_cores_default_base performance) $(sched_cores_default_esc performance) 0 10 7 4 0" ;;
       fast)        _def="fast 极速 $(sched_cores_default_base fast) $(sched_cores_default_esc fast) 1 8 8 4 1" ;;
       *)           _def="balance 流畅 $(sched_cores_default_base balance) $(sched_cores_default_esc balance) 0 12 10 4 0" ;;
     esac
@@ -1553,6 +1553,10 @@ gen_game_rules_json() {
 #      线程分组就跟着漂移，还会和手动套用的档位打架（实测过：相机被 Scene 设成
 #      fast 后从目标表里消失，界面上却还显示「已套高性能」）。
 #    · 想跟 Scene 对齐时，显式点 WebUI「应用」页的「从 Scene 导入」按钮跑一次。
+#    · ★ v17.4：这次导入是**真同步**（以前只是并集）—— 表里带 `scene` 来源标记
+#      （第 3 列）的行，如果 Scene 里已经没有了就整行删掉，回到跟随系统；
+#      没有标记的行是用户在 WebUI 手工设的，永远保留。老表只有 2 列 → 第一次
+#      导入不删任何行（详见 import_scene_apply）。
 #
 #  ⚠ enforce_threads.sh 里原本还有一份硬编码的 M2T 映射（同样由 mode_sync 开关控制）
 #    —— v10 已一并删除，落核只认 app_assign.tsv / game_assign.tsv。
@@ -1574,6 +1578,25 @@ import_scene_assign() {
         mode = substr($0, RSTART + 1, RLENGTH - 2)
         if (pkg == "" || pkg == "*") next
         if (pkg !~ /\./) next                # 非包名（如 device_info 之类）跳过
+        # ⚠ Activity / 组件类名也要跳过：powercfg.xml 里除了包名/进程名，还混着 Scene 给
+        #   **具体界面**设的条目 —— 实测存在的有
+        #   com.tencent.mm.plugin.scanner.ui.BaseScanUI / ...appbrand.ui.AppBrandLauncherUI
+        #   / ...recordvideo.activity.MMRecordUI / ...appbrand.launching.AppBrandLaunchProxyUI
+        #   / com.tencent.wework.login.controller.LoginScannerActivity。
+        #   它们既不是包名也不是进程名，永远匹配不到任何东西，进表只是永远不生效的
+        #   僵尸行（还会污染「已分配」计数）。
+        #   判据 = **组件类名后缀白名单**：最后一个点分段以 Activity / UI / Service /
+        #   Provider / Receiver / Fragment / Dialog 结尾，或以 Proxy 开头。
+        #   刻意不用「最后一段首字母大写」那种更宽的大写约定 —— 拿本模块种子表
+        #   Config/app_assign.tsv（58 行）实测比对：
+        #     · 大写约定滤掉 13 行界面类垃圾，但会连两个**真包**一起误杀：
+        #       com.miHoYo.Yuanshen（原神）、com.qidian.QDReader（起点）；
+        #     · 这条后缀判据同样滤掉那 13 行，而两个真包一个不伤。
+        #   锚在行尾还顺带保住了带 `:进程` 后缀的键（com.tencent.mm:appbrand 的最后
+        #   一段是 mm:appbrand，结尾不是这些后缀 → 照常保留）。
+        nseg = split(pkg, seg, ".")
+        cls = seg[nseg]
+        if (cls ~ /(Activity|UI|Service|Provider|Receiver|Fragment|Dialog)$/ || cls ~ /^Proxy/) next
         if (CAMRE != "" && pkg ~ CAMRE) next   # 相机固定不接管，不进分配表
         if (mode !~ /^(powersave|balance|performance|fast)$/) next
         printf "%s\t%s\n", pkg, mode
@@ -1581,9 +1604,22 @@ import_scene_assign() {
     return 0
 }
 
-# 导入并合并进 app_assign.tsv / game_assign.tsv：
-#   Scene 里显式设过模式的条目 → 用 Scene 的值覆盖；其余条目原样保留。
-#   不整表重建 —— 那样会把用户在模块里手动套的档位全部冲掉。
+# 导入并合并进 app_assign.tsv / game_assign.tsv（★ v17.4：**真同步**，不再是并集）：
+#   · Scene 里显式设过模式的条目 → 用 Scene 的值覆盖，并写上第 3 列来源标记 `scene`
+#   · 带 `scene` 标记、而 Scene 里**已经没了**的条目 → 整行删掉（回到跟随系统）
+#   · 不带标记的行 = 用户在 WebUI 里手工设的 → 永远保留，不动它的档位
+#   ⚠ 为什么必须「删」而不是像以前那样保留旧值：旧实现只做并集，Scene 里取消一条
+#     单应用设置后，模块仍按旧档位硬绑核 —— 真机事故：Scene 里早已没有
+#     com.tencent.mm（全局默认 balance），app_assign.tsv 里却还留着
+#     com.tencent.mm<TAB>powersave，于是微信 333 条线程被钉死在 0-3，界面持续掉帧。
+#     一行到底该「跟随 Scene」还是「手工覆盖」，只能靠来源标记区分 —— 所以第 3 列
+#     只写标记本身，不写别的语义。
+#   ⚠ 老表（v17.3 及更早）只有 2 列、没有标记 → **第一次导入不会删任何行**
+#     （无标记一律按手工行处理）；这次导入会给 Scene 里的条目补上标记，此后才可能被删。
+#   ⚠ 第 3 列只是来源标记，**读表的人只能取前两列**：`while IFS=<tab> read -r a b`
+#     会把「剩余整行」连制表符一起塞进 b，档位值就被污染成 "powersave\tscene"。
+#     所以读档位一律用 awk 按 tab 切列取 f[2]（gen_rules_json / enforce_threads.sh
+#     本来就是这么读的，已核对无 `IFS=tab read -r a b` 式读法）。
 # $1 = app | game（默认 app）
 import_scene_apply() {
     local kind="${1:-app}" asg src
@@ -1593,36 +1629,54 @@ import_scene_apply() {
     esac
     mkdir -p "$TMPD" 2>/dev/null
     src="${TMPD}/import.src"
-    import_scene_assign > "$src" 2>/dev/null
+    # ⚠ 读不到 powercfg.xml 时**绝不能**当成「Scene 里全删了」：那会把所有带标记的行
+    #   一次清光（Scene 未装 / 挂载失败 / 路径变了都会走到这里）。所以这一种情况和
+    #   「Scene 确实一条单独设置都没有（n=0）」必须分开处理 —— 后者要照常走合并（删）。
+    import_scene_assign > "$src" 2>/dev/null || {
+        echo "OK 读不到 Scene 的 powercfg.xml，未改动"; return 0
+    }
     local n; n=$(grep -c . "$src" 2>/dev/null); n=${n:-0}
-    [ "$n" = 0 ] && { echo "OK Scene 里没有单独设过模式的应用，未改动"; return 0; }
 
-    local out="${TMPD}/import.out"
-    awk -F'\t' -v OFS='\t' -v SRC="$src" -v ASG="$asg" '
+    local out="${TMPD}/import.out" cnt="${TMPD}/import.cnt"
+    awk -F'\t' -v OFS='\t' -v SRC="$src" -v ASG="$asg" -v CNT="$cnt" '
       BEGIN {
         while ((getline l < SRC) > 0) {
           if (l == "") continue
           n = split(l, f, "\t"); if (f[1] != "" && f[2] != "") imp[f[1]] = f[2]
         }
         close(SRC)
-        seen = 0
+        drop = 0
         if (ASG != "") {
           while ((getline l < ASG) > 0) {
             if (l == "") continue
-            if (l ~ /^#/) { print l; continue }
+            if (l ~ /^#/) { print l; continue }        # 注释行原样保留
             n = split(l, f, "\t"); if (f[1] == "" || f[2] == "") continue
-            seen++
-            if (f[1] in imp) { printf "%s\t%s\n", f[1], imp[f[1]]; delete imp[f[1]] }
-            else             { printf "%s\t%s\n", f[1], f[2] }
+            if (f[1] in imp)      { printf "%s\t%s\tscene\n", f[1], imp[f[1]]; delete imp[f[1]] }
+            else if (f[3] == "scene") { drop++ }        # 之前从 Scene 导的，Scene 现在没它了
+            else                  { print l }           # 手工行：整行原样保留（只动该动的行）
           }
           close(ASG)
         }
-        for (p in imp) printf "%s\t%s\n", p, imp[p]
+        for (p in imp) printf "%s\t%s\tscene\n", p, imp[p]
+        print drop+0 > CNT
+        close(CNT)
       }' > "$out" 2>/dev/null
-    [ -s "$out" ] || { echo "ERR 导入结果为空，未改动"; return 1; }
+    local rmd; rmd=$(cat "$cnt" 2>/dev/null); case "$rmd" in ''|*[!0-9]*) rmd=0 ;; esac
+    # 一条没导入、也没删 → 表内容不变，连写都不写（保住原来的措辞与 mtime，
+    # 免得白触发一轮 enforce_threads 的目标表重算）。
+    if [ "$n" = 0 ] && [ "$rmd" = 0 ]; then
+        rm -f "$out" "$src" "$cnt" 2>/dev/null
+        echo "OK Scene 里没有单独设过模式的应用，未改动"
+        return 0
+    fi
+    [ -s "$out" ] || { rm -f "$src" "$cnt" 2>/dev/null; echo "ERR 导入结果为空，未改动"; return 1; }
     write_replace "$out" "$asg" && chmod 0666 "$asg" 2>/dev/null
-    rm -f "$out" "$src" 2>/dev/null
-    echo "OK 已从 Scene 导入 $n 条档位（覆盖同名条目，其余保留）"
+    rm -f "$out" "$src" "$cnt" 2>/dev/null
+    if [ "$rmd" != 0 ]; then
+        echo "OK 已从 Scene 导入 $n 条档位（覆盖同名条目，其余保留）（移除 $rmd 条 Scene 已不再单独设置的 → 回到跟随系统）"
+    else
+        echo "OK 已从 Scene 导入 $n 条档位（覆盖同名条目，其余保留）"
+    fi
     return 0
 }
 

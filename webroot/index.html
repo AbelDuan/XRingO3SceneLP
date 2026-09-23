@@ -530,7 +530,7 @@ pre.tall { max-height: 62vh; }
     <h1>调度工具箱</h1>
     <span class="h-ver" id="ver">17.1 (2026-09-22)</span>
     <div class="h-chips">
-      <span class="pill" id="conn-chip">连接中…</span>
+      <button class="btn btn-xs primary" id="conn-chip" data-act="importscene" title="连接中…">同步配置</button>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
       </button>
@@ -862,9 +862,11 @@ const S = {
   games: [],          // [{pkg, mode}]
   templates: [],      // [{id, friendly, other}]
   gameAssign: {},     // pkg → template id
+  gameAssignMark: {}, // pkg → game_assign.tsv 第 3 列原文（'scene' = 来自同步，可被剪枝）
   // 应用（非游戏）：线程档位驱动
   appTplLib: [],      // [{id, friendly, other, ...}]
   appTplAssign: {},   // pkg → template id
+  appAssignMark: {},  // pkg → app_assign.tsv 第 3 列原文（同上）
   ownMode: {},        // pkg → 模式：**只在 Scene 里单独设过**的（powercfg 有显式条目）
                       //   仅用于行内展示「Scene 省电」这种标记，**不再**驱动线程档位
   debug: 1,           // 「记录模块日志」开关（关掉可省掉守护的写盘开销）
@@ -1144,16 +1146,17 @@ function pickSheet(title, opts, cb) {
 /* 只改一个应用的线程档位 */
 async function setAppTpl(pkg, tplId) {
   const map = S.appTplAssign || (S.appTplAssign = {});
-  if (tplId) map[pkg] = tplId; else delete map[pkg];
+  const mark = S.appAssignMark || (S.appAssignMark = {});
+  setAssignTpl(map, mark, pkg, tplId);
   updateAppList();                       // ★ 立刻反映
   toast('已设为「' + tplName(tplId) + '」，正在后台生效…');
-  const tsv = Object.keys(map).map(p => p + '\t' + map[p]).join('\n') + '\n';
+  const tsv = assignTsvOf(map, mark) + '\n';
   try {
     const w = await Api.writeText('appassign', tsv);
     if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
     const r = await Api.syncmode();
     const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
-    logOp('setAppTpl ' + pkg + ' → ' + (tplId || '未设置') + '｜' + line.slice(0, 140));
+    logOp('setAppTpl ' + pkg + ' → ' + (tplId || '跟随系统') + '｜' + line.slice(0, 140));
     toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
   } catch (e) { toast('设置失败：' + e); }
 }
@@ -1161,16 +1164,17 @@ async function setAppTpl(pkg, tplId) {
 /* 只改单个游戏的线程档位（与 setAppTpl 同款：乐观更新 + 后台写盘） */
 async function setGameTpl(pkg, tplId) {
   const map = S.gameAssign || (S.gameAssign = {});
-  if (tplId) map[pkg] = tplId; else delete map[pkg];
+  const mark = S.gameAssignMark || (S.gameAssignMark = {});
+  setAssignTpl(map, mark, pkg, tplId);
   if (S.tab === 'games') render(); else updateAppList();
   toast('已设为「' + tplName(tplId) + '」，正在后台生效…');
-  const tsv = Object.keys(map).map(p => p + '\t' + map[p]).join('\n') + '\n';
+  const tsv = assignTsvOf(map, mark) + '\n';
   try {
     const w = await Api.writeText('gameassign', tsv);
     if (!/^OK/m.test(String(w))) { toast('写入失败：' + String(w).slice(0, 80)); return; }
     const r = await Api.syncmode();
     const line = String(r || '').trim().split('\n').filter(Boolean).pop() || '';
-    logOp('setGameTpl ' + pkg + ' → ' + (tplId || '未设置') + '｜' + line.slice(0, 140));
+    logOp('setGameTpl ' + pkg + ' → ' + (tplId || '跟随系统') + '｜' + line.slice(0, 140));
     toast(/^OK/.test(line) ? '已生效' : line.slice(0, 90));
   } catch (e) { toast('设置失败：' + e); }
 }
@@ -1292,7 +1296,7 @@ function isGame(pkg) {
    解析后端 cmd_games 输出：GAME= / ASSIGN= / TPL= / SEM_= 四组行。 */
 async function loadSceneGames() {
   const text = await Api.games();
-  const games = [], assign = {}, templates = [], sem = {};
+  const games = [], assign = {}, amark = {}, templates = [], sem = {};
   String(text).split('\n').forEach(line => {
     if (!line) return;
     if (line.indexOf('GAME=') === 0) {
@@ -1300,7 +1304,7 @@ async function loadSceneGames() {
       if (t[0]) games.push({ pkg: t[0], mode: t[1] || '' });
     } else if (line.indexOf('ASSIGN=') === 0) {
       const t = line.slice(7).split('\t');
-      if (t[0] && t[1]) assign[t[0]] = t[1];
+      if (t[0] && t[1]) { assign[t[0]] = t[1]; if (t[2]) amark[t[0]] = t[2]; }
     } else if (line.indexOf('TPL=') === 0) {
       const t = line.slice(4).split('|');
       if (t[0]) templates.push({ id: t[0], friendly: t[1] || t[0], other: t[2] || '',
@@ -1318,7 +1322,7 @@ async function loadSceneGames() {
       if (t[0]) sem[t[0]] = (t[1] || '').split('|')[0];
     }
   });
-  S.games = games; S.gameAssign = assign; S.templates = templates; S.semCores = sem;
+  S.games = games; S.gameAssign = assign; S.gameAssignMark = amark; S.templates = templates; S.semCores = sem;
   logOp('已载入 ' + games.length + ' 个 Scene 游戏，' + templates.length + ' 个线程档位');
   return { games, assign, templates, sem };
 }
@@ -1334,7 +1338,7 @@ function resolveSem(s) {
    解析后端 cmd_apps_tpl 输出：APP= / ASSIGN= / TPL= / SEM_= 四组行。 */
 async function loadAppsTpl() {
   const text = await Api.apps_tpl();
-  const assign = {}, templates = [], sem = {}, extras = [];
+  const assign = {}, amark = {}, templates = [], sem = {}, extras = [];
   String(text).split('\n').forEach(line => {
     if (!line) return;
     if (line.indexOf('APP=') === 0) {
@@ -1342,7 +1346,7 @@ async function loadAppsTpl() {
       if (t[0]) S.appMode[t[0]] = t[1] || '';   // 顺带刷新模式映射（覆盖 loadSceneModes）
     } else if (line.indexOf('ASSIGN=') === 0) {
       const t = line.slice(7).split('\t');
-      if (t[0] && t[1]) assign[t[0]] = t[1];
+      if (t[0] && t[1]) { assign[t[0]] = t[1]; if (t[2]) amark[t[0]] = t[2]; }
     } else if (line.indexOf('TPL=') === 0) {
       const t = line.slice(4).split('|');
       if (t[0]) templates.push({ id: t[0], friendly: t[1] || t[0], other: t[2] || '',
@@ -1355,12 +1359,55 @@ async function loadAppsTpl() {
       if (t[0]) sem[t[0]] = (t[1] || '').split('|')[0];
     }
   });
-  S.appTplAssign = assign; S.appTplLib = templates; S.semCores = sem;
+  S.appTplAssign = assign; S.appAssignMark = amark; S.appTplLib = templates; S.semCores = sem;
   S.appExtras = extras;
   mergeAppExtras();
   logOp('已载入应用线程档位：' + templates.length + ' 个，已分配 ' + Object.keys(assign).length +
     ' 个应用，进程级条目 ' + extras.length + ' 个');
   return { assign, templates, sem };
+}
+
+/* ---------- 分配表的第 3 列（app_assign.tsv / game_assign.tsv）----------
+   每行是 `pkg<TAB>档位[<TAB>来源标记]`，标记 `scene` = 这一行来自与 Scene 的同步：
+   后端在「Scene 里已不再单独设置」时会删掉它；**没有标记**的行 = 用户在 WebUI 手动设的，
+   永远保留。所以保存时必须把标记原样写回 —— 任何一处漏写都让标记消失，
+   下一次同步就没有剪枝依据 → 「Scene 删掉 → 在 WebUI 保存一次 → 该行永久复活」。
+   map 与 mark 平行：map[pkg] = 档位，mark[pkg] = 第 3 列原文。 */
+function assignTsvOf(map, mark) {
+  return Object.keys(map).map(p => p + '\t' + map[p] + (mark[p] ? '\t' + mark[p] : '')).join('\n');
+}
+
+/* 手动改档位：**档位真的变了**就丢掉标记（手动选择 = 受保护的手工行，不许被同步删）；
+   档位没变（重复点同一档）保留标记。tplId 为空 = 取消分配。
+   所有改档位的入口都必须走这里，否则标记会被静默抹掉或错误保留。 */
+function setAssignTpl(map, mark, pkg, tplId) {
+  const before = map[pkg] || '';
+  if (tplId) map[pkg] = tplId; else delete map[pkg];
+  if (tplId !== before) delete mark[pkg];
+}
+
+/* 从分配表文本重建 map + mark（两者原地清空，引用不变）—— 照文本原样收，
+   标记的取舍在 setAssignTpl() / stripMarksOnChange() 里做，不在这里猜。 */
+function loadAssignTsv(tsv, map, mark) {
+  Object.keys(map).forEach(k => delete map[k]);
+  Object.keys(mark).forEach(k => delete mark[k]);
+  String(tsv).split('\n').forEach(line => {
+    const f = line.split('\t');
+    if (!f[0] || !f[1]) return;
+    map[f[0]] = f[1];
+    if (f[2]) mark[f[0]] = f[2];
+  });
+}
+
+/* 「分配表」文本框直编：档位与当前状态**不同**的行去掉第 3 列标记 ——
+   手动改过的行必须变成受保护的手工行（规则同 setAssignTpl）。
+   ⚠ 必须改文本本身：写出去的和随后 saveAppAssign 回读的都是这份文本，
+     只清内存里的 mark 会被回读过程按第 3 列再填回来。 */
+function stripMarksOnChange(tsv, map) {
+  return String(tsv).split('\n').map(line => {
+    const f = line.split('\t');
+    return (f.length > 2 && map[f[0]] !== f[1]) ? f[0] + '\t' + f[1] : line;
+  }).join('\n');
 }
 
 /* 写 app_assign.tsv 并重建 threads.json（模板驱动） */
@@ -1372,8 +1419,7 @@ async function saveAppAssign(tsv) {
     return await Api.syncmode();
   });
   logOp('保存耗时 ' + (Date.now() - t0) + 'ms');
-  S.appTplAssign = {};
-  String(tsv).split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.appTplAssign[f[0]] = f[1]; });
+  loadAssignTsv(tsv, S.appTplAssign, S.appAssignMark);
   logOp('✅ 应用线程档位已保存：' + String(r || '').slice(0, 80));
   toast(/ERR/.test(String(r || '')) ? String(r).slice(0, 90) : '已保存并重建');
   // ⚠ 不再 refreshAll()：那会重读 status / apps_tpl / appmodes（数秒）并整页重渲染，
@@ -1386,11 +1432,13 @@ async function applySelected(kind, tplId) {
   if (!S.sel.size) { toast('先在下面勾选应用'); return; }
   const isGameKind = kind === 'game';
   const map = isGameKind ? S.gameAssign : S.appTplAssign;
+  const mark = isGameKind ? (S.gameAssignMark || (S.gameAssignMark = {}))
+                          : (S.appAssignMark || (S.appAssignMark = {}));
   const n = S.sel.size;
-  for (const p of S.sel) { if (tplId) map[p] = tplId; else delete map[p]; }
+  for (const p of S.sel) setAssignTpl(map, mark, p, tplId);
   S.sel.clear();
   if (isGameKind) { await actGameAssignSave('mem'); return; }
-  await saveAppAssign(Object.keys(map).map(p => p + '\t' + map[p]).join('\n'));
+  await saveAppAssign(assignTsvOf(map, mark));
   toast('已' + (tplId ? '套用档位' : '取消分配') + '：' + n + ' 个应用');
 }
 
@@ -1660,9 +1708,13 @@ function headlessHiddenCount() {
     !isGame(a.pkg) && !isCamera(a.pkg) && !S.launchable.has(a.pkg) && !effTpl(a.pkg)).length;
 }
 
-/* 档位显示名。档位 id 与模式同名，显示名直接用模式的中文名（省电/均衡/性能/极速）。 */
+/* 档位显示名。档位 id 与模式同名，显示名直接用模式的中文名（省电/均衡/性能/极速）。
+   ⚠ id 为空 = app_assign.tsv 里**没有这一行** —— 模块一条 taskset 都不发，完全跟随系统调度器。
+     这个状态必须写成「跟随系统」而不是「未设置」：后者看不出模块有没有在管它，
+     实测事故是用户以为微信被模块设成了省电，其实模块根本没有它的条目。
+     （注意与档位「系统接管」区分：那是有行、但档位本身不写亲和性。） */
 function tplName(id) {
-  if (!id) return '未设置';
+  if (!id) return '跟随系统';
   const t = (S.appTplLib || []).find(x => x.id === id) ||
             (S.templates || []).find(x => x.id === id);
   if (t) return t.friendly;
@@ -1800,7 +1852,7 @@ function pickToolbar() {
    kind = app | game，决定动作名（appapply / gameapply）与「已配 N」的统计源。 */
 /* 模板卡。
    · kind = app | game（决定动作名 appapply / gameapply 与统计源）
-   · v12 起**没有「不接管」伪卡**（用户要求删除）；未设置的包只在筛选条里计数。
+   · v12 起**没有「不接管」伪卡**（用户要求删除）；无条目的包（跟随系统）只在筛选条里计数。
    · 详情（其余/最重/次重/comm）默认**不显示**，点模板名才弹小窗，点空白处收起。 */
 function tplCardHtml(t, kind, map, countMap) {
   const oc = resolveSem(t.other);
@@ -1894,7 +1946,7 @@ function updateFilterChips() {
     const k = b.getAttribute('data-filter');
     b.classList.toggle('on', k === S.filter);
     if (k === 'all') b.textContent = '全部 ' + appTotalCount();
-    else if (k === 'none') b.textContent = '未设置 ' + (appTotalCount() - tplAssignedCount());
+    else if (k === 'none') b.textContent = '跟随系统 ' + (appTotalCount() - tplAssignedCount());
     else if (k.indexOf('tpl:') === 0) {
       const id = k.slice(4), t = (S.appTplLib || []).find(x => x.id === id);
       const n = manualApps().filter(a => (S.appTplAssign || {})[a.pkg] === id).length;
@@ -1931,10 +1983,10 @@ function viewApps() {
   const appTotal = appTotalCount();
   const assignedCount = tplAssignedCount();
   /* v12：删掉「不接管」伪卡（用户要求）—— 档位卡只剩模块定义的 4 档。
-     未设置的包不再单独成卡，但筛选条里仍留一个「未设置」入口，方便批量补配。 */
+     无条目的包（跟随系统）不再单独成卡，但筛选条里仍留一个「跟随系统」入口，方便批量补配。 */
   const cards = (S.appTplLib || []).map(t =>
       tplCardHtml(t, 'app', S.appTplAssign || {}, effAssignMap())).join('');
-  const assignTsv = Object.keys(S.appTplAssign || {}).map(p => p + '\t' + S.appTplAssign[p]).join('\n');
+  const assignTsv = assignTsvOf(S.appTplAssign || {}, S.appAssignMark || {});
 
   return `
 <div class="group">
@@ -1943,12 +1995,9 @@ function viewApps() {
     <div class="mono" style="font-size:11.5px;opacity:.75;line-height:1.7">
       档位与 Scene 模式同名：<b>省电 / 均衡 / 性能 / 系统接管</b>。<br>
       这里的分配是<b>模块自己的数据</b>，不会随 Scene 变动而漂移 ——
-      想让两边对齐时点下面的按钮跑一次（覆盖 Scene 里显式设过模式的那几条，其余保留）。<br>
-      <b>默认不预设任何分配</b> —— 全部靠「从 Scene 导入」或逐条手动设置产生。<br>
+      想让两边对齐时点顶栏的<b>「同步配置」</b>跑一次（覆盖 Scene 里显式设过模式的那几条，其余保留）。<br>
+      <b>默认不预设任何分配</b> —— 全部靠「同步配置」或逐条手动设置产生。<br>
       系统相机固定为 <b>系统接管</b>，不可调整 → 不在下面的列表里。
-    </div>
-    <div class="btn-row" style="padding:12px 0 0">
-      <button class="btn primary" data-act="importscene">从 Scene 导入一次</button>
     </div>
   </div>
 </div>
@@ -1974,7 +2023,7 @@ function viewApps() {
       return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
         esc(t.friendly) + ' ' + n + '</button>';
     }).join('')}
-    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">未设置 ${appTotal - assignedCount}</button>
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">跟随系统 ${appTotal - assignedCount}</button>
   </div>
   <div class="card" style="margin-top:8px"><div class="listbox" id="applist">${appListHtml()}</div></div>
 </div>
@@ -2013,7 +2062,7 @@ function viewGames() {
   const rows = glist.map(gameRowHtml).join('');
   /* v12：删掉「不接管」伪卡，档位卡只剩模块定义的 4 档 */
   const cards = (S.templates || []).map(t => tplCardHtml(t, 'game', S.gameAssign || {})).join('');
-  const assignTsv = Object.keys(S.gameAssign || {}).map(p => p + '\t' + S.gameAssign[p]).join('\n');
+  const assignTsv = assignTsvOf(S.gameAssign || {}, S.gameAssignMark || {});
   /* Scene 的 FAS 调速器（features/fas.conf 三簇）—— 游戏页顶部那个按钮的状态显示 */
   const fg = S.fasGov || {};
   const gov = [fg.l, fg.m, fg.p].map(v => v || '?');
@@ -2056,7 +2105,7 @@ function viewGames() {
       return '<button class="' + (S.filter === 'tpl:' + t.id ? 'on' : '') + '" data-filter="tpl:' + esc(t.id) + '">' +
         esc(t.friendly) + ' ' + n + '</button>';
     }).join('')}
-    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">未设置 ${games.filter(g => !gmap[g.pkg]).length}</button>
+    <button class="${S.filter === 'none' ? 'on' : ''}" data-filter="none">跟随系统 ${games.filter(g => !gmap[g.pkg]).length}</button>
   </div>
   <div class="card" style="margin-top:8px"><div class="listbox">${rows || '<div class="empty">没有匹配的游戏</div>'}</div></div>
 </div>
@@ -2163,10 +2212,10 @@ async function actGameAssignSave(src) {
       const f = line.split('\t');
       if (f.length < 2 || !f[0] || !f[1]) { toast('每行需 包名<TAB>模板id'); return; }
     }
-    S.gameAssign = {};
-    tsv.split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.gameAssign[f[0]] = f[1]; });
+    tsv = stripMarksOnChange(tsv, S.gameAssign);
+    loadAssignTsv(tsv, S.gameAssign, S.gameAssignMark);
   } else {
-    tsv = Object.keys(S.gameAssign).map(p => p + '\t' + S.gameAssign[p]).join('\n');
+    tsv = assignTsvOf(S.gameAssign, S.gameAssignMark);
   }
   const r = await busy('正在保存并重建…', async () => {
     const w = await Api.writeText('gameassign', tsv);
@@ -2390,13 +2439,13 @@ const ACTIONS = {
   gameapply: t => applySelected('game', t),
   appasssave: async () => {
     const e = $('app-assign'); if (!e) return;
-    const tsv = e.value.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
+    let tsv = e.value.replace(/\r/g, '').split('\n').map(s => s.trim()).filter(Boolean).join('\n');
     for (const line of tsv.split('\n')) {
       const f = line.split('\t');
       if (f.length < 2 || !f[0] || !f[1]) { toast('每行需 包名<TAB>模板id'); return; }
     }
-    S.appTplAssign = {};
-    tsv.split('\n').forEach(line => { const f = line.split('\t'); if (f[0] && f[1]) S.appTplAssign[f[0]] = f[1]; });
+    tsv = stripMarksOnChange(tsv, S.appTplAssign);
+    loadAssignTsv(tsv, S.appTplAssign, S.appAssignMark);
     await saveAppAssign(tsv);
   },
   go: a => { switchTab(a); }
@@ -2412,7 +2461,7 @@ function switchTab(a) {
   render();
   window.scrollTo(0, 0);
   // 兜底：应用页依赖 apps_tpl（模板卡 + 筛选项计数）。若还没到就补拉一次再重渲染，
-  // 否则会出现「档位卡空白、筛选项只有『全部 0 / 未设置 0』」。
+  // 否则会出现「档位卡空白、筛选项只有『全部 0 / 跟随系统 0』」。
   if (a === 'apps' && !(S.appTplLib || []).length) {
     loadAppsTpl().then(() => { if (S.tab === 'apps') render(); }).catch(() => { });
   }
@@ -2722,12 +2771,12 @@ async function loadLogs() {
 
 function render() {
   const view = $('view'); if (!view) return;
+  // 顶栏「同步配置」按钮 = 应用页原来那个「从 Scene 导入一次」（同一个动作 id）。
+  // 连接状态只走 title，不再是一个独立的胶囊。
   const chip = $('conn-chip');
   if (chip) {
     const m = S.bridgeMode || 'demo';
-    const bad = m === 'demo';
-    chip.className = 'pill ' + (bad ? 'bad' : 'ok');
-    chip.textContent = bad ? '未连接' : (m === 'official' ? '已连接' : '已连接 · ' + m);
+    chip.title = m === 'demo' ? '未连接（演示模式）' : (m === 'official' ? '已连接' : '已连接 · ' + m);
   }
   document.querySelectorAll('.tabs [data-tab]').forEach(b =>
     b.classList.toggle('on', b.getAttribute('data-tab') === S.tab));

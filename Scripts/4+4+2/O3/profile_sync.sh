@@ -109,12 +109,19 @@ do_push() {
       ''|*[!0-9]*) echo "ERR 同步失败（sync_scheme 未返回文件数）"; return 1 ;;
     esac
 
-    # ---- ② 启用配置：来源通道 + 「性能调节」总开关 ----
-    local src_out dyn_out src_ok="" dyn_ok=""
-    src_out=$(scene_source_set "$SCENE_SOURCE_WANT" 2>&1)
-    dyn_out=$(scene_dyn_set true 2>&1)
-    [ "$(scene_source_get)" = "$SCENE_SOURCE_WANT" ] && src_ok=1
-    [ "$(scene_dyn_get)" = "true" ] && dyn_ok=1
+    # ---- ② 启用配置：来源通道 + 「性能调节」总开关（★ v17.7 强制）----
+    #  「传递调度」= 强制传递 + 强制启用：写一次若被运行中的 Scene 写回，就再写一次；
+    #  两次都不到位则本函数返回非 0，让 WebUI 明确报错，而不是「成功 + 一行警告」。
+    local src_out dyn_out src_ok="" dyn_ok="" try
+    for try in 1 2; do
+        src_out=$(scene_source_set "$SCENE_SOURCE_WANT" 2>&1)
+        dyn_out=$(scene_dyn_set true 2>&1)
+        src_ok=""; dyn_ok=""
+        [ "$(scene_source_get)" = "$SCENE_SOURCE_WANT" ] && src_ok=1
+        [ "$(scene_dyn_get)" = "true" ] && dyn_ok=1
+        [ -n "$src_ok" ] && [ -n "$dyn_ok" ] && break
+        sleep 1
+    done
 
     # ---- 严格校验：确认关键文件真的落盘且与源一致 ----
     #  ⚠ verify_synced 对「设备上不存在」的文件是 skip（continue），
@@ -162,7 +169,12 @@ do_push() {
     [ -z "$pf_ok" ] && echo "   ⚠ profile.json 被 Scene 覆盖了 —— 我们的参数未生效"
     [ -z "$src_ok" ] && echo "   ⚠ 来源未就绪：${src_out}"
     [ -z "$dyn_ok" ] && echo "   ⚠ 性能调节未打开：${dyn_out}"
+    # ★ v17.7：Scene 的**界面**只在启动时读一次偏好，模块刻意不碰 Scene 进程
+    #   （见 ③ 的说明：只重启 scene-daemon）。所以给出这一步提示，避免用户以为没生效。
+    echo "   · 若 Scene 调节页仍显示旧状态：把 Scene 从后台划掉重开一次即可"
     log_quiet "profile: push ${scheme} (${n} files) ok, identity=${ida}/${idv} source=${src_now} dyn=${dyn_ok:-0} kept(mf/pf)=${mf_ok:-0}/${pf_ok:-0}"
+    # 两个启用开关是「配置启用」的硬条件：两次都没到位 = 传递失败（不再谎报成功）
+    [ -n "$src_ok" ] && [ -n "$dyn_ok" ] || return 1
     return 0
 }
 

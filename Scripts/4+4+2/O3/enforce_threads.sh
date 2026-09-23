@@ -61,7 +61,10 @@ MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
 . "$MODDIR/lib/util.sh"
 
 TASK="taskset"
-CG_ROOT="/dev/cpuset"
+# ⚠ 用 ${VAR:-默认} 而不是硬赋值：§3.45 的释放逻辑要能在沙盒里离线单测
+#   （与 migrate_nobig.sh / pin_cgroup.sh 同一约定）。生产路径不变。
+CG_ROOT="${CG_ROOT:-/dev/cpuset}"
+PROC_ROOT="${PROC_ROOT:-/proc}"
 TMP="${TMPD:-/data/adb/SceneO3Tuner/tmp}"
 mkdir -p "$TMP" 2>/dev/null
 
@@ -150,6 +153,14 @@ ONLINE="$CPU_LIST"
 #   升级目标/阈值/间隔，供下面的 load_aware 使用。零 fork 读法：
 #   Scene state → 方案名兜底。
 scene_current_mode_read
+mode_sched_read "$CUR_MODE"
+# ★ v17.3：四档的**升级目标**（esc）各取一份，供 §3.4 判定「本应用要不要大核 8-9」。
+#   以前迁移判定只看静态模板核位，而 fast 的静态是 0-7（不含 8/9），只有负载
+#   升级目标 4-9 才需要大核 → 极速档被自有 nobig(0-7) 夹死。取完还原本档参数。
+mode_sched_read powersave;   ESC_PS="$MS_ESC"
+mode_sched_read balance;     ESC_BA="$MS_ESC"
+mode_sched_read performance; ESC_PE="$MS_ESC"
+mode_sched_read fast;        ESC_FA="$MS_ESC"
 mode_sched_read "$CUR_MODE"
 # 升级目标为空（省电档）时用单个 "-" 占位，保证 load_aware 的位置参数不错位
 SESC="$MS_ESC"; [ -n "$SESC" ] || SESC="-"
@@ -253,7 +264,7 @@ BEGIN {
     # ① 游戏：game_assign.tsv 的档位
     for (p in GSET) {
         if (CAMRE != "" && p ~ CAMRE) continue
-        if (p in ASGG) { s = T["G" ASGG[p]]; if (s != "") pick[p] = s }
+        if (p in ASGG) { s = T["G" ASGG[p]]; if (s != "") { pick[p] = s; TIER[p] = ASGG[p] } }
     }
     # ② 其余：app_assign.tsv 的档位
     #   ⚠ v10 起**不再**从 Scene 的 powercfg.xml 实时推导档位（原 ③ 分支已删除）。
@@ -264,7 +275,7 @@ BEGIN {
     for (p in ASGA) {
         if (p in GSET) continue
         if (CAMRE != "" && p ~ CAMRE) continue
-        s = T["A" ASGA[p]]; if (s != "") pick[p] = s
+        s = T["A" ASGA[p]]; if (s != "") { pick[p] = s; TIER[p] = ASGA[p] }
     }
     for (p in pick) {
         split(pick[p], c, "|")
@@ -295,7 +306,12 @@ BEGIN {
                 }
             }
         }
-        printf "%s|%s|%s|%s|%s|%s|%s|%s\n", p, ao, am, ah, c[2], c[4], cp, uni
+        # ★ v17.3：第 9 列 = 该应用**自己的档位名**（powersave|balance|performance|fast）。
+        #   必须随行带下去 —— 下游 load_aware 原来用的是 Scene 的**全局**模式
+        #   （scene_current_mode_read），于是「Scene 模式=performance + 应用档位=fast」
+        #   时它按 performance 的基线 0-3 逐线程覆盖，把 fast 的 0-7 全盖回 0-3，
+        #   表现就是「极速档不生效」。档位是每应用的事实，不能拿全局模式顶替。
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", p, ao, am, ah, c[2], c[4], cp, uni, TIER[p]
     }
 }
 ' > "$TGT" 2>/dev/null
@@ -352,7 +368,7 @@ BEGIN {
     for (i = 1; i <= n; i++) {
         if (a[i] in SEEN) continue
         SEEN[a[i]] = 1
-        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8, $1
+        printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], $2, $3, $4, $5, $6, $7, $8, $1, $9
     }
 }
 END {
@@ -369,7 +385,7 @@ END {
         for (i = 1; i <= n; i++) {
             if (a[i] in SEEN) continue               # 已被更精确的条目认领
             SEEN[a[i]] = 1
-            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], f[2], f[3], f[4], f[5], f[6], f[7], f[8], p
+            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n", a[i], f[2], f[3], f[4], f[5], f[6], f[7], f[8], p, f[9]
         }
     }
 }
@@ -401,7 +417,134 @@ NOBIG_G="$CG_ROOT/SceneO3Tuner/nobig"
 #   逻辑抽到 migrate_nobig.sh（自带建组 + 幂等迁移，可离线单测）。
 #   仅 taskset 模式需要；pin_cgroup 模式由子组 cpus 自行限制，不走这里。
 if [ "$PIN_MODE" != "group" ]; then
-    sh "$MODDIR/Scripts/4+4+2/O3/migrate_nobig.sh" "$RUN" >/dev/null 2>&1
+    sh "$MODDIR/Scripts/4+4+2/O3/migrate_nobig.sh" "$RUN" "$ESC_PS" "$ESC_BA" "$ESC_PE" "$ESC_FA" >/dev/null 2>&1
+fi
+
+# ============================================================
+#  3.45) ★ v17.5 新增：离表即释放 —— 通用解绑路径
+# ------------------------------------------------------------
+#  【为什么必须补这一段】
+#    taskset 的窄掩码**没有任何回收路径**：应用一旦离开目标表
+#    （用户把它改回「跟随系统」、或直接删掉那一行），它就不再出现在 t.run 里，
+#    而它**已经绑上的线程**仍被钉在窄掩码上，永远不放。
+#    真机实测（2026-09-22）：从 app_assign.tsv 删掉 com.tencent.mm 那一行后，
+#    该进程 331 个线程依旧全是 0-3，只有手动 `taskset -a -p 3ff <pid>` 才放开。
+#    旧代码里唯一的释放路径是 unbind_fast.sh —— 只覆盖「极速档」这一个特例。
+#
+#  【释放到哪里 = 该进程所属 cgroup 组的 CPU 预算】
+#    组的 cpus 是硬约束，sched_setaffinity 只能在预算之内收窄（见文件头 v3 说明），
+#    所以「放回组允许的范围」既不会比组更宽（不越权），
+#    也正好就是系统调度原本给它的语义。unbind_fast.sh 用的是同一套依据。
+#    · 进程若还在本模块自建的 nobig 组里（cpus=0-7）：光放掩码没用 —— 组本身
+#      还锁着 → 一并按 oom_score_adj 迁回 background(>=200) / top-app；
+#      目标组不存在时只放掩码、不动 cgroup（不猜组，与 §3.4 同一约定）。
+#
+#  【为什么快照要拍在 §3.5 缓存**之前**】
+#    缓存命中轮 $RUN 会被 §3.5 裁短（只剩本轮真正要核对的 pid）。拿裁短后的表
+#    当「本轮想要什么」的基准，会把「只是被缓存跳过」误判成「已离表」，
+#    于是每过 TTL 就把还在目标表里的应用解绑一遍。t.want 必须在过滤前拍。
+#
+#  ⚠ 安全底线：$TGT / $RUN 为空（目标表被清空、或压根没生成）时**一条都不放** ——
+#    一次瞬时的空表若照常按 t.prev 释放，会把**全部受管应用**一次性解绑。
+#    同理，$RUN 非空却拍不出 want 表时（awk/磁盘异常）也不放。
+#  ⚠ 命令攒进一个文件后用一次 `sh <文件>` 执行（与 §6 的 $CMDS 同一套路）：
+#    没有差集时文件是空的 → 不 fork sh，稳态开销 ≈ 这一次 awk。
+#  ⚠ 已知边界：$RUN 为空时脚本在 391 行就 exit 了（目标表里没有一个进程在跑），
+#    这一轮不会有释放动作；只要还有**任意一个**受管进程在跑就会正常释放。
+# ============================================================
+REL="$TMP/t.rel"; RELN="$TMP/t.reln"; WANT="$TMP/t.want"
+: > "$REL" 2>/dev/null
+if [ -s "$TGT" ] && [ -s "$RUN" ]; then
+    # 1) 拍本轮 want 快照（pid 列表，**缓存过滤前**，见上面的 ⚠）
+    awk -F'|' '{print $1}' "$RUN" > "$WANT" 2>/dev/null
+    # 2) 与上一轮比差集；只有真有人离表时才生成命令文件
+    #  ⚠ want 必须**非空**：$RUN 非空却拍出空表，只能是 awk / 磁盘出了岔子，
+    #    此时若照常比对，prev 里每个 pid 都会被判成「已离表」→ 全量误释放。
+    #    （宁可这一轮不释放，也不要把全部受管应用一次性解绑。）
+    if [ -s "$WANT" ] && [ -s "$TMP/t.prev" ]; then
+        awk -F'[|]' -v WANTF="$WANT" -v REL="$REL" -v RELN="$RELN" \
+            -v CGROOT="$CG_ROOT" -v PROC="$PROC_ROOT" '
+        function trim(x) { gsub(/^[ \t\r]+/, "", x); gsub(/[ \t\r]+$/, "", x); return x }
+        # 下面 listof / maskof 与 §5b、§6.5 的实现同源（awk 函数跨进程不能共享，
+        # 按 §6.5 的既有做法复制一份；语义必须与那边一致，改一处要改三处）。
+        function listof(e,   _i, _n, _a, _lo, _hi, _c, _out, _b) {
+            _out = ""
+            _n = split(e, _a, ",")
+            for (_i = 1; _i <= _n; _i++) {
+                _a[_i] = trim(_a[_i]); if (_a[_i] == "") continue
+                if (_a[_i] ~ /^[0-9]+-[0-9]+$/) { split(_a[_i], _b, "-"); _lo = _b[1]+0; _hi = _b[2]+0 }
+                else if (_a[_i] ~ /^[0-9]+$/)    { _lo = _a[_i]+0; _hi = _lo }
+                else continue
+                for (_c = _lo; _c <= _hi; _c++) if (!(_c in _S)) { _S[_c] = 1; _out = _out " " _c }
+            }
+            for (_i in _S) delete _S[_i]
+            return _out
+        }
+        function maskof(l,   _i, _n, _a, _m) {
+            _m = 0
+            _n = split(l, _a, " ")
+            for (_i = 1; _i <= _n; _i++) if (_a[_i] != "") _m += 2^_a[_i]
+            return sprintf("%x", _m)
+        }
+        # 读一行伪文件；读不到返回空串（零 fork，不用 system()）
+        function rdline(f,   _l) {
+            _l = ""
+            while ((getline _l < f) > 0) break
+            close(f); sub(/[\r\n]+$/, "", _l); return _l
+        }
+        # 存在性：getline 返回 -1 = 打不开（0/1 都算存在；cgroup 伪文件读到 EOF 是 0）
+        function exists(f,   _l, _r) { _r = (getline _l < f); close(f); return _r >= 0 }
+        # 该 pid 所属组的 CPU 预算（按组路径缓存）。空 = 读不到所属组 → 调用方跳过。
+        function cgof(pid,   _g, _v) {
+            _g = rdline(PROC "/" pid "/cpuset")
+            if (_g == "") return ""                 # 连所在组都读不到 → 不猜
+            if (_g == "/") _g = ""                  # 根组 → 预算取 /dev/cpuset/cpus
+            if (_g in CG) return CG[_g]
+            _v = rdline(CGROOT _g "/cpus")
+            if (_v == "") _v = rdline(CGROOT _g "/cpuset.cpus")
+            CG[_g] = _v; return _v
+        }
+        # 存活检查：/proc/<pid>/stat 读得到才算活着（prev 里可能有已退出的 pid）
+        function alive(pid,   _l) {
+            _l = ""
+            if ((getline _l < (PROC "/" pid "/stat")) > 0) { close(PROC "/" pid "/stat"); return 1 }
+            close(PROC "/" pid "/stat"); return 0
+        }
+        BEGIN {
+            while ((getline l < WANTF) > 0) { p = l + 0; if (p > 0) W[p] = 1 }
+            close(WANTF)
+        }
+        {
+            pid = $1 + 0
+            if (pid <= 0) next
+            if (pid in W) next                 # ★ 仍在目标表里 → 绝不释放
+            if (pid in DONE) next
+            DONE[pid] = 1
+            if (!alive(pid)) next              # 进程已退出 → 没有线程要放
+            raw = rdline(PROC "/" pid "/cpuset")
+            b = cgof(pid)
+            if (b == "") next                  # 拿不到组预算 → 跳过（宁漏一次，不越权放宽）
+            m = maskof(listof(b))
+            if (m == "" || m == "0") next
+            print "taskset -a -p " m " " pid > REL
+            n++
+            # 自有 nobig 组：组 cpus 仍锁着 0-7，还得按 oom_score_adj 迁回标准组
+            if (index(raw, "/SceneO3Tuner/nobig") > 0) {
+                adj = rdline(PROC "/" pid "/oom_score_adj") + 0
+                dst = CGROOT (adj >= 200 ? "/background/cgroup.procs" : "/top-app/cgroup.procs")
+                if (exists(dst)) print "echo " pid " > " dst > REL
+            }
+        }
+        END { print n + 0 > RELN }
+        ' "$TMP/t.prev" >/dev/null 2>&1
+        if [ -s "$REL" ]; then
+            read -r _rn < "$RELN" 2>/dev/null
+            sh "$REL" >/dev/null 2>&1
+            log_quiet "enforce: 离表释放 ${_rn:-?} 个进程的线程亲和性（回到所属 cgroup 预算）"
+        fi
+    fi
+    # 3) 本轮 want 成为下一轮的 prev（mv 是原子替换；WANT 下一轮会重写）
+    mv -f "$WANT" "$TMP/t.prev" 2>/dev/null
 fi
 
 # ============================================================
@@ -462,7 +605,7 @@ fi
 #     ⚠ printf 不是内建，循环里不能用；这里攒到一个变量后一次写出。
 # ============================================================
 buf=""
-while IFS='|' read -r p o m h ht hr cm uni pkg; do
+while IFS='|' read -r p o m h ht hr cm uni pkg tier; do
     [ -n "$p" ] || continue
     [ -d "/proc/$p" ] || continue
     tl=""
@@ -471,7 +614,10 @@ while IFS='|' read -r p o m h ht hr cm uni pkg; do
     if [ "$PIN_MODE" = "group" ] || [ "$uni" != "1" ]; then
         for t in "/proc/$p/task"/*; do tl="$tl ${t##*/}"; done
     fi
-    buf="$buf$p|$o|$m|$h|$ht|$hr|$cm|$uni|$tl|$pkg
+    # ★ v17.3：第 11 列 = 该应用自己的档位（由 t.run 从 t.targets 带下来）。
+    #   放在**行尾**是刻意的：现有读取方（§5b 的 awk 取 $1..$9、pin_cgroup 取 $10）
+    #   都是前缀读取，加在尾部一个都不用改。
+    buf="$buf$p|$o|$m|$h|$ht|$hr|$cm|$uni|$tl|$pkg|$tier
 "
 done < "$RUN"
 printf '%s' "$buf" > "$TIDS"
@@ -500,11 +646,42 @@ printf '%s' "$buf" > "$TIDS"
 #    这样「闲时缩到基线、忙时并按需放开」的能效语义才闭环。
 # ============================================================
 if [ $# -eq 0 ]; then
-    sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TIDS" "$TMP/lw.hot" \
-        "$SEM_p1" "$SEM_hp" "$SEM_e" \
-        "$CUR_MODE" "$SESC" "$MS_HOTOK" "$MS_INT" "$MS_HOT" "$MS_IDLE" "$MS_IDLEOFF" \
-        "$MS_BASE" \
-        >/dev/null 2>&1
+    # ★★ v17.3 根因修复：按**每个应用自己的档位**分组调用 load_aware ★★
+    #   旧写法只用一套参数（取 scene_current_mode_read 的**全局**当前模式）。
+    #   实测故障：Scene 模式=performance（基线 0-3）而应用档位=fast（基线 0-7）时，
+    #   load_aware 按 0-3 逐线程判定，lw.hot 384 行全是 0-3，随后 §6.5 拿它
+    #   **覆盖** §5b 刚下发的 0-7 → 该应用 348 个线程全被盖回 0-3，
+    #   用户看到的就是「极速档不生效 / 写入的档位没生效」。
+    #   现在档位随 t.run/t.tids 带下来（第 11 列），每个档位用自己的
+    #   base/esc/hotok/interval/hot/idle/idleoff（mode_sched_read，零 fork），
+    #   各写各的 lw.state（LW_TAG），最后拼成一份 lw.hot。
+    #   行尾没有档位标记的（理论上不该有）回落到 Scene 当前模式 = 旧行为。
+    _lwp="$TMP/lw.hot.$$"
+    : > "$_lwp"
+    for _t in powersave balance performance fast; do
+        awk -F'|' -v t="$_t" '$11==t' "$TIDS" > "$TMP/lw.sub" 2>/dev/null
+        [ -s "$TMP/lw.sub" ] || continue
+        mode_sched_read "$_t"
+        _esc="$MS_ESC"; [ -n "$_esc" ] || _esc="-"
+        LW_TAG=".$_t" sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TMP/lw.sub" "$TMP/lw.part" \
+            "$SEM_p1" "$SEM_hp" "$SEM_e" \
+            "$_t" "$_esc" "$MS_HOTOK" "$MS_INT" "$MS_HOT" "$MS_IDLE" "$MS_IDLEOFF" \
+            "$MS_BASE" \
+            >/dev/null 2>&1
+        cat "$TMP/lw.part" >> "$_lwp" 2>/dev/null
+    done
+    awk -F'|' '$11==""' "$TIDS" > "$TMP/lw.sub" 2>/dev/null
+    if [ -s "$TMP/lw.sub" ]; then
+        sh "$MODDIR/Scripts/4+4+2/O3/load_aware.sh" "$TMP/lw.sub" "$TMP/lw.part" \
+            "$SEM_p1" "$SEM_hp" "$SEM_e" \
+            "$CUR_MODE" "$SESC" "$MS_HOTOK" "$MS_INT" "$MS_HOT" "$MS_IDLE" "$MS_IDLEOFF" \
+            "$MS_BASE" \
+            >/dev/null 2>&1
+        cat "$TMP/lw.part" >> "$_lwp" 2>/dev/null
+    fi
+    mv -f "$_lwp" "$TMP/lw.hot" 2>/dev/null
+    # 上面的循环改写了 MS_* → 还原成本档的，供后续段落使用
+    mode_sched_read "$CUR_MODE"
 fi
 
 # ============================================================

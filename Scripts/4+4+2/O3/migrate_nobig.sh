@@ -22,6 +22,12 @@
 # ============================================================
 RUN="${1:-}"
 [ -n "$RUN" ] && [ -s "$RUN" ] || exit 0
+# ★ v17.3：$2..$5 = 四档的**升级目标核位**（powersave balance performance fast，
+#   由调用方从 mode_sched_row 取好传入，避免这里再拉一份 util.sh 造成双份事实源）。
+#   用途：判定「本应用要不要 8-9」。以前只看静态模板的 o/m/h/comm —— 而 fast 档的
+#   静态目标是 0-7（不含 8/9），只有**负载感知的升级目标 4-9** 才需要大核。
+#   于是极速档被自己的 nobig(0-7) 夹死，8-9 永远到不了。现在把 esc 一并计入。
+E_PS="${2:-}"; E_BA="${3:-}"; E_PE="${4:-}"; E_FA="${5:-}"
 
 CG_ROOT="${CG_ROOT:-/dev/cpuset}"
 ST="${STATE_DIR:-/data/adb/SceneO3Tuner}"
@@ -45,20 +51,40 @@ fi
 [ -d "$NOBIG_G" ] || exit 0
 
 MIG="$TMP/t.mig"; : > "$MIG"
-awk -F'[|]' -v NOBIG="$NOBIG_G" -v TOPAPP="$TOPAPP_G" -v MIG="$MIG" -v PROC_ROOT="$PROC_ROOT" '
+awk -F'[|]' -v NOBIG="$NOBIG_G" -v TOPAPP="$TOPAPP_G" -v MIG="$MIG" -v PROC_ROOT="$PROC_ROOT" \
+    -v EPS="$E_PS" -v EBA="$E_BA" -v EPE="$E_PE" -v EFA="$E_FA" '
 function rdline(f,   _l) { while ((getline _l < f) > 0) break; close(f); sub(/[\r\n]+$/,"",_l); return _l }
-function wantbig(o,m,h,cm,   _r) {
-    _r = (index(o,"8")>0||index(o,"9")>0||index(m,"8")>0||index(m,"9")>0|| \
-          index(h,"8")>0||index(h,"9")>0||index(cm,"8")>0||index(cm,"9")>0)
+# 档位 → 本档升级目标（空 = 未知档位，按「不需要大核」处理，保守留在 nobig）
+function tieresc(t) { return (t=="powersave"?EPS:(t=="balance"?EBA:(t=="performance"?EPE:(t=="fast"?EFA:"")))) }
+# 表达式里**是否包含**核 8 或 9 —— 必须展开区间，不能做子串匹配！
+#   ★ v17.4 真机事故：原来写 `index(o,"8")>0`，而 fast 档的升级目标是字符串
+#     "4-9" —— 里面根本没有字符 '8'，判定恒为假 → 极速档被自己的 nobig(0-7)
+#     夹死，8-9 永远拿不到（用户报「极速档上不了大核」的本体）。
+#   支持 "8-9" / "0-9" / "4-9" / "8" / "0-3,8-9" 等写法。
+function has89(e,   _n,_a,_i,_lo,_hi,_b) {
+    gsub(/[ \t]/, "", e)
+    _n = split(e, _a, ",")
+    for (_i = 1; _i <= _n; _i++) {
+        if (_a[_i] == "" || _a[_i] == "-") continue
+        if (_a[_i] ~ /^[0-9]+-[0-9]+$/) { split(_a[_i], _b, "-"); _lo=_b[1]+0; _hi=_b[2]+0 }
+        else if (_a[_i] ~ /^[0-9]+$/)   { _lo=_a[_i]+0; _hi=_lo }
+        else continue
+        if (8 >= _lo && 8 <= _hi) return 1
+        if (9 >= _lo && 9 <= _hi) return 1
+    }
+    return 0
+}
+function wantbig(o,m,h,cm,esc,   _r) {
+    _r = (has89(o) || has89(m) || has89(h) || has89(cm) || has89(esc))
     return _r
 }
 {
-    pid=$1; o=$2; m=$3; h=$4; cm=$7
+    pid=$1; o=$2; m=$3; h=$4; cm=$7; tier=$10
     if (pid=="" || pid+0<=0) next
     if (!(pid in SEEN)) { SEEN[pid]=1 } else next
     cg = rdline(PROC_ROOT "/" pid "/cpuset")
     inNobig = (index(cg, "/SceneO3Tuner/nobig") > 0)
-    restricted = ((o!="" || m!="") && wantbig(o,m,h,cm) == 0)
+    restricted = ((o!="" || m!="") && wantbig(o,m,h,cm,tieresc(tier)) == 0)
     if (restricted) {
         if (!inNobig) print "echo " pid " > " NOBIG "/cgroup.procs" > MIG
     } else {

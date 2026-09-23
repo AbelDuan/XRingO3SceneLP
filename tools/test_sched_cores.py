@@ -178,7 +178,7 @@ def main():
     defaults = {
         "powersave":   "powersave 省电 0-3 - 0 15 10 4 0",
         "balance":     "balance 流畅 0-3 4-7 0 12 10 4 0",
-        "performance": "performance 性能 0-3 4-7 0 10 9 4 0",
+        "performance": "performance 性能 0-3 4-7 0 10 7 4 0",
         "fast":        "fast 极速 0-7 4-9 1 8 8 4 1",
     }
     # ★ 一次 spawn 取全部四档（本环境每 spawn ≈13s，绝不可一档一次）

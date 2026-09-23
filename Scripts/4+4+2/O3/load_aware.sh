@@ -71,7 +71,12 @@ LW_IDLEOFF="${LW_IDLEOFF:-$IDLEOFF}"
 #   v16.13：只有 fast（极速）档的 HOTOK=1。
 LW_HP="${LW_HP:-$HOTOK}"
 
-STATEF="$TMP/lw.state"; TSF="$TMP/lw.ts"; NEWF="$TMP/lw.state.new"
+# ★ v17.3：允许调用方按档位分开维护「上一轮状态」（LW_TAG = ".fast" 等）。
+#   一轮里会对每个档位各调一次（见 enforce_threads.sh §4.5），若共用一套
+#   state/ts，第 2~4 次会因「间隔未到」直接 exit 0 —— 结果是只有第一个档位
+#   拿到负载感知，其余档位沿用上一轮结果，行为随档位顺序漂移。
+TAG="${LW_TAG:-}"
+STATEF="$TMP/lw.state$TAG"; TSF="$TMP/lw.ts$TAG"; NEWF="$TMP/lw.state.new$TAG"
 
 # ---- 采样节流：不到间隔就直接沿用上一轮的 hot 结果（零开销）----
 NOW=$(date +%s 2>/dev/null)
@@ -100,7 +105,7 @@ ETICKS=$(( WIN * 100 ))     # USER_HZ=100
 #   fork 预算：每进程 1 次 cat + 1 次 awk（与线程数无关）。
 #   echo 是 shell 内建 → 循环里不 fork（本机 printf 不是内建，别用）。
 {
-  while IFS='|' read -r p o m h ht hr cm uni tl pkg; do
+  while IFS='|' read -r p o m h ht hr cm uni tl pkg tier; do
       [ -n "$p" ] || continue
       [ -d "/proc/$p" ] || continue
       echo "@$p|$o"
