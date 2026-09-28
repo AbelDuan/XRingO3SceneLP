@@ -1,0 +1,151 @@
+{
+  "friendly": "相机",
+  "call": [
+    [
+      "@preset",
+      "cpu_on"
+    ]
+  ],
+  "modes": [
+    {
+      "mode": [
+        "powersave"
+      ],
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "balance"
+      ],
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "performance"
+      ],
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    },
+    {
+      "mode": [
+        "fast"
+      ],
+      "state": {
+        "active": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ],
+        "inactive": [
+          [
+            "@preset",
+            "fast_active"
+          ],
+          [
+            "@preset",
+            "limiter_on"
+          ],
+          [
+            "@limiter",
+            "NONE"
+          ]
+        ]
+      }
+    }
+  ]
+}
