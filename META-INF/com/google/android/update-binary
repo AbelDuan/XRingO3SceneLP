@@ -1,0 +1,66 @@
+#!/sbin/sh
+#################
+# Initialization
+#################
+umask 022
+
+# Global vars
+TMPDIR=/dev/tmp
+PERSISTDIR=/sbin/.magisk/mirror/persist
+
+rm -rf $TMPDIR 2>/dev/null
+mkdir -p $TMPDIR
+
+# echo before loading util_functions
+ui_print() { echo "$1"; }
+
+#################
+# Environment (KernelSU / Magisk 通用)
+# 设计：沿用官方安装流程——由 util_functions 完成「提取 + source customize.sh」，
+#       绝不在本脚本里先 rm -rf $MODPATH 再自行 unzip（那会绕过 KSU 管理器，
+#       在 $ZIPFILE 不可靠时把模块解成空目录 → 报「安装错误」）。
+#       KernelSU 的 MAGISK_VER_CODE 恒为 25200，故官方流程可在 KSU 上正常运行。
+#################
+OUTFD=$2
+ZIPFILE=$3
+
+mount /data 2>/dev/null
+
+# KernelSU 自带 util_functions（优先）
+if [ -f /data/adb/ksu/util_functions.sh ]; then
+  export KSU=true
+  . /data/adb/ksu/util_functions.sh
+# Magisk 或 KernelSU 的 Magisk 兼容层
+elif [ -f /data/adb/magisk/util_functions.sh ]; then
+  . /data/adb/magisk/util_functions.sh
+fi
+
+# util_functions 提供了 install_module → 交给官方流程（提取 + 运行 customize.sh）
+if command -v install_module >/dev/null 2>&1; then
+  install_module
+  exit 0
+fi
+
+# ---- 极简回退：两套 util_functions 都不存在时才走这里（绝不 require_new_magisk）----
+if ! command -v set_perm_recursive >/dev/null 2>&1; then
+  set_perm_recursive() { chown -R "$2:$3" "$1"; chmod -R "$4" "$1"; }
+fi
+if ! command -v set_perm >/dev/null 2>&1; then
+  set_perm() { chown "$2:$3" "$1"; chmod "$4" "$1"; [ -z "$5" ] || chcon "$5" "$1"; }
+fi
+: ${MODPATH:=/data/adb/modules/SceneO3Tuner}
+: ${NVBASE:=/data/adb}
+
+ui_print " "
+ui_print "====================================="
+ui_print "  玄戒O3 · Abel 调度工具箱"
+ui_print "====================================="
+
+rm -rf "$MODPATH" 2>/dev/null
+mkdir -p "$MODPATH"
+cd "$MODPATH" || exit 1
+unzip -o "$ZIPFILE" -x 'META-INF/*' >&2
+find "$MODPATH" -name '*.sh' -exec chmod 0755 {} \; 2>/dev/null
+[ -f "$MODPATH/customize.sh" ] && . "$MODPATH/customize.sh"
+ui_print "✅ 安装完成"
+exit 0

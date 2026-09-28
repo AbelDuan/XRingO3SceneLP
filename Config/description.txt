@@ -1,0 +1,24 @@
+【全能】玄戒O3 · Scene LP 调度方案（v17.1 能效校准值 + O1 官方 schema）
+四档频率取自 v17.1 四方案（玄戒 O3 能耗/能效对照实验校准），按 Scene 模式合并：
+  省电 ← sweet_eco · 流畅 ← sweet_bal · 性能 ← sweet_perf · 极速 ← sweet_hq
+辅助调速器（limiter/Limited）：Scene 场景化动态限频器，随时按当前频率压新上限；
+  本方案启用（manifest features.limiter=true），运行时级 p1/p2/p3/inactive/idle 取自
+  sweet_perf（p3 大核 3955200 不压制性能档；游戏时 @limiter NONE 关闭，不影响极速满频）
+
+────────────────────────────────────────────
+四档 active 上限 [小核 L / 中核 M / 大核 P]
+────────────────────────────────────────────
+  省电    L 912000    M 1142400   P 2198400
+  流畅    L 1939200   M 2419200   P 2371200
+  性能    L 2745600   M 3148800   P 3955200
+  极速    L 3148800   M 3686400   P 4358400（满频）
+
+  cpuset（common_app/gaming）：["0-3","0-3","0-9","0-9"]（v17.1 实战写法）
+  core_ctl：cpu4 锁 4 核、cpu8 0-2（reset @preset cpu_on）
+  温控解绑（powercfg.sh）：temp_state / market_download_limit /
+  special_cpu_limit / boost_cpu_hotplug → 0；joyose 强停
+
+  实现机制：governor xres（hispeed/rtg/irq_boost + target_loads + @cpu_freq），
+  调度全由 Scene 引擎下发；本模块仅灌配置。
+
+────────────────────────────────────────────

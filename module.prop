@@ -1,0 +1,6 @@
+id=SceneO3LP
+name=Scene O3 LP/HP (O1 Port)
+version=v1.2 (2026-09-28)
+versionCode=2026092803
+author=Abel
+description=玄戒O3 Scene 调度方案（玄戒O1 官方 HP 方案移植·比例映射 4簇→3簇）。无 WebUI，仅把写死配置灌入 Scene，调度全由 Scene 下发。
