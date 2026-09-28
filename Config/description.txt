@@ -1,0 +1,23 @@
+【性能】玄戒O3 · Scene HP 调度方案（玄戒O1 官方 HP 移植版）
+蓝本：helloklf/scheduler-n1 1.0/hp/o1_asic（SCENE9 官方方案，2026-09-15 版）
+移植：4 簇（cpu0/cpu2/cpu4/cpu8）比例映射 → O3 3 簇（policy0/4/8），频率 snap 到 O3 真实档位
+
+适用场景：游戏 / 重负载；日常轻负载建议配合 Scene 的省电模式使用
+
+────────────────────────────────────────────
+四档上限（O3 三簇 [小核 policy0 / 中核 policy4 / 大核 policy8]）
+────────────────────────────────────────────
+  省电    L 3148800   M 2803200   P 2371200
+  流畅    L 3148800   M 3148800   P 3148800
+  性能    L 3148800   M 3283200   P 3523200
+  极速    L 3148800   M 3686400   P 3955200
+
+  cpuset 域（递进）：小核 0-3 / 中核 0-7 / 大核 0-9
+  core_ctl：cpu4 锁 4 核在线、cpu8 0-2（O1 官方同款参数）
+  温控解绑：temp_state / market_download_limit / special_cpu_limit / boost_cpu_hotplug → 0
+
+  实现机制：governor xres（hispeed_freq / rtg_boost_freq / irq_boost_freq /
+  target_loads / @cpu_freqs_max / @cpu_freqs_min），调度全由 Scene 引擎下发；
+  本模块仅灌配置，powercfg.sh 只做温控解绑与 core_ctl 固定。
+
+────────────────────────────────────────────

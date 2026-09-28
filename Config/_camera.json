@@ -1,0 +1,51 @@
+{
+  "friendly": "相机",
+  "call": [
+    [
+      "@limiter",
+      "NONE"
+    ]
+  ],
+  "state": {
+    "active": [
+      [
+        "@cpu_freq",
+        "policy0",
+        "557MHz",
+        "max"
+      ],
+      [
+        "@cpu_freq",
+        "policy4",
+        "1142MHz",
+        "3283MHz"
+      ],
+      [
+        "@cpu_freq",
+        "policy8",
+        "1497MHz",
+        "2860MHz"
+      ]
+    ],
+    "inactive": [
+      [
+        "@cpu_freq",
+        "policy0",
+        "min",
+        "max"
+      ],
+      [
+        "@cpu_freq",
+        "policy4",
+        "min",
+        "2544MHz"
+      ],
+      [
+        "@cpu_freq",
+        "policy8",
+        "min",
+        "2371MHz"
+      ]
+    ]
+  }
+}

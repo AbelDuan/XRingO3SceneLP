@@ -1,0 +1,466 @@
+{
+  "alias": {
+    "gpu_max_khz": "/sys/class/devfreq/gpufreq_top/max_freq",
+    "cpu_min_6": "/sys/devices/system/cpu/cpufreq/policy4/scaling_min_freq",
+    "cpu_max_6": "/sys/devices/system/cpu/cpufreq/policy4/scaling_max_freq",
+    "cpu_min_8": "/sys/devices/system/cpu/cpufreq/policy8/scaling_min_freq",
+    "cpu_max_8": "/sys/devices/system/cpu/cpufreq/policy8/scaling_max_freq",
+    "core_ctl": "/sys/devices/system/cpu/cpu8/core_ctl/enable"
+  },
+  "features": {
+    "limiter": {
+      "ddr_boost": false,
+      "limiters": {}
+    },
+    "gesture_boost": {
+      "enable": true,
+      "enter": [
+        [
+          "$cpu_max_0",
+          "#3148800"
+        ],
+        [
+          "$cpu_max_4",
+          "^3427200"
+        ],
+        [
+          "$cpu_max_8",
+          "^3273600"
+        ]
+      ],
+      "exit": []
+    }
+  },
+  "reset": [
+    [
+      "@xring_reset"
+    ],
+    [
+      "@governor",
+      "xres"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu0/cpufreq/xres/adaptive_high_freq",
+      "#0"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu0/cpufreq/xres/adaptive_low_freq",
+      "#0"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu4/cpufreq/xres/adaptive_high_freq",
+      "#0"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu4/cpufreq/xres/adaptive_low_freq",
+      "#0"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu8/cpufreq/xres/adaptive_high_freq",
+      "#0"
+    ],
+    [
+      "/sys/devices/system/cpu/cpu8/cpufreq/xres/adaptive_low_freq",
+      "#0"
+    ]
+  ],
+  "presets": {
+    "target_loads": [
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/target_loads"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/target_loads"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/target_loads"
+      ]
+    ],
+    "xres_c0": [
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/hispeed_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/rtg_boost_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu0/cpufreq/xres/irq_boost_freq"
+      ]
+    ],
+    "xres_c1": [
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/hispeed_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/rtg_boost_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu4/cpufreq/xres/irq_boost_freq"
+      ]
+    ],
+    "xres_c2": [
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/hispeed_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/rtg_boost_freq"
+      ],
+      [
+        "/sys/devices/system/cpu/cpu8/cpufreq/xres/irq_boost_freq"
+      ]
+    ],
+    "limiter_off": [],
+    "common_active": [
+      [
+        "@values",
+        "xres_c0",
+        "#1785600",
+        "#2092800",
+        "#2092800"
+      ],
+      [
+        "@values",
+        "xres_c1",
+        "#1142400",
+        "#1142400",
+        "#988800"
+      ],
+      [
+        "@values",
+        "xres_c2",
+        "#1113600",
+        "#1113600",
+        "#1113600"
+      ]
+    ],
+    "common_inactive": [
+      [
+        "@cpu_freqs_min",
+        "417792",
+        "556800",
+        "1113600"
+      ],
+      [
+        "@values",
+        "xres_c0",
+        "#1497600",
+        "#1785600",
+        "#1785600"
+      ],
+      [
+        "@values",
+        "xres_c1",
+        "#988800",
+        "#988800",
+        "#988800"
+      ],
+      [
+        "@values",
+        "xres_c2",
+        "#1113600",
+        "#1113600",
+        "#1113600"
+      ]
+    ],
+    "common_app": [
+      [
+        "@cpuset",
+        "0-3",
+        "0-7",
+        "0-9"
+      ],
+      [
+        "/dev/cpuset/sf/cpus",
+        "#0-7"
+      ],
+      [
+        "$core_ctl",
+        "#1"
+      ]
+    ],
+    "common_gaming": [
+      [
+        "@preset",
+        "common_active"
+      ],
+      [
+        "@limiter",
+        "NONE"
+      ],
+      [
+        "@cpuset",
+        "0-3",
+        "0-7",
+        "0-9"
+      ],
+      [
+        "/dev/cpuset/sf/cpus",
+        "#0-6"
+      ],
+      [
+        "$core_ctl",
+        "#0"
+      ]
+    ],
+    "powersave_active": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#2803200",
+        "#2371200"
+      ],
+      [
+        "@cpu_freqs_min",
+        "#1065600",
+        "#691200",
+        "#2044800"
+      ],
+      [
+        "@target_loads",
+        "80 1641600:85 2544000:90",
+        "80 1142400:85 1651200:90",
+        "80 2044800:85 2044800:90"
+      ]
+    ],
+    "powersave_inactive": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#2131200",
+        "#2044800"
+      ],
+      [
+        "@target_loads",
+        "85 1353600:90 2544000:95",
+        "85 988800:90 1651200:95",
+        "95"
+      ]
+    ],
+    "balance_active": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#3148800",
+        "#3148800"
+      ],
+      [
+        "@cpu_freqs_min",
+        "1497600",
+        "691200",
+        "2044800"
+      ],
+      [
+        "@target_loads",
+        "80 2544000:85 2899200:90",
+        "80 1651200:85 2131200:90",
+        "85 2371200:90"
+      ]
+    ],
+    "balance_inactive": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#2803200",
+        "#2371200"
+      ],
+      [
+        "@target_loads",
+        "85 1353600:90 2544000:95",
+        "85 988800:90 1651200:95",
+        "95"
+      ]
+    ],
+    "performance_active": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#3283200",
+        "#3523200"
+      ],
+      [
+        "@cpu_freqs_min",
+        "1497600",
+        "691200",
+        "2044800"
+      ],
+      [
+        "@target_loads",
+        "80 2899200:85 3148800:90",
+        "80 1804800:85 2294400:90",
+        "85 2371200:90"
+      ]
+    ],
+    "performance_inactive": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#3148800",
+        "#2707200"
+      ],
+      [
+        "@target_loads",
+        "85 1641600:90 2544000:95",
+        "85 988800:90 1651200:95",
+        "90"
+      ]
+    ],
+    "fast_active": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#3686400",
+        "#3955200"
+      ],
+      [
+        "@cpu_freqs_min",
+        "1497600",
+        "835200",
+        "2044800"
+      ],
+      [
+        "@target_loads",
+        "80 3148800:85",
+        "80 2294400:85",
+        "80 2371200:85"
+      ]
+    ],
+    "fast_inactive": [
+      [
+        "@cpu_freqs_max",
+        "#3148800",
+        "#3283200",
+        "#3148800"
+      ],
+      [
+        "@target_loads",
+        "83 2899200:87 3148800:95",
+        "83 1804800:87 2294400:95",
+        "87 2371200:95"
+      ]
+    ]
+  },
+  "schemes": {
+    "powersave": {
+      "call": [
+        [
+          "/sys/devices/system/cpu/cpufreq/boost",
+          "0"
+        ]
+      ],
+      "app": [
+        [
+          "@preset",
+          "common_app"
+        ],
+        [
+          "@preset",
+          "powersave_active"
+        ]
+      ],
+      "game": [
+        [
+          "@preset",
+          "common_gaming"
+        ]
+      ]
+    },
+    "balance": {
+      "app": [
+        [
+          "@preset",
+          "common_app"
+        ],
+        [
+          "@preset",
+          "balance_active"
+        ]
+      ],
+      "game": [
+        [
+          "@preset",
+          "common_gaming"
+        ]
+      ]
+    },
+    "performance": {
+      "app": [
+        [
+          "@preset",
+          "common_app"
+        ],
+        [
+          "@preset",
+          "performance_active"
+        ]
+      ],
+      "game": [
+        [
+          "@preset",
+          "common_gaming"
+        ],
+        [
+          "@preset",
+          "limiter_off"
+        ]
+      ]
+    },
+    "fast": {
+      "app": [
+        [
+          "@preset",
+          "common_app"
+        ],
+        [
+          "@preset",
+          "fast_active"
+        ]
+      ],
+      "game": [
+        [
+          "@preset",
+          "common_gaming"
+        ],
+        [
+          "@preset",
+          "limiter_off"
+        ]
+      ]
+    }
+  },
+  "apps": [
+    {
+      "friendly": "白名单",
+      "packages": [
+        "com.termux",
+        "xyz.chatboxapp.chatbox",
+        "com.danemadsen.maid",
+        "com.freakurl.apps.ollama",
+        "io.github.xororz.localdream"
+      ],
+      "import": "_whitelist.json"
+    },
+    {
+      "friendly": "相机",
+      "packages": [
+        "Camera"
+      ],
+      "import": "_camera.json"
+    },
+    {
+      "friendly": "All",
+      "packages": [
+        "*"
+      ],
+      "import": "_apps.json"
+    }
+  ],
+  "games": [
+    {
+      "friendly": "Games",
+      "packages": [
+        "*"
+      ],
+      "import": "_games.json"
+    }
+  ]
+}
