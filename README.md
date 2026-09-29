@@ -1,5 +1,131 @@
 # SceneO3LP · 玄戒O3 Scene 调度方案（O1 官方蓝本 LP 低耗移植）
 
+## ⚠ v1.5 重大变更：改用「外部配置」通道（2026-09-29 实机定论）
+
+**旧机制（v1.4）已失效**：本机 Scene（`N1 2026.09 Alpha7`，2026-09-27 安装）**不再接受
+`scene_profile_source=SOURCE_SCENE_ONLINE`** —— 写入后会被 App **主动清除**（实测矩阵：
+`BANANA` / `SOURCE_SCENE_CUSTOM` / `SOURCE_SCENE_LP` / `SCENE_HP` / `SCENE_EP` /
+`SCENE_IMPORT` / `SCENE_ACTIVE` 全部保留，**唯独 `SOURCE_SCENE_ONLINE` 被清**）。
+这就是调节页一直显示「未知 / 未选择」且「性能调节」打不开的真因；早期 `SceneO3Tuner`
+（v16/v17 线）依赖的正是这个值，其经验来自 09-16 之前的 Scene 版本。
+
+**现行通道 = 官方文档的「外部配置（第三方调度）对接」**：
+
+| 项 | 值 |
+|---|---|
+| 脚本 | `/data/powercfg.sh`（非空即视为「已安装配置」；Scene 以 `sh /data/powercfg.sh <mode>` 调用） |
+| 描述 | `/data/powercfg.json`（version/versionCode/author/features） |
+| 来源 | `global.xml: scene_profile_source = SOURCE_OUTSIDE` |
+| 开关 | `global.xml: dynamic_control = true`（「性能调节」总开关） |
+
+判据：`outsideConfigInstalled()` 为真 → `modeConfigCompleted()` 直接返回 true →
+「性能调节」可开启。实机验证：push 后 14 秒复核 `source=SOURCE_OUTSIDE dynamic=true`
+（App 冷启动后不回滚），调节页配置位置显示 **「外部来源」**、开关为 **开启**，
+Scene 启动时确实执行了 `sh /data/powercfg.sh init`（脚本日志
+`/data/local/tmp/scene_o3_lp.log` 可查）。
+
+**四档频率由脚本按 mode 下发**：`tools/gen_powercfg.py` 从 `Config/profile.json`
+（sweet_eco 完整方案集）生成 `Config/powercfg.sh`，逐档实测结果：
+
+| Scene 模式 | policy0 (小核) | policy4 (中核) | policy8 (大核) |
+|---|---|---|---|
+| powersave 省电 | 417792~912000 | 556800~1142400 | 1113600~2198400 |
+| balance 流畅 | 417792~1353600 | 556800~1651200 | 1113600~2860800 |
+| performance 性能 | 672000~1785600 | 835200~2131200 | 1497600~3398400 |
+| fast 极速 | 1065600~2092800 | 1142400~2419200 | 2044800~3648000 |
+
+**辅助限速器（Scene 的 `@limiter`）档级映射 —— 四档各自绑定**：
+
+| 档位 | 频率上限（小/中/大核） | 限速器 |
+|---|---|---|
+| 省电 | **417792~1209600 / 556800~1651200 / 1113600~2553600**（下限=内核最低，上限抬高保流畅） | `@limiter p1` |
+| 流畅 | **417792~1939200 / 556800~2419200 / 1113600~2371200**（下限=内核最低） | `@limiter p2` |
+| 性能 | 2745600 / 3148800 / 3955200 | `@limiter p3` |
+| 极速 | **3148800 / 3686400 / 4358400（三簇满频）** | **`@limiter NONE`（解绑，完全拉满）** |
+
+- 限速器档级本体（p1/p2/p3/inactive/idle 的三簇 min/max/margins）在 `Config/profile.json`
+  的 `features.limiter.limiters`，开关在 `Config/features/limiter.conf`（`limiter_apps=1` /
+  `limiter_games=1`），两者都会随 push 灌入 Scene。
+- ⚠ **在 `SOURCE_OUTSIDE`（外部配置通道）下，Scene 的特性/限速器 UI 不展示这套配置**，
+  但 daemon 实际在读并生效——实测 12 秒采样：`p4` 上限在 2294400↔2419200、
+  `p8` 在 2044800↔2371200 之间每秒多次变化（低值=限速器压，高值=该档上限）。
+  「UI 不显示」是外部通道的显示差异，不是功能缺失。
+- ⚠ 限速器会在 app 场景把上限动态压低；**极速档已 `@limiter NONE` 解绑**，选极速即满频。
+
+**限速器档级（v1.6.4 起按 SceneLP 原版移植，取自 `sweet_perf` 校准值）**：
+
+| 档级 | 小核 min~max | 中核 min~max | 大核 min~max | 备注 |
+|---|---|---|---|---|
+| p1 | 672000~1209600 | 835200~1651200 | 1113600~2553600 | 带 `core_ctl`；省电档绑定 |
+| p2 | 912000~2092800 | 1142400~2544000 | 1497600~3523200 | 流畅档绑定 |
+| p3 | 1065600~2745600 | 1142400~3148800 | 1497600~3955200 | 性能档绑定 |
+| inactive | 417792~1497600 | 835200~1804800 | 1113600~2707200 | 带 `core_ctl` |
+| idle | 417792~912000 | 835200~1296000 | 1113600~2198400 | 带 `core_ctl` |
+
+- 另有 `_whitelist.json`（豁免档）：白名单应用执行 `@limiter NONE` + `@cpu_freqs_max` + `@cpuset`，
+  即「白名单里的应用不受限速器压制」。
+- **行为实测（2026-09-29 12:02，v1.6.4 刷入后）**：上限在 `1641600/1804800/2044800` 与
+  `1939200/2419200/2371200`（流畅档上限）之间**每秒多次跳变** —— 即限速器持续读取当前频率
+  并动态改写 `scaling_max_freq` 的上限，与设计一致。
+- ⚠ 在 `SOURCE_OUTSIDE`（外部配置通道）下，Scene 的特性/限速器 **UI 不展示**这套配置，
+  但 daemon 实际读取并生效（上面的采样即证据）。
+
+**一个名字、一个下限（v1.6.3.4）**：
+
+- **方案名 = `Abel`**：改的是 `Config/manifest.json` 的 `author`（Scene 用它作「配置身份」，
+  push/action 状态行会打印 `配置身份 : Abel'LP`）。`action.sh` 已改为**实读 manifest**，不再写死。
+  ⚠ `调节页/概览页` 上那个 **`外部来源`** 是 Scene 对 `SOURCE_OUTSIDE` 的**硬编码文案，配置改不了**
+  （要改只能走已废弃的内部方案通道），能改的「配置名字」就是上面的方案身份。
+- **三簇下限锁在内核最低**：四档 preset 的 `@cpu_freq min` 与**全部限速器档级**的 `cpus[].min`
+  统一为 `417792 / 556800 / 1113600`；生成的外部脚本在每个档位写完后执行 `lock_min`
+  （把三个 `scaling_min_freq` 置 `0444`），避免被动态抬升。
+- **实测（v1.6.3.6，静置 20 秒逐秒采样）**：`p0/p4/p8` 下限 **20/20 全部** 为
+  `417792 / 556800 / 1113600`，触摸 3 次后仍为内核最低。概览页读数
+  `417~1641MHz / 556~1804MHz / 1113~2044MHz`。
+- **RCA：下限为什么会被抬（2026-09-29）** —— 静置时下限周期性跳到 `1065600 / 1142400`：
+  ① `kill scene-daemon` 后跳动立即停止 ⇒ 写入者是 **Scene 自身**（不是 thermal / perf 厂商侧）；
+  ② `grep -rl 1065600 files/` ⇒ 命中 `profile.json` 与 `_Games.json`；
+  ③ `profile.json` 里该值位于 **`performance_inactive` / `fast_inactive` 的 `@cpu_freq` 下限** ——
+  上一轮只改了四档 **active** 预设的下限，**漏了 inactive（前后台切换时下发）与 `_Games.json`（游戏档）**。
+  ⇒ 修复：四档 `_active` + 四档 `_inactive` + 全部限速器档级 + `_Games.json` 共 6 处的 `@cpu_freq min`
+  统一为内核最低；生成脚本在每个档位写完后执行 `lock_min`（三簇 `scaling_min_freq` 置 `0444`）。
+  **经验：Scene 的下限有 4 类写入点（档位 active / inactive、限速器档级、`_Games.json`、系统 boost），
+  只改一处必漏。**
+
+**官方切档入口（源码级实证，2026-09-29）** —— Scene 的档位应用链：
+- **常驻通知 → 点击内容 → `ReceiverSceneMode` → `FloatPowercfgSelector`（悬浮档位选择器，五个按钮：
+  省电 / 默认(均衡) / 游戏(性能) / 极速 / 忽略）→ `switchMode()` → `modeSwitcher.executePowercfgMode(selectedMode, packageName)`**
+- 另有官方入口：`am start -n com.omarea.vtools/.activities.ActivityPowerModeTile`（QS 磁贴的启动器，
+  它 internal 就是 `FloatPowercfgSelector(...).open(pkg)`）；
+  `am broadcast -a com.omarea.scene_mode.ReceiverSceneMode --es packageName <包名>`（= 通知内容点击的同一条 intent）
+- ⚠ 该选择器是 **`TYPE_APPLICATION_OVERLAY` + `NOT_FOCUSABLE`** 窗口：**uiautomator / input 自动化抓不到、
+  点不到**（本机实测窗口 Requested 468×30、节点 dump 为空），但**人工可以正常弹出并切换四档**
+  （用户 2026-09-29 实测确认）——所以「自动化测不出档位调用」≠「Scene 不调用」。
+- ✅ **端到端实证（2026-09-29 11:37:48）**：用户在「通知 → 悬浮选择器」把当前应用
+  （`top.funcun.dshfolk`）设为**极速**，同一秒脚本日志出现 `[fast]`，`powercfg.xml` 写入
+  `top.funcun.dshfolk=fast`；随后离开选择器、前台应用变化，又出现 `[powersave]` 调用 ——
+  证明 Scene 在 **应用切换 / 档位变更** 时都会执行 `sh /data/powercfg.sh <mode>`，
+  **外部分发链路完整可用**（app-side `executePowercfgMode` → 我们的脚本）。
+- `push.sh` 的 `apply_default_mode()` 仍保留作兜底：推送/开机时按 Scene 当前默认档
+  （`powercfg.xml` 的 `"*"`）主动应用一次，保证装完即生效。
+
+**与 Scene 官方最新 O1 调度（`helloklf/scheduler-n1` `1.0/hp/o1_asic`）对照**：
+- 官方 `reset` 首项是 `["@xring_reset"]`（XRing 专用清理函数）——**装机版 Scene 无此函数**
+  （dex/资源均无 `xring_reset`），照搬=空转，故不采用；待 Scene 更新后再评估。
+- 官方用 `@cpu_freqs_max/@cpu_freqs_min` 函数式写法——本版 Scene 的字符串表里**不存在**
+  这些函数名，未证实支持，故继续用实测有效的裸路径写入。
+- 官方 `_whitelist.json`（豁免档）与我们的 `_ELP.json` 属同族自定义文件，保留现状。
+- 官方外部配置通道（`powercfg.sh` + `powercfg.json`）与我们现行方案一致 ✅
+
+**不再做、也不推的东西**：`threads.json` / `threads_games.json`（线程/核心分配 = 线程绑定）、
+模块侧守护与落核脚本——按用户要求本模块只保留「频率配置 + 配送到 Scene」。
+
+**⚠ 另一个被证伪的旧结论**：`files/profileInstalled` **不是** Scene 的方案安装标记，
+而是 **AndroidX ProfileInstaller** 的基线 profile 标记（App 启动日志
+`D/ProfileInstaller: Installing profile for com.omarea.vtools`）。v1.4 删它「逼 Scene 重装」
+属误判，v1.5 已不再触碰。
+
+
 KernelSU 模块。**无 WebUI**——只把写死的调度配置灌进 Scene（`com.omarea.vtools`），
 调度全部由 Scene 引擎下发（governor xres + limiter 辅助调速器）。
 
