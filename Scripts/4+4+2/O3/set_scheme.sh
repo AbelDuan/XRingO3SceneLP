@@ -1,8 +1,10 @@
 #!/system/bin/sh
 # ============================================================
-#  切换 / 落地方案   (v2 · 实测校正版)
-#  用法: set_scheme.sh <sweet_eco|sweet_bal|sweet_perf> [quiet]
+#  切换 / 落地方案   (v18 · 模块自有)
+#  用法: set_scheme.sh <sweet_eco|sweet_bal|sweet_hq|sweet_perf> [quiet]
 #  可选: set_scheme.sh repair | restore
+#  v18：方案切换 = 选默认全局模式 + 频率下发 + 线程重建，
+#       不再与 Scene 做任何交互。
 # ============================================================
 MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
 . "$MODDIR/lib/util.sh"
@@ -10,28 +12,22 @@ MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
 ACTION="$1"
 QUIET="$2"
 
-# ---------- 前置：Scene 数据目录必须可进入 ----------
-# 目录缺 owner 执行位会导致 Scene 无法访问自己的配置，直接卡在启动 splash。
-# 任何动作前都先自愈一次。
-ensure_scene_dir_perm
-
-# ---------- 修复可写性 ----------
-# 注：lock / unlock 两个动作已随锁定机制一起删除（2026-09-15）——
-#     chattr +i 会让 Scene 自己存不下配置（写 features/*.conf / profile.json
-#     会 ENOTSUP，表现是「在 Scene 里改了没反应」）。现在唯一的动作是 repair。
+# ---------- 修复：重建线程分配 + 重新下发频率 ----------
 if [ "$ACTION" = "repair" ]; then
-    r=$(repair_scene_writable)
-    unlock_scene_all >/dev/null 2>&1
-    out=$(gen_threads_from_scene 2>&1)
-    log "🔧 修复：可写性 $r；$out"
-    [ -z "$QUIET" ] && echo "✅ $r · $out"
+    out=$(gen_threads 2>&1)
+    log "🔧 修复：线程重建 $out"
+    current_mode_read 2>/dev/null
+    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "${CUR_MODE:-balance}" >/dev/null 2>&1
+    [ -z "$QUIET" ] && echo "✅ 线程已重建 · 频率已按[${CUR_MODE:-balance}]下发"
     exit 0
 fi
+
+# ---------- 恢复 stock（频率放开；线程仍按模块规则）----------
 if [ "$ACTION" = "restore" ]; then
-    unlock_scene_all
-    rm -f "$ACTIVE_FILE"
+    rm -f "$ACTIVE_FILE" "$ACTIVE_MODE_FILE"
     restore_stock_freq
-    log "↩️ 已恢复 stock 频率策略"
+    log "↩️ 已恢复 stock 频率策略（模块频率接管关闭）"
+    [ -z "$QUIET" ] && echo "✅ 已恢复 stock 频率策略"
     exit 0
 fi
 
@@ -47,37 +43,28 @@ fi
 
 log "▶ 应用方案: $SCHEME（$(scheme_name_cn "$SCHEME")）"
 
-# 1) 落地 Scene 配置
-cnt=$(sync_scheme "$SRC")
-log "  · 已写入 ${cnt} 个配置文件"
-
-# 2) 记录当前方案
+# 1) 记录当前方案
 echo "$SCHEME" > "$ACTIVE_FILE"
 
-# 3) CPU 调频：**已彻底交回 Scene 接管**（2026-09-16）。
-#    模块不再写任何频率节点；频率一律由 Scene 自己的模式 preset
-#    （profile.json 里 <mode>_active/inactive 的 @cpu_freq）下发。
-#    这里只做一次幂等清理：把 v2 时代写过的 cpuN/qos/{min,max}_freq 残留值
-#    清成「不限频」，让 Scene 从干净的白纸接管（值已正确就零写入）。
+# 2) 方案 → 默认全局模式（也写 active_mode，让频率跟随方案）
+case "$SCHEME" in
+  sweet_eco)  set_global_mode powersave   ;;
+  sweet_bal)  set_global_mode balance     ;;
+  sweet_hq)   set_global_mode performance ;;
+  sweet_perf) set_global_mode fast        ;;
+  *)          set_global_mode balance     ;;
+esac
 
-# 4) 不再加锁（锁定机制已废除）。
-#    落地方案本身仍会覆盖 Scene 侧配置 —— 这是一个**显式修复动作**，
-#    只在用户主动点「重新落地配置」时才会执行（见 WebUI 的相应按钮）。
-#    日常运行中守护不会回滚、开机也不会覆盖，所以 Scene 侧才是真源。
-
-# 4.5) 清理 v2 遗留的 QoS 上下限 —— 让 Scene 从「不限频」状态接管
-sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" >/dev/null 2>&1
-
-# 5) 让 Scene daemon 重读配置
-if pgrep -f scene-daemon >/dev/null 2>&1; then
-    pkill -f scene-daemon 2>/dev/null
-    log "  · scene-daemon 已重启（将重读新配置）"
+# 3) 平台调优脚本（sysfs 节点，与方案包内 powercfg.sh 同源）
+PC="${SRC}/powercfg.sh"
+if [ -f "$PC" ]; then
+    sh "$PC" >> "$LOG_FILE" 2>&1
+    log "  · powercfg.sh 已执行（方案 $SCHEME）"
 fi
 
-# 6) 按 Scene 的「应用→模式」表重建线程分配，让改动立刻可见
-out=$(gen_threads_from_scene 2>&1)
-echo "$(md5of "$SCENE_POWERCFG")/$(md5of "$SCENE_GAMES_XML")" > "${STATE_DIR}/scene.hash"
+# 4) 按模块模板/分配重建线程（写到 Aether 配置）
+out=$(gen_threads 2>&1)
 log "  · $out"
 
 log "✅ 方案 ${SCHEME} 已生效"
-[ -z "$QUIET" ] && echo "✅ 已切换到【$(scheme_name_cn "$SCHEME")】"
+[ -z "$QUIET" ] && echo "✅ 已切换到【$(scheme_name_cn "$SCHEME")】· 频率[$(current_mode_read 2>/dev/null; echo ${CUR_MODE:-balance})]"

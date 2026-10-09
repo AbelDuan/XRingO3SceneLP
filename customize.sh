@@ -49,13 +49,6 @@ case "$ARCH_RAW" in
      ui_print "  本模块仅适配玄戒 O3(10核 4+4+2)，继续安装但不保证生效" ;;
 esac
 
-SCENE_UID=$(get_package_uid "$SCENE_PKG")
-if [ -z "$SCENE_UID" ]; then
-    ui_print "⚠ 未检测到 Scene(com.omarea.vtools)，请先安装并至少启动一次"
-else
-    ui_print "- Scene UID: ${SCENE_UID} ✅"
-fi
-
 # ---------- 权限 ----------
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm_recursive "$MODPATH/Scripts" 0 2000 0755 0755
@@ -135,280 +128,40 @@ else
     ui_print "- ⚠ 艇长线程配置部署失败（见上方原因）"
 fi
 
-# ---------- 把模块内置的全部配置文件同步进 Scene（替换原文件 + 修正确权限）----------
-# 用户要求：模块自带一份完整配置，装完就是「可用状态」，不用再去 Scene 里手配。
-#   · 源 = Config/4+4+2/O3/<当前方案>/   （profile.json / _Apps.json / _Games.json /
-#     _Camera.json / _ELP.json / powercfg.sh / manifest.json / description.txt /
-#     threads.json / threads_games.json / features/*.conf）
-#   · 目标 = Scene 自己的数据目录 $SCENE_DIR（以及 features/ 子目录）
-#   · sync_scheme 内部会：替换 inode 写入（个别 inode 拒写）→ 按 Scene 的 uid 修属主/权限
-#     → 跑 verify_synced 自检（md5 逐个比对，防串档）
-if [ -d "$SCENE_DIR" ]; then
-    # a) 目录可进入 + 清掉历史残留的 chattr 锁（否则 Scene 自己存不下设置）
-    ensure_scene_dir_perm
-    r=$(repair_scene_writable)
-    ui_print "- 配置可写性: $r"
+# ---------- v18：模块自有初始化（不再与 Scene 交互）----------
+#  频率 / 调度器 / 线程全部由本模块定义。安装时只做几件模块自己的事：
+#    · 选默认全局模式（由当前方案推导，写 active_mode）并下发 QoS 频率；
+#    · 把方案包内的 powercfg.sh 落地执行（平台 sysfs 调优）；
+#    · 线程分配已由 aether_ctl.sh deploy 结束，这里仅提示。
+SCHEME_INST=$(cat "$ACTIVE_FILE" 2>/dev/null)
+[ -z "$SCHEME_INST" ] && SCHEME_INST="sweet_bal"
+case "$SCHEME_INST" in
+  sweet_eco)  _mode=powersave ;;
+  sweet_bal)  _mode=balance ;;
+  sweet_hq)   _mode=performance ;;
+  sweet_perf) _mode=fast ;;
+  *)          _mode=balance ;;
+esac
+mkdir -p "$STATE_DIR" 2>/dev/null
+echo "$_mode" > "$ACTIVE_MODE_FILE" 2>/dev/null
+ui_print "- 默认全局模式[${_mode}]已写入（active_mode）"
 
-    # b) 首次安装判定 → 灌默认配置；非首次 → 继承，绝不覆盖
-    #
-    #    ⚠ 为什么必须区分：
-    #      profile.json 里存着用户在 Scene 里调过的 8 组频率预设。早期版本每次
-    #      装模块都全量覆盖一遍，等于把用户的调校冲掉 —— 这就是「继承」要解决的问题。
-    #
-    #    ⚠ 为什么首次判定看 profile.json：
-    #      Scene 按 manifest.json 的 name/version + files/profileInstalled 校验调度是否已安装，
-    #      标识一变（比如方案名从 LP 改称 Abel）它就会**删掉** profile.json / manifest.json /
-    #      _Apps.json / _Games.json / _Camera.json / _ELP.json 并清空 objects/、features/。
-    #      所以「profile.json 不在」正是需要灌配置的信号，用它当判据最准。
-    SCHEME_INST=$(cat "$ACTIVE_FILE" 2>/dev/null)
-    [ -z "$SCHEME_INST" ] && SCHEME_INST="sweet_bal"
-    SRC_INST="$MODPATH/Config/4+4+2/O3/$SCHEME_INST"
-
-    if [ -f "${SCENE_DIR}/profile.json" ]; then
-        # ── 升级路径（2026-09-17 语义变更）：**按清单直接覆盖** ──
-        #
-        #  旧语义是「继承，绝不覆盖 profile.json 等」，理由是那里面有用户在 Scene 里
-        #  调过的参数。代价是**模块改了什么基本送不到设备上** —— 实测踩到：
-        #  Scene 侧的 powercfg.sh 一直停在 v9 版（还在写 devfreq_gpu_limit / boost_enable），
-        #  而模块源码里那段早就删了；两边不一致了好几天，直到手动比对 md5 才发现。
-        #
-        #  新语义（用户 2026-09-17 明确要求）：**除「应用 / 游戏」类配置外，一律直接覆盖**。
-        #   · 覆盖：profile.json / manifest.json / description.txt / powercfg.sh /
-        #           _Camera.json / _ELP.json / features/*.conf
-        #   · 保留：_Apps.json / _Games.json / threads.json / threads_games.json
-        #           —— 清单在 `lib/util.sh` 的 SYNC_SKIP，改一处即可。
-        #  覆盖前先把将被覆盖的文件备份到 $STATE_DIR/backup/upgrade-<时间戳>/（可回滚）。
-        #  （_Camera.json 仍属「覆盖」，所以原先「相机配置强制替换」这条已自动包含在内。）
-        ui_print "- 检测到已有调度配置 → 升级：按清单直接覆盖（应用/游戏配置除外）"
-
-        # 1) 备份将被覆盖的文件（只备份真实存在的，别造空文件）
-        _bk="${STATE_DIR}/backup/upgrade-$(date +%Y%m%d_%H%M%S)"
-        mkdir -p "${_bk}/features" 2>/dev/null
-        _bn=0
-        for _f in profile.json manifest.json description.txt powercfg.sh _Camera.json _ELP.json; do
-            if [ -f "${SCENE_DIR}/${_f}" ] && cp -f "${SCENE_DIR}/${_f}" "${_bk}/" 2>/dev/null; then
-                _bn=$((_bn+1))
-            fi
-        done
-        for _f in cpuset.conf env.conf fas.conf limiter.conf refresh_rate.conf; do
-            if [ -f "${SCENE_DIR}/features/${_f}" ] && cp -f "${SCENE_DIR}/features/${_f}" "${_bk}/features/" 2>/dev/null; then
-                _bn=$((_bn+1))
-            fi
-        done
-        [ "$_bn" -gt 0 ] && ui_print "- 已备份被覆盖的 ${_bn} 个文件 → ${_bk}"
-
-        # 2) 覆盖。保留清单 = lib/util.sh 的 SYNC_SKIP（默认只留「应用 / 游戏」的线程表）
-        if [ -d "$SRC_INST" ]; then
-            cnt=$(sync_scheme "$SRC_INST" 2>&1 | tail -1)
-            case "$cnt" in
-              ''|*[!0-9]*)
-                ui_print "- ⚠ 配置覆盖异常：$cnt"
-                ui_print "  可在 WebUI 概览页点「传递调度」重试" ;;
-              *)
-                ui_print "- 已覆盖内置配置 ${cnt} 个文件（方案 $SCHEME_INST）"
-                _miss=""
-                for _f in profile.json manifest.json _Camera.json powercfg.sh; do
-                    [ -f "${SRC_INST}/${_f}" ] || continue
-                    [ -f "${SCENE_DIR}/${_f}" ] || _miss="$_miss $_f"
-                done
-                if [ -n "$_miss" ]; then
-                    ui_print "- ⚠ 以下文件未落盘：$_miss"
-                else
-                    ui_print "- ✅ 关键文件已覆盖并校验"
-                fi
-                ui_print "- 保留未动（应用/游戏线程配置）：${SYNC_SKIP:-无}"
-                ;;
-            esac
-        else
-            ui_print "- ⚠ 内置方案目录缺失：$SRC_INST"
-        fi
-
-        # 3) 让 scene-daemon 重读刚写下去的 features/*.conf
-        #    ⚠ 这几个键是 daemon 启动时读一次缓存的（实测改完不重启不生效）。
-        #      它被 kill 后由 Scene 自身在 4~8 秒内拉起，不影响 Scene 界面与无障碍服务。
-        if pgrep -f scene-daemon >/dev/null 2>&1; then
-            restart_scene_daemon >/dev/null 2>&1 && ui_print "- scene-daemon 已重启（将重读新的 features 配置）"
-        fi
-    else
-        ui_print "- 未检测到调度配置（首次安装 / 或 Scene 重置过）→ 传递内置默认配置"
-        if [ -d "$SRC_INST" ]; then
-            cnt=$(sync_scheme "$SRC_INST" 2>&1 | tail -1)
-            case "$cnt" in
-              ''|*[!0-9]*)
-                ui_print "- ⚠ 配置传递异常：$cnt"
-                ui_print "  可在 WebUI 概览页点「传递调度」重试" ;;
-              *)
-                ui_print "- 已传递内置配置 ${cnt} 个文件 → Scene（方案 $SCHEME_INST）"
-                # 逐个确认关键文件真的落盘（verify_synced 对「不存在」是 skip，
-                # 所以这里显式再查一遍，避免"没写进去却报成功"）
-                _miss=""
-                for _f in profile.json manifest.json _Apps.json _Games.json _Camera.json _ELP.json powercfg.sh; do
-                    [ -f "${SRC_INST}/${_f}" ] || continue
-                    [ -f "${SCENE_DIR}/${_f}" ] || _miss="$_miss $_f"
-                done
-                if [ -n "$_miss" ]; then
-                    ui_print "- ⚠ 以下文件未落盘：$_miss"
-                    ui_print "  可在 WebUI 概览页点「传递调度」重试"
-                else
-                    ui_print "- ✅ 配置校验通过（关键文件齐全）"
-                fi
-                ;;
-            esac
-        else
-            ui_print "- ⚠ 内置方案目录缺失：$SRC_INST"
-        fi
-    fi
-
-    # c) 确保 Scene 的「核心分配」是**关**的（只动 use_presets / in_apps / in_games）
-    #
-    #    ⚠ 这里曾经写反过（$2=1，把三个开关强行打开），与模块默认配置里的
-    #      `in_apps=0 / in_games=0` 直接矛盾 —— 症状是「包里的默认配置是关的，
-    #      装完到设备上却是开的」。v10 修正为统一置 0。
-    #
-    #    为什么必须关：Scene 的核心分配会读我们写的 threads.json，但它写
-    #    /dev/cpuset/top-app/{main,render,other}/cpus 时**按 Scene 全局模式的
-    #    @cpuset 预算自己裁一刀** —— 「省电」这类窄预算会把所有档位压平成同一核位，
-    #    per-app 差异全部消失（用户实测反馈「效果很差」）。
-    #    线程交给模块的 enforce_threads.sh 逐线程落核，才能精确到 UnityMain /
-    #    RenderThread / 任意 comm 名字。
-    _cf="${SCENE_DIR}/features/cpuset.conf"
-    if [ -f "$_cf" ]; then
-        _tmp="${TMPD}/cpuset.inst"
-        cp -f "$_cf" "$_tmp" 2>/dev/null
-        awk -F= -v OFS='=' '
-            /^use_presets=/ { $2=0; u=1 }
-            /^in_apps=/     { $2=0; i=1 }
-            /^in_games=/    { $2=0; g=1 }
-            { print }
-            END { if(!u) print "use_presets=0"; if(!i) print "in_apps=0"; if(!g) print "in_games=0" }
-        ' "$_tmp" > "${_tmp}.2" 2>/dev/null && mv -f "${_tmp}.2" "$_tmp"
-        write_replace "$_tmp" "$_cf" && perm_file "$_cf"
-        rm -f "$_tmp" "${_tmp}.2" 2>/dev/null
-        ui_print "- 已关闭 Scene 核心分配（线程由模块逐线程落核）"
-    fi
-
-    # d) 确保 GPU 完全交回系统（features/env.conf 的 gpu_lock=0）
-    #
-    #    ⚠ 与 c 步对称：**继承路径不会覆盖 features/**，所以老版本升级上来的设备
-    #      会保留旧的 gpu_lock=1（= 禁止系统 GPU Boost），与 v10「模块完全不碰 GPU」
-    #      的约定不符。
-    #
-    #    ── 2026-09-17 定论：Scene 的「禁止GPU Boost」在 O3 上无执行体 ──
-    #    反汇编 classes.dex 实证：字符串 `gpu_lock` 全 dex 只有 **1 处**引用，就是
-    #    `com.omarea.scene_mode.d$b$a$a` 的表单项定义（default / path / type=boolean）。
-    #    它唯一的消费点是 `com.omarea.scene_mode.f.q()`：把 features/env.conf 逐行拼成
-    #    `export <key>=<val>` 前缀，再 `sh <powercfg.sh> <arg>` 执行
-    #    ⇒ **真正干活的必须是 powercfg.sh，Scene 自己一个字节都不写。**
-    #    O3 没有云端 LP/HP/EP 方案（`schedule_unsupported`，SoC 表里没有 O3）→ 没有官方
-    #    powercfg.sh；设备上那份是本模块的，而 v10 起它完全不读 `$gpu_lock`
-    #    ⇒ 开关在 O3 上不产生任何内核写入（strace -f 跟 daemon 启动 + 12s 稳态，
-    #      对 /sys 的 GPU 节点零访问）。
-    #
-    #    内核侧也顺带钉死了：O3 的 boost 旋钮**真实有效** —— 把 gpufreq_core 钉在
-    #    119370000（`dynamic/user_freq` + `user_valid=1`）后写 `boost_enable=1`，
-    #    cur_freq 立刻被抬到 576000000（hispeed 档，target 仍是 119MHz），写回 0 即落回。
-    #    但 **O3 从不打开它**：powercfg.sh 日志 3775 行（9/14 起、跨 2 次开机）里
-    #    boost_enable 一条写入记录都没有；空载 / screencap 压 GPU / 相机预览三场景实测
-    #    全程为 0（同批确认 O3 没有 `launcher_boost_enabled` 节点，所以环境配置页的
-    #    另一个开关「启动器加速」同样空转）。
-    #    ⇒ **没有可禁止的对象** → 按约定取「关闭」：gpu_lock=0，模块不碰 GPU 节点。
-    #      （若将来要让这个开关真正可控：在 powercfg.sh 里读 `$gpu_lock`，=1 时写
-    #        `boost_enable=0` 即可 —— 但那需要把 powercfg.sh 重新同步进 Scene。）
-    _ef="${SCENE_DIR}/features/env.conf"
-    if [ -f "$_ef" ]; then
-        _tmp="${TMPD}/env.inst"
-        cp -f "$_ef" "$_tmp" 2>/dev/null
-        awk -F= -v OFS='=' '
-            /^gpu_lock=/ { $2=0; g=1 }
-            { print }
-            END { if(!g) print "gpu_lock=0" }
-        ' "$_tmp" > "${_tmp}.2" 2>/dev/null && mv -f "${_tmp}.2" "$_tmp"
-        write_replace "$_tmp" "$_ef" && perm_file "$_ef"
-        rm -f "$_tmp" "${_tmp}.2" 2>/dev/null
-        ui_print "- GPU 交回系统（gpu_lock=0；该开关在 O3 上无执行体，O3 本身也不 boost GPU）"
-    fi
-
-    # e) 按 O3 实测结论修正「调速器」与「辅助调速器」
-    #
-    #    ⚠ 2026-09-17 起 features/*.conf 已经被 b 步**整体覆盖**过了，这几条现在是
-    #      「兜底修正」：防的是 b 步失败、或用户装的包比这一步旧、或有人手改过 features/。
-    #      仍然是「不改就会踩坑」的键，保留。
-    #
-    #    ── fas.conf 的 governor_little/middle/prime ──
-    #      Scene 文案：「FAS/FEAS 工作期间，小/中/大核使用的调速器」。
-    #      O3 三簇实际只有 xres / conservative / powersave / performance / schedutil
-    #      —— **没有 walt**（那是 8E 等平台的值）。
-    #      这里统一写成 **xres**，与「CPU 控制」页默认值、以及 profile.json 各模式
-    #      preset 的 scaling_governor 三处一致。
-    #      （Scene 的 FAS 候选是硬编码的，O3 上只有 auto/performance/conservative；
-    #        详见 Config/4+4+2/O3/*/features/fas.conf 的注释。Scene 不校验写入值。）
-    #
-    #    ── limiter.conf 的 limiters_in_apps / limiters_in_games ──
-    #      按用户要求默认**开启**（=1）：功耗最低，代价是 1 秒内的突发负载响应变慢。
-    #      相机已在 _Camera.json 里用 ["@limiter","NONE"] 单独豁免。
-    _ff="${SCENE_DIR}/features/fas.conf"
-    if [ -f "$_ff" ]; then
-        _tmp="${TMPD}/fas.inst"
-        cp -f "$_ff" "$_tmp" 2>/dev/null
-        awk -F= -v OFS='=' '
-            /^governor_little=/ { $2="xres"; a=1 }
-            /^governor_middle=/ { $2="xres"; b=1 }
-            /^governor_prime=/  { $2="xres"; c=1 }
-            { print }
-            END {
-                if(!a) print "governor_little=xres"
-                if(!b) print "governor_middle=xres"
-                if(!c) print "governor_prime=xres"
-            }
-        ' "$_tmp" > "${_tmp}.2" 2>/dev/null && mv -f "${_tmp}.2" "$_tmp"
-        write_replace "$_tmp" "$_ff" && perm_file "$_ff"
-        rm -f "$_tmp" "${_tmp}.2" 2>/dev/null
-        ui_print "- 调速器已统一为 O3 支持的 xres（与 CPU 控制页一致）"
-    fi
-
-    _lf="${SCENE_DIR}/features/limiter.conf"
-    if [ -f "$_lf" ]; then
-        _tmp="${TMPD}/limiter.inst"
-        cp -f "$_lf" "$_tmp" 2>/dev/null
-        awk -F= -v OFS='=' '
-            /^limiters_in_apps=/  { $2=1; a=1 }
-            /^limiters_in_games=/ { $2=1; g=1 }
-            { print }
-            END {
-                if(!a) print "limiters_in_apps=1"
-                if(!g) print "limiters_in_games=1"
-            }
-        ' "$_tmp" > "${_tmp}.2" 2>/dev/null && mv -f "${_tmp}.2" "$_tmp"
-        write_replace "$_tmp" "$_lf" && perm_file "$_lf"
-        rm -f "$_tmp" "${_tmp}.2" 2>/dev/null
-        ui_print "- 辅助调速器已开启（应用 + 游戏；相机单独豁免）"
-    fi
-
-    # f) 收掉旧版 powercfg.sh 留下的 GPU 温控屏蔽残留
-    #
-    #    v9 及以前的 powercfg.sh 里有 `hide_value $T/devfreq_gpu_limit 0` —— 用
-    #    bind-mount 把一个写着 0 的普通文件盖在「温控给 GPU 的限频节点」上，
-    #    于是温控 HAL 的限频写入全被这个文件吃掉，**GPU 的温控限频形同虚设**。
-    #    v10 起模块把这一行删了（GPU 完全交回系统，含温控），但**已经挂上的 bind-mount
-    #    不会自己消失**（新脚本不再碰它 → 连 umount 都不会发生）。
-    #    所以这里显式收掉；下次开机后自然也不会再有。
-    #
-    #    ⚠ 只收 devfreq_gpu_limit 这一个：temp_state / market_download_limit 至今仍是
-    #      模块主动屏蔽的对象（v14 的 powercfg.sh 还在 hide），不能动。
-    _gl="/sys/devices/virtual/thermal/thermal_message/devfreq_gpu_limit"
-    if grep -q "thermal_message/devfreq_gpu_limit" /proc/mounts 2>/dev/null; then
-        if umount "$_gl" 2>/dev/null; then
-            ui_print "- 已解除遗留的 GPU 温控屏蔽（旧版 powercfg.sh 留下的 bind-mount）"
-        else
-            ui_print "- ⚠ GPU 温控屏蔽残留未解除（重启后即消失）"
-        fi
-    fi
-
-    # d) 线程分配交给艇长的 aether-optext（service.sh 拉起），本步骤不再生成。
-    ui_print "- 线程分配：已交由艇长引擎（Aether）处理"
+# 频率接管：按默认模式下发 PM QoS（O3 上唯一被强制执行的频率旋钮）
+if sh "$MODPATH/Scripts/4+4+2/O3/apply_freq.sh" --mode "$_mode" 2>&1; then
+    ui_print "- 频率已按模式[${_mode}]下发（PM QoS）"
 else
-    ui_print "⚠ Scene 尚未启动过，频率配置将在首次开机由 service.sh 处理"
+    ui_print "- ⚠ 频率下发返回异常（详见模块日志）"
 fi
+
+# 平台调优：执行方案包内 powercfg.sh（core_ctl / sched_boost 等 sysfs）
+_PC="$MODPATH/Config/4+4+2/O3/$SCHEME_INST/powercfg.sh"
+if [ -f "$_PC" ]; then
+    sh "$_PC" >/dev/null 2>&1
+    ui_print "- powercfg.sh 已执行（方案 $SCHEME_INST）"
+fi
+
+# 线程分配已交由艇长引擎（Aether）处理
+ui_print "- 线程分配：已交由艇长引擎（Aether）处理"
 
 # ---------- 自我保护：把 KSU 的「待重启生效」就地做掉（本机不能重启）----------
 #
@@ -473,16 +226,6 @@ fi
 if { [ -n "$_migrated" ] || [ -n "$_cleared" ]; } \
    && [ -x "$FINAL_PATH/service.sh" ] && command -v ksud >/dev/null 2>&1; then
     ksud services >/dev/null 2>&1 && ui_print "- 已让 ksud 重新拉起模块服务（无需重启）"
-fi
-
-# ---------- 把切换脚本放进 Scene「自定义命令」----------
-CC_DIR="${SCENE_DIR}/custom-command"
-if [ -d "$SCENE_DIR" ]; then
-    mkdir -p "$CC_DIR"
-    cp -af "$MODPATH/Config/4+4+2/O3/switch.sh" "${CC_DIR}/O3调度·切换方案.sh"
-    [ -n "$SCENE_UID" ] && chown "${SCENE_UID}:${SCENE_UID}" "${CC_DIR}/O3调度·切换方案.sh"
-    chmod 0777 "${CC_DIR}/O3调度·切换方案.sh"
-    ui_print "- 已注入 Scene 自定义命令：O3调度·切换方案.sh"
 fi
 
 # ---------- ★ 安装后自愈：改写 KSU 的「待重启生效」状态 ----------
@@ -586,12 +329,12 @@ ui_print "  （日志：/data/adb/SceneO3Tuner/fix_pending.log）"
 
 ui_print " "
 ui_print "✅ 安装完成"
-ui_print "ℹ 玄戒O3 调度工具箱 = 两块"
-ui_print "   ① CPU 频率 —— WebUI 配置，同步给 Scene，由 Scene 下发"
+ui_print "ℹ 玄戒O3 调度工具箱（v18 · 模块自有，不依赖 Scene）= 三块"
+ui_print "   ① CPU 频率 —— 模块 PM QoS 接管（全局 + 按 app 模式）"
 ui_print "   ② 线程分配 —— 艇长(Aether)引擎，WebUI 可开关与自定义"
-ui_print "👉 模块 WebUI = 频率 / 线程 两大块"
+ui_print "   ③ 调度器   —— 方案 powercfg.sh（平台 sysfs 调优）"
+ui_print "👉 模块 WebUI = 频率 / 线程 / 调度 三大块"
 ui_print "👉 线程引擎默认开启（艇长的方案）；如需关闭在 WebUI「线程」页翻开关"
-ui_print "👉 Scene 的「核心分配」保持关闭 —— 线程完全由 Aether 接管，避免两套打架"
-ui_print "👉 辅助调速器（应用 + 游戏）保持开启；FAS 调速器统一为 xres"
+ui_print "👉 全局模式在 WebUI「模式」页切换；应用/游戏档位在「应用/游戏」页设置"
 ui_print " "
-ui_print "ℹ 模块 Config 里的频率文件是备份副本，需要时可从 WebUI 显式施加"
+ui_print "ℹ 频率完全由本模块下发（Scene 在玄戒O3 上不适配，已不再依赖）"

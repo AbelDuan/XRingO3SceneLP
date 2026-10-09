@@ -48,21 +48,19 @@ selfheal_pending_update
 
 has(){ command -v "$1" >/dev/null 2>&1; }
 
-# ---------- 文件 ID → 真实路径（白名单）----------
+# ---------- 文件 ID → 真实路径（白名单，v18 只含模块自有配置）----------
 path_of() {
     case "$1" in
-      profile)  echo "${SCENE_DIR}/profile.json" ;;
       model)    echo "${WEB_DIR}/model.json" ;;
       activemode) echo "${STATE_DIR}/active_mode" ;;
       settings) echo "${WEB_DIR}/settings.conf" ;;
-      conf:cpuset) echo "${SCENE_DIR}/features/cpuset.conf" ;;
+      app_assign)  echo "${WEB_DIR}/app_assign.tsv" ;;
+      game_assign) echo "${WEB_DIR}/game_assign.tsv" ;;
       *) echo "" ;;
     esac
 }
 modpath_of() {
     case "$1" in
-      profile) echo "${MODCFG}/profile.json" ;;
-      conf:*)  echo "${MODCFG}/features/${1#conf:}.conf" ;;
       *) echo "" ;;
     esac
 }
@@ -77,20 +75,8 @@ cmd_wcommit() {
     elif [ -x "$BB" ]; then "$BB" base64 -d "$b64" > "$raw" 2>/dev/null
     else echo "ERR 缺少 base64 工具"; return 1; fi
     [ -s "$raw" ] || { echo "ERR base64 解码为空"; return 1; }
-    case "$id" in
-      model|activemode|settings) ;;
-      *) unlock_tree "$SCENE_DIR" ;;
-    esac
     write_replace "$raw" "$dst" || { echo "ERR 覆盖失败: $dst"; return 1; }
-    case "$id" in
-      model|activemode|settings) chmod 0666 "$dst"; chown 0:0 "$dst" 2>/dev/null ;;
-      *) perm_file "$dst"; ensure_scene_dir_perm >/dev/null 2>&1 ;;
-    esac
-    mod=$(modpath_of "$id")
-    if [ -n "$mod" ] && [ -d "$(dirname "$mod")" ]; then
-        cp -f "$raw" "$mod" 2>/dev/null; chmod 0644 "$mod" 2>/dev/null; chown 0:0 "$mod" 2>/dev/null
-        log_quiet "webui: ${id} → scene + module 已同步"
-    fi
+    chmod 0666 "$dst"; chown 0:0 "$dst" 2>/dev/null
     echo "OK $(wc -c < "$raw" | tr -d ' ')"
 }
 
@@ -99,7 +85,7 @@ B64BIN="base64"; { [ -x /system/bin/base64 ] && B64BIN=/system/bin/base64; } 2>/
 if ! command -v "$B64BIN" >/dev/null 2>&1; then [ -x "$BB" ] && B64BIN="$BB base64"; fi
 cmd_b64len() { local p; p=$(path_of "$1"); [ -f "$p" ] || { echo 0; return; }; $B64BIN "$p" 2>/dev/null | tr -d '\n' | wc -c | tr -d ' '; }
 cmd_b64() { local p; p=$(path_of "$1"); [ -f "$p" ] || return 0; local s="${2:-1}" n="${3:-40000}"; $B64BIN "$p" 2>/dev/null | tr -d '\n' | cut -c "${s}-$(( s + n - 1 ))"; }
-cmd_conf() { local p="${SCENE_DIR}/features/$1.conf"; [ -f "$p" ] && cat "$p" || echo ""; }
+cmd_conf() { echo "ERR v18 起不再读取 Scene features 配置"; return 1; }
 
 # ============================================================
 #  状态
@@ -118,30 +104,17 @@ cmd_status() {
     echo "SCHEME=${SCHEME}"
     settings_load
     echo "DEBUG=${SET_DEBUG:-1}"
-    pgrep -f scene-daemon >/dev/null 2>&1 && echo "DAEMON=1" || echo "DAEMON=0"
-    local acc=0
-    case "$(settings get secure enabled_accessibility_services 2>/dev/null)" in
-      *omarea.vtools*) acc=1 ;;
-    esac
-    echo "ACC=${acc}"
-    # Scene 配置完整性
-    local miss="" f
-    for f in profile.json manifest.json _Apps.json _Games.json _Camera.json _ELP.json powercfg.sh; do
-        [ -f "${SCENE_DIR}/${f}" ] || miss="$miss $f"
-    done
-    if [ -n "$miss" ]; then echo "PROFILE_OK=0"; echo "PROFILE_MISS=${miss# }"; else echo "PROFILE_OK=1"; fi
-    echo "SCENE_AUTHOR=$(sed -n 's/.*\"author\"[ ]*:[ ]*\"\([^\"]*\)\".*/\1/p' "${SCENE_DIR}/manifest.json" 2>/dev/null | head -1)"
-    echo "SCENE_ID=$(sed -n 's/.*\"version\"[ ]*:[ ]*\"\([^\"]*\)\".*/\1/p' "${SCENE_DIR}/manifest.json" 2>/dev/null | head -1)"
-    echo "SCENE_SOURCE=$(scene_source_get)"
-    echo "SCENE_DYN=$(scene_dyn_get)"
-    # 三簇频率
+    pgrep -f "O3/guard\.sh" >/dev/null 2>&1 && echo "DAEMON=1" || echo "DAEMON=0"
+    # 调度守护
+    pgrep -f scene-daemon >/dev/null 2>&1 && echo "SCENE_DAEMON=1" || echo "SCENE_DAEMON=0"
+    # 三簇频率（v18：QoS 由本模块下发，scaling_max 不受我们控制）
     local c l
     for pair in "L 0" "M 4" "P 8"; do
         set -- $pair; l=$1; c=$2
-        echo "SCMAX_${l}=$(scmax $c)"; echo "SCUR_${l}=$(scur $c)"; echo "QMAX_${l}=$(qmax $c)"; echo "HWMAX_${l}=$(hwmax $c)"
+        echo "QMAX_${l}=$(qmax $c)"; echo "QMIN_${l}=$(qmin $c)"; echo "SCMAX_${l}=$(scmax $c)"; echo "SCUR_${l}=$(scur $c)"; echo "HWMAX_${l}=$(hwmax $c)"
     done
     local pinned=0
-    for c in 0 4 8; do local a b; a=$(scmax $c); b=$(scmin $c); [ -n "$a" ] && [ "$a" = "$b" ] && pinned=$((pinned+1)); done
+    for c in 0 4 8; do local a b; a=$(qmax $c); b=$(qmin $c); [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ] && pinned=$((pinned+1)); done
     echo "FREQ_PINNED=${pinned}"
     echo "TEMP_CPU0=$(tempof 9)"; echo "TEMP_CPU8=$(tempof 1)"
     # 当前模式
@@ -151,7 +124,6 @@ cmd_status() {
         cn=$(mode_name_cn "$m"); af=$(mode_freq "$m" active); inf=$(mode_freq "$m" inactive)
         echo "MODE_${m}=${cn}|${af}|${inf}"
     done
-    local pc; pc=$(preset_check); [ -z "$pc" ] && echo "PRESET_OK=1" || { echo "PRESET_OK=0"; echo "PRESET_BAD=${pc}"; }
     echo "KSU_UPDATE_MARK=$([ -e "$MODDIR/update" ] && echo 1 || echo 0)"
     # —— 艇长线程引擎 ——
     echo "AETHER_ON=$(sh "$AETHER_CTL" ison 2>/dev/null)"
@@ -183,25 +155,15 @@ cmd_schemes() {
 cmd_scheme(){ sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" "$1"; }
 cmd_restore(){ sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" restore; }
 cmd_apply() {
-    local ACC_BASE='net.dinglisch.android.taskerm/net.dinglisch.android.taskerm.MyAccessibilityService:com.wangc.bill/com.google.android.accessibility.selecttospeak.SelectToSpeakService'
-    local SCENE_ACC='com.omarea.vtools/com.omarea.vtools.AccessibilitySceneMode'
-    log "webui: 重绑 Scene 无障碍服务"
-    am force-stop "$SCENE_PKG" 2>/dev/null
-    for p in $(pidof scene-daemon 2>/dev/null); do kill -9 "$p" 2>/dev/null; done
-    sleep 2
-    settings put secure enabled_accessibility_services "$ACC_BASE"
-    sleep 2
-    am start -n "${SCENE_PKG}/.activities.ActivityMain" >/dev/null 2>&1
-    sleep 8
-    settings put secure enabled_accessibility_services "${ACC_BASE}:${SCENE_ACC}"
-    settings put secure accessibility_enabled 1
-    sleep 6
-    local ok=0
-    pgrep -f scene-daemon >/dev/null 2>&1 && ok=1
-    case "$(settings get secure enabled_accessibility_services 2>/dev/null)" in
-      *omarea.vtools*) ok=$((ok+1)) ;;
-    esac
-    if [ "$ok" -ge 2 ]; then echo "OK 已重绑无障碍并重启 daemon"; else echo "WARN 重绑完成但状态不完整，可再执行一次"; fi
+    # v18：不再与 Scene 无障碍服务交互。改为「立即应用模块配置」：
+    #   · 按当前全局模式下发 PM QoS 频率；
+    #   · 重建线程分配并让艇长引擎重载。
+    log "webui: 应用模块配置（频率 + 线程）"
+    local m; m=$(active_mode)
+    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$m" >/dev/null 2>&1
+    gen_threads >/dev/null 2>&1
+    [ -f "$STATE_DIR/aether.on" ] && [ -x "$AETHER_CTL" ] && sh "$AETHER_CTL" restart >/dev/null 2>&1
+    echo "OK 已应用模块配置（频率[${m}] + 线程已重建）"
 }
 
 cmd_mode() {
@@ -211,7 +173,8 @@ cmd_mode() {
         cn=$(mode_name_cn "$m"); af=$(mode_freq "$m" active); inf=$(mode_freq "$m" inactive)
         echo "MODE_${m}=${cn}|${af}|${inf}"
     done
-    local pc; pc=$(preset_check); [ -z "$pc" ] && echo "PRESET_OK=1" || { echo "PRESET_OK=0"; echo "PRESET_BAD=${pc}"; }
+    # v18：频率由模块 QoS 接管，无 Scene profile.json 预设校验；频率表恒为模块自带
+    echo "PRESET_OK=1"
 }
 cmd_modeset() {
     local m; m=$(mode_from_cn "$1")
@@ -221,7 +184,61 @@ cmd_modeset() {
     echo "OK $(mode_name_cn "$m")"
 }
 
-cmd_profilepush() { shift; sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" push "$1"; }
+# ---------- 频率档位：查看（含可用档位 + 当前 QoS）----------
+cmd_freqview() {
+    local m f
+    for m in $MODE_LIST; do
+        f=$(mode_freq "$m" active)
+        echo "TIER_${m}=${f}"
+    done
+    echo "HWMAX_L=$(hwmax 0)"; echo "HWMAX_M=$(hwmax 4)"; echo "HWMAX_P=$(hwmax 8)"
+    echo "STOCKMIN_L=$(stock_min_of 0)"; echo "STOCKMIN_M=$(stock_min_of 4)"; echo "STOCKMIN_P=$(stock_min_of 8)"
+    echo "STEPS_L=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)"
+    echo "STEPS_M=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)"
+    echo "STEPS_P=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null)"
+    echo "QMAX_L=$(qmax 0)"; echo "QMAX_M=$(qmax 4)"; echo "QMAX_P=$(qmax 8)"
+    echo "QMIN_L=$(qmin 0)"; echo "QMIN_M=$(qmin 4)"; echo "QMIN_P=$(qmin 8)"
+}
+
+# ---------- 频率档位：编辑并应用 ----------
+#   入参两种：① 标准输入：每行 mode<TAB>Lmin Lmax Mmin Mmax Pmin Pmax
+#            ② 单个位置参数：base64(同上内容) —— 适配 KSU 桥（无 stdin）
+cmd_freqedit() {
+    local src="$1" tmp="${TMPD}/freq_tiers.tsv" bad=0
+    if [ -n "$src" ]; then
+        has base64 || { echo "ERR 缺少 base64"; return 1; }
+        base64 -d <<EOF 2>/dev/null | cat - > "$tmp"
+$src
+EOF
+    else
+        : > "$tmp"
+        while IFS= read -r line || [ -n "$line" ]; do
+            [ -z "$line" ] && continue
+            printf '%s\n' "$line" >> "$tmp"
+        done
+    fi
+    [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 没有有效的档位输入"; return 1; }
+    # 校验并落地
+    local out="${TMPD}/freq_tiers.valid" m vals n
+    : > "$out"
+    while IFS= read -r line || [ -n "$line" ]; do
+        [ -z "$line" ] && continue
+        m=$(printf '%s' "$line" | cut -f1); vals=$(printf '%s' "$line" | cut -f2-)
+        mode_valid "$m" || { bad=$((bad+1)); continue; }
+        n=$(echo "$vals" | wc -w | tr -d ' ')
+        [ "$n" -eq 6 ] || { bad=$((bad+1)); continue; }
+        printf '%s\t%s\n' "$m" "$vals" >> "$out"
+    done < "$tmp"
+    rm -f "$tmp"
+    [ -s "$out" ] || { rm -f "$out"; echo "ERR 没有有效的档位输入"; return 1; }
+    mkdir -p "$WEBUI_DIR"
+    cp -f "$out" "$FREQ_TIERS_FILE" 2>/dev/null; chmod 0666 "$FREQ_TIERS_FILE" 2>/dev/null; rm -f "$out"
+    # 重新下发当前全局模式（应用自定义档位）
+    local cm; cm=$(active_mode)
+    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$cm" >/dev/null 2>&1
+    echo "OK 频率档位已保存并应用（忽略 ${bad} 条非法）；当前模式 ${cm}"
+}
+
 cmd_profilebackup() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" backup; }
 cmd_profilerestore() { shift; sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" restore "$1"; }
 cmd_profilelist() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" list; }
@@ -234,59 +251,41 @@ cmd_freqs() {
 }
 
 cmd_appmodes() {
-    echo "SCENE_DEFAULT=$(scene_default_mode)"
+    echo "DEFAULT=$(active_mode)"
     local pm="${TMPD}/pkgmode.txt"; scene_pkg_modes > "$pm"
     local md n
     for md in $MODE_LIST; do n=$(awk -F'\t' -v m="$md" '$2==m' "$pm" 2>/dev/null | wc -l | tr -d ' '); echo "COUNT_${md}=${n:-0}"; done
     echo "TOTAL=$(wc -l < "$pm" 2>/dev/null | tr -d ' ')"
-    awk -F'\t' 'NF==2 { print "A_"$1"="$2 }' "$pm"
-    scene_mode_map 2>/dev/null | awk -F'\t' '$1!="*" && $1!="" { print "OWN_"$1"="$2 }'
+    awk -F'\t' 'NF==2 && $2!="" { print "A_"$1"="$2 }' "$pm"
 }
 cmd_setappmode() {
-    local pkg="$1" mode="$2" uid tmp bak
+    # v18：写入模块自有的 app_assign.tsv（pkg<TAB>mode），Scene 不再参与
+    local pkg="$1" mode="$2"
     [ -z "$pkg" ] || [ -z "$mode" ] && { echo "ERR 用法: setappmode <包名> <powersave|balance|performance|fast>"; return 1; }
     mode_valid "$mode" || { echo "ERR 非法模式: $mode"; return 1; }
     case "$pkg" in *'/'*|*'"'*|*'<'*|*'>'*) echo "ERR 包名含非法字符"; return 1 ;; esac
-    [ -f "$SCENE_POWERCFG" ] || { echo "ERR 找不到 powercfg.xml"; return 1; }
-    tmp="${TMPD}/pc.xml.new"; bak="${TMPD}/pc.xml.bak"; mkdir -p "$TMPD" 2>/dev/null
-    cp -af "$SCENE_POWERCFG" "$bak" 2>/dev/null
-    if grep -q "<string name=\"${pkg}\">" "$SCENE_POWERCFG" 2>/dev/null; then
-        sed "s|<string name=\"${pkg}\">[^<]*</string>|<string name=\"${pkg}\">${mode}</string>|" "$SCENE_POWERCFG" > "$tmp" 2>/dev/null
+    local f="${WEBUI_DIR}/app_assign.tsv"; mkdir -p "$WEBUI_DIR" 2>/dev/null
+    local tmp="${TMPD}/app_assign.new"
+    # 若该行已存在则替换，否则追加
+    if [ -f "$f" ] && grep -q "^${pkg}	" "$f" 2>/dev/null; then
+        awk -F'\t' -v P="$pkg" -v M="$mode" 'BEGIN{OFS="\t"} $1==P{$2=M} {print}' "$f" > "$tmp" 2>/dev/null
     else
-        sed "s|</map>|    <string name=\"${pkg}\">${mode}</string>\n</map>|" "$SCENE_POWERCFG" > "$tmp" 2>/dev/null
+        [ -f "$f" ] && cp -f "$f" "$tmp" 2>/dev/null
+        printf '%s\t%s\n' "$pkg" "$mode" >> "$tmp" 2>/dev/null
     fi
-    [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 生成新 powercfg.xml 失败"; return 1; }
-    uid=$(get_package_uid "$SCENE_PKG"); [ -n "$uid" ] || uid=10321
-    write_replace "$tmp" "$SCENE_POWERCFG" || { rm -f "$tmp"; echo "ERR 写入 powercfg.xml 失败"; return 1; }
-    rm -f "$tmp" 2>/dev/null; chown "${uid}:${uid}" "$SCENE_POWERCFG" 2>/dev/null; chmod 0660 "$SCENE_POWERCFG" 2>/dev/null
-    if ! grep -q "<string name=\"${pkg}\">${mode}</string>" "$SCENE_POWERCFG" 2>/dev/null; then
-        [ -f "$bak" ] && write_replace "$bak" "$SCENE_POWERCFG" >/dev/null 2>&1
-        rm -f "$bak" 2>/dev/null; echo "ERR 写入后校验失败（已回滚）"; return 1
-    fi
-    rm -f "$bak" 2>/dev/null
-    echo "OK 已把 ${pkg} 设为 Scene「${mode}」"
+    [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 生成 app_assign.tsv 失败"; return 1; }
+    cp -f "$tmp" "$f" 2>/dev/null; chmod 0666 "$f" 2>/dev/null; rm -f "$tmp"
+    gen_threads >/dev/null 2>&1
+    echo "OK 已把 ${pkg} 设为模块模式「${mode}」"
 }
 
 cmd_fasxres() {
-    local f="${SCENE_DIR}/features/fas.conf"
-    [ -f "$f" ] || { echo "ERR 找不到 features/fas.conf"; return 1; }
-    local tmp="${TMPD}/fas.conf.new"
-    awk -F= -v OFS='=' '
-        /^governor_little=/ { $2="xres"; a=1 } /^governor_middle=/ { $2="xres"; b=1 } /^governor_prime=/ { $2="xres"; c=1 }
-        { print }
-        END { if(!a) print "governor_little=xres"; if(!b) print "governor_middle=xres"; if(!c) print "governor_prime=xres" }
-    ' "$f" > "$tmp" 2>/dev/null || { echo "ERR 生成新 fas.conf 失败"; return 1; }
-    local n_old n_new; n_old=$(grep -c . "$f" 2>/dev/null); n_new=$(grep -c . "$tmp" 2>/dev/null)
-    if [ "${n_new:-0}" -lt "${n_old:-0}" ] || [ "$(grep -c '^governor_' "$tmp" 2>/dev/null)" -lt 3 ]; then
-        rm -f "$tmp"; echo "ERR 新内容自检未过，已放弃写入"; return 1
-    fi
-    write_replace "$tmp" "$f" || { rm -f "$tmp"; echo "ERR 写回 fas.conf 失败"; return 1; }
-    perm_file "$f"; rm -f "$tmp"; restart_scene_daemon >/dev/null 2>&1
-    echo "OK FAS 调速器已设为 xres · scene-daemon 已重启"
+    echo "ERR v18 起调速器不再写入 Scene features/fas.conf；O3 的 FAS 由内核 schedutil/xres 直接管理，无需模块干预"
+    return 1
 }
 
 cmd_log(){ tail -n "${1:-40}" "$LOG_FILE" 2>/dev/null; }
-cmd_daemonlog(){ local n="${1:-30}"; echo "--- daemon.log ---"; tail -n "$n" "${SCENE_DIR}/daemon.log" 2>/dev/null; echo "--- daemon.stderr.log ---"; tail -n "$n" "${SCENE_DIR}/daemon.stderr.log" 2>/dev/null; }
+cmd_daemonlog(){ local n="${1:-30}"; echo "--- guard.log（模块守护）---"; tail -n "$n" "$LOG_FILE" 2>/dev/null; }
 
 cmd_launchables() {
     cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER 2>/dev/null \
@@ -306,9 +305,9 @@ cmd_ksufix() {
 }
 
 cmd_live() {
-    local f; f=$(ensure_required_flags)
-    local pid; pid=$(restart_scene_daemon) || return 1
-    echo "OK 频率配置已下发（核心分配 PID ${pid}）"
+    local m; m=$(active_mode)
+    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$m" >/dev/null 2>&1
+    echo "OK 频率配置已下发（模式 ${m}）"
 }
 
 # ============================================================
@@ -362,6 +361,18 @@ cmd_aetherdel() {
     [ -n "$2" ] || { echo "ERR 用法: aetherdel <包名>"; return 1; }
     sh "$AETHER_CTL" del "$2" 2>&1
 }
+cmd_aethersetbatch() {
+    # 入参两种：① 标准输入 pkg<TAB>cluster（多行）；② 单个位置参数 base64(同上)
+    # cluster=auto 表示移除该包自定义
+    if [ -n "$1" ]; then
+        has base64 || { echo "ERR 缺少 base64"; return 1; }
+        local d="${TMPD}/aetherbatch.b64"
+        printf '%s' "$1" > "$d"
+        if base64 -d "$d" 2>/dev/null | sh "$AETHER_CTL" setbatch 2>&1; then :; fi
+    else
+        sh "$AETHER_CTL" setbatch 2>&1
+    fi
+}
 
 # ============================================================
 case "$1" in
@@ -377,13 +388,14 @@ case "$1" in
   schemes)       cmd_schemes ;;
   scheme)        cmd_scheme "$2" ;;
   restore)       cmd_restore ;;
-  profilepush)   cmd_profilepush "$@" ;;
   profilebackup) cmd_profilebackup ;;
   profilerestore) cmd_profilerestore "$@" ;;
   profilelist)   cmd_profilelist ;;
   mode)          cmd_mode ;;
   modeset)       cmd_modeset "$2" ;;
   freqs)         cmd_freqs ;;
+  freqview)      cmd_freqview ;;
+  freqedit)      cmd_freqedit ;;
   appmodes)      cmd_appmodes ;;
   setappmode)    shift; cmd_setappmode "$1" "$2" ;;
   fasxres)       cmd_fasxres ;;
@@ -402,5 +414,6 @@ case "$1" in
   aetherapps)    cmd_aetherapps ;;
   aetherset)     cmd_aetherset "$1" "$2" "$3" ;;
   aetherdel)     cmd_aetherdel "$1" "$2" ;;
+  aethersetbatch) cmd_aethersetbatch "$2" ;;
   *) echo "err: unknown command '$1'"; exit 1 ;;
 esac

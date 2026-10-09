@@ -1,13 +1,12 @@
 #!/system/bin/sh
 # ============================================================
-#  开机自启（玄戒O3 · Abel 调度工具箱 · 两模块版）
-#   两块职责：
-#     ① CPU 频率 —— 交给 Scene。模块只保证 Scene 能读到配置
-#        （目录可进入、配置可写），并执行方案包内的 powercfg.sh
-#        （平台 sysfs 调优：core_ctl / sched_boost 等）。
-#     ② 线程核心分配 —— 完全交给艇长的 aether-optext。
-#        本脚本仅按 aether.on 拉起 / 停掉它，不做任何原生落核。
-#   分工清晰：频率 = Scene 下发，线程 = 艇长引擎。
+#  开机自启（玄戒O3 · Abel 调度工具箱 · v18 模块自有版）
+#   三块职责（v18 起全部由本模块自持，不再依赖 Scene）：
+#     ① CPU 频率 —— 模块 PM QoS 接管：service 启动时按全局模式下发频率；
+#        守护每轮兜底 + 前台应用按 app 模式覆盖。
+#     ② 平台调优 —— 执行方案包内 powercfg.sh（core_ctl / sched_boost 等 sysfs）。
+#     ③ 线程核心分配 —— 艇长 aether-optext 引擎（默认开启）。
+#   分工清晰：频率 = 模块 QoS，线程 = 艇长引擎，调度器 = powercfg。
 # ============================================================
 MODDIR="${0%/*}"
 export MODDIR
@@ -17,33 +16,24 @@ export MODDIR
 until [ -d "/data/data" ] || [ -d "/data/user/0" ]; do sleep 5; done
 mkdir -p "$STATE_DIR" "$TMPD" 2>/dev/null
 
-# 等 Scene 装好
-n=0
-while [ $n -lt 24 ]; do
-    [ -n "$(get_package_uid "$SCENE_PKG")" ] && break
-    sleep 5; n=$((n+1))
-done
-
-log "⚡ 玄戒O3 调度工具箱 service 启动"
-
-# 0) 目录可进入 + 清除历史残留的 chattr 锁
-#    频率交给 Scene，必须保证它的数据目录可进入、配置可写，
-#    否则 Scene 卡在 splash、小齿轮改不动。
-ensure_scene_dir_perm
-r=$(repair_scene_writable)
-log "· 配置可写性: $r"
+log "⚡ 玄戒O3 调度工具箱 service 启动（v18 模块自有）"
 
 SCHEME=$(active_scheme)
 [ -z "$SCHEME" ] && SCHEME="sweet_bal"
 
-# 1) 平台调优脚本（sysfs 节点，与方案包内 powercfg.sh 同源）
+# 1) 频率接管：按当前全局模式下发 PM QoS（O3 上唯一被强制执行的频率旋钮）
+current_mode_read 2>/dev/null
+sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "${CUR_MODE:-balance}" >> "$LOG_FILE" 2>&1
+log "· 频率已按模式[${CUR_MODE:-balance}]下发（QoS）"
+
+# 2) 平台调优脚本（sysfs 节点，与方案包内 powercfg.sh 同源）
 PC="${MODDIR}/Config/4+4+2/O3/${SCHEME}/powercfg.sh"
 if [ -f "$PC" ]; then
     sh "$PC" >> "$LOG_FILE" 2>&1
     log "· powercfg.sh 已执行（方案 $SCHEME）"
 fi
 
-# 2) 线程核心分配 —— 艇长引擎（默认开启）
+# 3) 线程核心分配 —— 艇长引擎（默认开启）
 #    aether_ctl.sh 内部自行判 aether.on / 二进制是否存在：
 #      · 未启用 → 跳过；
 #      · 二进制缺失 / 内核不支持 eBPF → aether-optext 自身静默退出，不影响其余功能。
@@ -57,17 +47,14 @@ else
     log "· 未找到 aether_ctl.sh，跳过线程引擎"
 fi
 
-# 2.5) 调度守护 guard.sh —— 长期维持 Scene 启用开关（见 guard.sh 主循环 ①）
-#      do_push 负责「首次启用」；guard 负责 Scene 任意一次（重新）启动后 ≤5s 自愈
-#      （Scene 每次启动都会把 global.xml 的启用标志冲掉，见 profile_sync.sh 注释）。
-#      用 nohup 后台拉起，service.sh 退出后仍存活（与 aether_ctl 引擎后台化同路）。
+# 4) 调度守护 guard.sh —— 每轮兜底频率 + 线程分配 + 大核限制
 GUARD_SH="$MODDIR/Scripts/4+4+2/O3/guard.sh"
 if [ -f "$GUARD_SH" ]; then
     nohup sh "$GUARD_SH" </dev/null >> "$LOG_FILE" 2>&1 &
     log "· 调度守护已拉起（guard.sh pid $!）"
 fi
 
-# 3) 模块卡片描述 = 当前功能启用状态
+# 5) 模块卡片描述 = 当前功能启用状态
 update_module_desc >/dev/null 2>&1
 
 exit 0

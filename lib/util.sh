@@ -83,13 +83,13 @@ update_module_desc() {
     [ -f "$prop" ] || return 0
     settings_load
 
-    local scene guard logv desc old tmp
-    if [ "$(scene_source_get)" = "$SCENE_SOURCE_WANT" ]; then scene="已启用"; else scene="未启用"; fi
+    local guard logv desc old tmp mode
+    mode=$(current_mode_read 2>/dev/null; echo "${CUR_MODE:-balance}")
     [ "${SET_DEBUG:-1}" = "1" ] && logv="开" || logv="关"
     if pgrep -f "O3/guard\.sh" >/dev/null 2>&1; then guard="运行中"; else guard="停止"; fi
 
-    # v10 分工：线程 = 本模块逐线程落核（档位自持）；频率 = Scene 下发（模块提供图形化调整）
-    desc="功能状态｜Scene ${scene} · 线程 cgroup落核 · 频率 Scene 下发 · 守护 ${guard} · 日志 ${logv}"
+    # v18 分工：频率 = 模块 PM QoS 接管；线程 = 艇长 Aether 引擎；调度器 = 模块 powercfg
+    desc="功能状态｜频率 模块QoS(${mode}) · 线程 Aether · 调度器 powercfg · 守护 ${guard} · 日志 ${logv}"
 
     old=$(sed -n 's/^description=//p' "$prop" 2>/dev/null | head -1)
     [ "$old" = "$desc" ] && return 0
@@ -685,18 +685,40 @@ verify_synced() {   # $1=方案源目录
 # ============================================================
 #  限频核心 —— PM QoS（O3 上唯一被强制执行的频率旋钮）
 # ============================================================
+# 把目标频率「自我调整」到本簇支持的合法档位（参考若晴 elite-freq 的 clamp_freq）：
+#   读 scaling_available_frequencies，取 ≤ target 的最大一档；找不到可用表时退回
+#   cpuinfo 上下界夹紧。这样写下去的永远是真实 OPP，不会被内核悄悄拒绝/取整。
+clamp_freq() {  # $1=cpu $2=target -> 最接近且 ≤ target 的可用频率
+    local c="$1" t="$2" avail f best="" hi lo
+    avail="$(cat /sys/devices/system/cpu/cpu$c/cpufreq/scaling_available_frequencies 2>/dev/null)"
+    if [ -z "$avail" ]; then
+        hi="$(cat /sys/devices/system/cpu/cpu$c/cpufreq/cpuinfo_max_freq 2>/dev/null)"
+        lo="$(cat /sys/devices/system/cpu/cpu$c/cpufreq/cpuinfo_min_freq 2>/dev/null)"
+        [ -n "$hi" ] && [ "$t" -gt "$hi" ] && { echo "$hi"; return; }
+        [ -n "$lo" ] && [ "$t" -lt "$lo" ] && { echo "$lo"; return; }
+        echo "$t"; return
+    fi
+    for f in $avail; do
+        if [ "$f" -le "$t" ]; then
+            if [ -z "$best" ] || [ "$f" -gt "$best" ]; then best="$f"; fi
+        fi
+    done
+    [ -z "$best" ] && best="$(echo "$avail" | tr ' ' '\n' | sort -n | head -n1)"
+    echo "$best"
+}
+
 # 写单个 CPU 的 QoS 上限；返回 0=成功
 qos_set_max() {   # $1=cpu $2=freq
     local f="/sys/devices/system/cpu/cpu$1/qos/max_freq"
     [ -e "$f" ] || return 1
-    echo "$2" > "$f" 2>/dev/null || return 1
+    echo "$(clamp_freq "$1" "$2")" > "$f" 2>/dev/null || return 1
     return 0
 }
 
 qos_set_min() {   # $1=cpu $2=freq
     local f="/sys/devices/system/cpu/cpu$1/qos/min_freq"
     [ -e "$f" ] || return 1
-    echo "$2" > "$f" 2>/dev/null || return 1
+    echo "$(clamp_freq "$1" "$2")" > "$f" 2>/dev/null || return 1
     return 0
 }
 
@@ -725,6 +747,10 @@ cluster_stockmax() {
 #  inactive 各自更低一档（后台不抢性能）。
 # ============================================================
 MODE_LIST="powersave balance performance fast"
+
+# 用户自定义频率档位表（模块自有，覆盖内置 mode_freq 默认值）
+# 每行: 模式<TAB>Lmin Lmax Mmin Mmax Pmin Pmax （active 档，前台频率）
+FREQ_TIERS_FILE="${WEBUI_DIR}/freq_tiers.tsv"
 
 mode_name_cn() {
     case "$1" in
@@ -935,18 +961,23 @@ mode_sched_read() {   # $1 = powersave|balance|performance|fast
 }
 
 # 频率表：输出 "Lmin Lmax Mmin Mmax Pmin Pmax"。$2=active|inactive
+#   $2 仅区分 active/inactive；自定义表 (freq_tiers.tsv) 只存 active 档，
+#   所以两者都读同一份自定义值（inactive 时内核会自行降频，不影响前台设定）。
 mode_freq() {
-    case "$1:$2" in
-      powersave:active)     echo "417792 1353600 556800 1468800 1113600 2044800" ;;
-      powersave:inactive)   echo "417792 1065600 556800 1142400 1113600 2044800" ;;
-      # ⚠ 与 sweet_bal/profile.json 的 @cpu_freq 保持一致（cpu4 = Premium 天花板）
-      balance:active)       echo "417792 1939200 556800 2419200 1113600 2371200" ;;
-      balance:inactive)     echo "417792 1785600 556800 2131200 1113600 2198400" ;;
-      performance:active)   echo "672000 2246400 835200 3148800 1497600 2860800" ;;
-      performance:inactive) echo "672000 2092800 835200 2668800 1497600 2707200" ;;
-      fast:active)          echo "912000 3148800 1142400 3686400 2044800 4358400" ;;
-      fast:inactive)        echo "912000 2860800 1142400 3148800 2044800 3648000" ;;
-      *)                    echo "" ;;
+    local md="$1"
+    if [ -s "$FREQ_TIERS_FILE" ]; then
+        local row; row=$(awk -F'\t' -v m="$md" '$1==m{print $2; exit}' "$FREQ_TIERS_FILE" 2>/dev/null)
+        if [ -n "$row" ]; then
+            local n; n=$(echo "$row" | wc -w | tr -d ' ')
+            [ "$n" -ge 6 ] && { echo "$row"; return; }
+        fi
+    fi
+    case "$md" in
+      powersave)     echo "417792 1353600 556800 1468800 1113600 2044800" ;;
+      balance)       echo "417792 1939200 556800 2419200 1113600 2371200" ;;
+      performance)   echo "672000 2246400 835200 3148800 1497600 2860800" ;;
+      fast)          echo "912000 3148800 1142400 3686400 2044800 4358400" ;;
+      *)             echo "" ;;
     esac
 }
 
@@ -1181,6 +1212,70 @@ restore_stock_freq() {
     qos_set_min 4 556800; qos_set_min 5 556800; qos_set_min 6 556800; qos_set_min 7 556800
     qos_set_min 8 1113600; qos_set_min 9 1113600
     log_quiet "restored stock qos"
+}
+
+# ============================================================
+#  ★ 模块自有：全局模式 / 应用→模式 / 频率下发（v18 起不再依赖 Scene）
+# ------------------------------------------------------------
+#  v18 把频率/调度器/线程全部收归本模块，Scene 仅作为「可选的前端」存在（不再强依赖）。
+#  下面三个函数是新的「真源」：全局模式 = active_mode 文件；应用→模式 = 模块自带
+#  app_assign.tsv / game_assign.tsv；频率下发 = PM QoS（O3 上唯一被强制执行的旋钮）。
+# ============================================================
+ACTIVE_MODE_FILE="${ACTIVE_MODE_FILE:-${STATE_DIR}/active_mode}"
+AETHER_THREADS="${AETHER_THREADS:-/sdcard/Android/Aether/threads.json}"
+
+# 读模块自有「当前全局模式」：优先 active_mode 文件，回退方案名映射
+current_mode_read() {
+    CUR_MODE=""
+    if [ -f "$ACTIVE_MODE_FILE" ]; then
+        CUR_MODE=$(cat "$ACTIVE_MODE_FILE" 2>/dev/null | tr -d '\r' | head -1)
+        case "$CUR_MODE" in
+          powersave|balance|performance|fast) ;;
+          *) CUR_MODE="" ;;
+        esac
+    fi
+    if [ -z "$CUR_MODE" ]; then
+        case "$(active_scheme 2>/dev/null)" in
+          sweet_eco)  CUR_MODE="powersave" ;;
+          sweet_bal)  CUR_MODE="balance" ;;
+          sweet_hq)   CUR_MODE="performance" ;;
+          sweet_perf) CUR_MODE="fast" ;;
+          *)          CUR_MODE="balance" ;;
+        esac
+    fi
+    export CUR_MODE
+}
+# 兼容旧调用名（enforce_threads.sh / guard.sh 历史调用）
+scene_current_mode_read() { current_mode_read; }
+
+# 应用→模式：读模块自带 assign TSV（game_assign 优先，app_assign 兜底）
+pkg_mode_of() {
+    local p="$1" m=""
+    [ -z "$p" ] && { echo ""; return; }
+    [ -s "$GAME_ASSIGN_FILE" ] && m=$(awk -F'\t' -v P="$p" '$1==P{print $2; exit}' "$GAME_ASSIGN_FILE" 2>/dev/null)
+    [ -z "$m" ] && [ -s "$APP_ASSIGN_FILE" ] && m=$(awk -F'\t' -v P="$p" '$1==P{print $2; exit}' "$APP_ASSIGN_FILE" 2>/dev/null)
+    echo "$m"
+}
+
+# 把某模式的频率下发到 PM QoS（active 档：前台频率）
+apply_mode_freq() {
+    local md="$1"
+    case "$md" in powersave|balance|performance|fast) ;; *) echo "ERR 未知模式: $md"; return 1 ;; esac
+    set -- $(mode_freq "$md" active)
+    [ $# -lt 6 ] && { echo "ERR 无频率表: $md"; return 1; }
+    # mode_freq 输出顺序: Lmin Lmax Mmin Mmax Pmin Pmax
+    # apply_qos_triplet 入参: lmax mmax pmax lmin mmin pmin
+    apply_qos_triplet "$2" "$4" "$6" "$1" "$3" "$5"
+    echo "OK 频率已按模式[$md]下发 (L $1-$2 M $3-$4 P $5-$6)"
+}
+
+# 切换全局模式：写 active_mode 文件 + 立即下发频率
+set_global_mode() {
+    local md="$1"
+    case "$md" in powersave|balance|performance|fast) ;; *) echo "ERR 未知模式: $md"; return 1 ;; esac
+    echo "$md" > "$ACTIVE_MODE_FILE" 2>/dev/null
+    apply_mode_freq "$md"
+    echo "OK 全局模式 → $md ($(mode_name_cn "$md"))"
 }
 
 
@@ -1809,25 +1904,25 @@ installed_pkgs() {   # 与 WebUI 的过滤口径一致
       | grep -v -E 'overlay|\.rro|auto_generated|shared_library'
 }
 
-scene_games() {   # 被 Scene 标记为游戏的包名
-    [ -f "$SCENE_GAMES_XML" ] || return 0
-    sed -n 's/.*<boolean name="\([^"]*\)" value="true".*/\1/p' "$SCENE_GAMES_XML" \
-      | grep -v '^$' | sort -u
+scene_games() {   # 模块自带游戏名单（game_assign.tsv 的包名）
+    [ -s "$GAME_ASSIGN_FILE" ] || return 0
+    awk -F'\t' 'NF>=1 && $1!="" && $1!~/^#/{print $1}' "$GAME_ASSIGN_FILE" 2>/dev/null | sort -u
 }
 
-# 每个已安装应用 → 它该用的模式。
-#   · xml 里显式指定且在 4 档内 → 用它的
-#   · 指定为 igoned/none → 跳过（不给规则 = 不接管）
-#   · 其它/未列出 → 用全局默认（"*"）
+# 每个应用 → 它该用的模式（v18 起读模块自带 assign TSV，不再依赖 Scene）
+#   · game_assign.tsv / app_assign.tsv 显式指定且在 4 档内 → 用它的
+#   · 未列出 → 用全局默认（active_mode）
 scene_pkg_modes() {
     local def map inst
-    def=$(scene_default_mode)
+    def=$(current_mode_read; echo "$CUR_MODE")
     map="${TMPD}/appmode.txt"; inst="${TMPD}/inst.txt"
     mkdir -p "$TMPD" 2>/dev/null
-    scene_mode_map > "$map" 2>/dev/null || : > "$map"
+    : > "$map"
+    [ -s "$GAME_ASSIGN_FILE" ] && awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/{print $1"\t"$2}' "$GAME_ASSIGN_FILE" >> "$map" 2>/dev/null
+    [ -s "$APP_ASSIGN_FILE" ]  && awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/{print $1"\t"$2}' "$APP_ASSIGN_FILE"  >> "$map" 2>/dev/null
     installed_pkgs > "$inst"
     awk -F'\t' -v def="$def" '
-        NR==FNR { if ($1!="" && $1!="*") m[$1]=$2; next }
+        NR==FNR { if ($1!="") m[$1]=$2; next }
         {
             p=$1; v=m[p]
             if (v=="") v=def
@@ -1852,7 +1947,9 @@ scene_pkg_modes() {
 #  ⚠ 防误覆盖：当「没有任何模板分配」时**不动** threads.json，
 #    保留 Scene 自带的默认线程规则（否则会把整机关成无规则、全走默认核）。
 # ============================================================
-gen_threads_from_scene() {
+#  线程分配「落地」—— 由模块自带模板 + 分配表现场生成 threads.json，
+#  写到 Aether 引擎的配置路径（艇长引擎直接读它）。v18 起不再写 Scene 目录。
+gen_threads() {
     local out gp gf gfcount ag gg
     out="${TMPD}/threads.new"; gp="${TMPD}/gamepkgs.txt"
     mkdir -p "$TMPD" 2>/dev/null
@@ -1868,11 +1965,11 @@ gen_threads_from_scene() {
     gg=$(grep -c '"friendly"' "${TMPD}/games.gen" 2>/dev/null)
     ag=${ag:-0}; gg=${gg:-0}
 
-    # 没有任何分配 → 不覆盖 Scene 默认规则
+    # 没有任何分配 → 不覆盖已有规则
     if [ "$ag" = 0 ] && [ "$gg" = 0 ]; then
         if [ ! -s "$APP_ASSIGN_FILE" ] && [ ! -s "$GAME_ASSIGN_FILE" ]; then
-            log_quiet "gen: 无模板分配，保留 Scene 默认线程规则（未覆盖）"
-            echo "OK 无模板分配，保留 Scene 默认线程规则"
+            log_quiet "gen: 无模板分配，保留现有线程规则"
+            echo "OK 无模板分配，保留现有线程规则"
             return 0
         fi
     fi
@@ -1899,9 +1996,9 @@ gen_threads_from_scene() {
     local bad; bad=$(validate threads "$out")
     [ -n "$bad" ] && { echo "ERR 生成结果自检未通过：$bad"; return 1; }
 
-    write_replace "$out" "${SCENE_DIR}/threads.json" || { echo "ERR 写入 Scene 失败"; return 1; }
-    perm_file "${SCENE_DIR}/threads.json"
-    ensure_scene_dir_perm >/dev/null 2>&1
+    mkdir -p "$(dirname "$AETHER_THREADS")" 2>/dev/null
+    write_replace "$out" "$AETHER_THREADS" || { echo "ERR 写入线程配置失败: $AETHER_THREADS"; return 1; }
+    chmod 0666 "$AETHER_THREADS" 2>/dev/null
     if [ -n "$MODCFG" ] && [ -d "$MODCFG" ]; then
         cp -f "$out" "${MODCFG}/threads.json" 2>/dev/null
         chmod 0644 "${MODCFG}/threads.json" 2>/dev/null
@@ -1924,6 +2021,8 @@ gen_threads_from_scene() {
         echo "OK 已重建线程分配（${gfcount} 条规则：应用 ${ag} / 游戏 ${gg}）"
     fi
 }
+# 兼容旧名（guard.sh / set_scheme.sh 历史调用）
+gen_threads_from_scene() { gen_threads "$@"; }
 
 # ---------- 状态 ----------
 active_scheme() { cat "$ACTIVE_FILE" 2>/dev/null; }

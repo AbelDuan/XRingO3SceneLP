@@ -176,26 +176,36 @@ gen_apprules() {
 }
 
 # ---------- apps：列出本机有界面的应用 + 系统/第三方 + 艇长/自定义/未分配 ----------
+#   ⚠ v18 优化：原版对每个包各跑一次 grep/awk（≈300+ 进程 → 卡顿）；
+#      现改为「一次性读入 OVR/APPRULES 到内存表 + 单趟扫描清单」的纯 awk，
+#      全程零 per-pkg fork，几百个应用也能秒出。
 cmd_apps() {
   local lp="${TMPD}/launch.txt" sp="${TMPD}/sys.txt"
   cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER 2>/dev/null \
     | sed -n 's#^[[:space:]]*\([^/][^/]*\)/.*#\1#p' | sort -u > "$lp"
   pm list packages -s 2>/dev/null | sed 's/^package://' | sort -u > "$sp"
-  local pkg sys defined custom cluster friendly ar ov
-  while IFS= read -r pkg; do
-    [ -z "$pkg" ] && continue
-    case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) continue ;; esac
-    sys=0; grep -qx "$pkg" "$sp" 2>/dev/null && sys=1
-    defined=0; custom=0; cluster=""; friendly=""
-    # 自定义覆盖优先
-    ov=$(awk -F'\t' -v p="$pkg" '$1==p{print $2; exit}' "$OVR" 2>/dev/null)
-    if [ -n "$ov" ]; then custom=1; defined=1; cluster="$ov"; friendly="自定义"; fi
-    if [ "$defined" -eq 0 ] && [ -f "$APPRULES" ]; then
-      ar=$(awk -F'\t' -v p="$pkg" '$1==p{print $2 "|" $3; exit}' "$APPRULES" 2>/dev/null)
-      if [ -n "$ar" ]; then defined=1; cluster="${ar%%|*}"; friendly="${ar##*|*}"; fi
-    fi
-    echo "APP=${pkg}|${sys}|${defined}|${custom}|${cluster}|${friendly}"
-  done < "$lp"
+  # 四份输入各包一行哨兵（# 开头），保证空文件也能正确计数（mawk/toybox 没有 ARGIND）
+  local ovrf="${TMPD}/ovr.txt" aprf="${TMPD}/apr.txt" spf="${TMPD}/sp.txt" lpf="${TMPD}/lp.txt"
+  { echo '#'; [ -s "$OVR" ]      && cat "$OVR"; }      > "$ovrf" 2>/dev/null
+  { echo '#'; [ -s "$APPRULES" ] && cat "$APPRULES"; } > "$aprf" 2>/dev/null
+  { echo '#'; cat "$sp"; }                             > "$spf"  2>/dev/null
+  { echo '#'; cat "$lp"; }                             > "$lpf"  2>/dev/null
+  awk -F'\t' -v OFS='|' '
+    /^#/ { fc++; next }                                # 每个文件的哨兵：文件序号 +1
+    fc==1 { ovr[$1]=$2; next }                         # 文件1: OVR 自定义覆盖 pkg->cluster
+    fc==2 { if (!($1 in ovr)) apa[$1]=$2 SUBSEP $3; next }  # 文件2: APPRULES pkg->cluster\friendly
+    fc==3 { sys[$0]=1; next }                          # 文件3: 系统包清单
+    {                                                 # 文件4: launcher 清单（主输出）
+      p=$0
+      if (p=="") next
+      if (p ~ /[\/<>\" \x60]/) next
+      s=(p in sys)?"1":"0"
+      if (p in ovr)      { print "APP=" p, s, "1", "1", ovr[p], "自定义"; next }
+      if (p in apa)      { split(apa[p], a, SUBSEP); print "APP=" p, s, "1", "0", a[1], a[2]; next }
+      print "APP=" p, s, "0", "0", "", ""
+    }
+  ' "$ovrf" "$aprf" "$spf" "$lpf"
+  rm -f "$ovrf" "$aprf" "$spf" "$lpf" 2>/dev/null
 }
 
 # ---------- set：为未分配的应用自定义线程核位 ----------
@@ -224,6 +234,41 @@ cmd_del() {
   chmod 0666 "$OVR" 2>/dev/null
   cmd_deploy
   echo "OK 已移除 ${pkg} 的自定义分配（恢复由艇长自动分配）"
+}
+
+# ---------- setbatch：批量设置核位（仅一次 deploy）----------
+#   入参：多行 pkg<TAB>cluster；cluster=auto 表示移除该包自定义。
+#   用于 WebUI「勾选应用 → 套用模板」的批量通道，避免 N 次 cmd_deploy。
+cmd_setbatch() {
+  local tmp="${TMPD}/aether_batch.tsv" keep=0 drop=0 bad=0
+  : > "$tmp"
+  while IFS= read -r line || [ -n "$line" ]; do
+    [ -z "$line" ] && continue
+    pkg=$(printf '%s' "$line" | cut -f1)
+    cl=$(printf '%s' "$line" | cut -f2-)
+    [ -z "$pkg" ] && { bad=$((bad+1)); continue; }
+    case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) bad=$((bad+1)); continue ;; esac
+    case "$cl" in
+      0-3|4-7|8-9|0-7|4-9) keep=$((keep+1)) ;;
+      auto|"")               drop=$((drop+1)) ;;
+      *)                     bad=$((bad+1)); continue ;;
+    esac
+    printf '%s\t%s\n' "$pkg" "$cl" >> "$tmp"
+  done
+  [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 没有有效的包=核位 输入"; return 1; }
+  mkdir -p "$STATE_DIR"
+  # 用批处理表重建 OVR：旧 OVR 中未被本批「auto」命中的行先保留，再叠加 set 行
+  local merged="${TMPD}/aether_ovr_merged.tsv"
+  : > "$merged"
+  [ -f "$OVR" ] && cp -f "$OVR" "$merged" 2>/dev/null
+  # 移除本批涉及的所有包（无论 set 还是 auto），再追加 set 行
+  awk -F'\t' -v bf="$tmp" 'BEGIN{ while ((getline l < bf) > 0) { split(l,a,"\t"); if(a[1]!="") rem[a[1]]=1 } }
+    !($1 in rem) { print }' "$merged" > "${merged}.tmp" 2>/dev/null && mv -f "${merged}.tmp" "$merged" 2>/dev/null
+  awk -F'\t' '$2!="auto"' "$tmp" >> "$merged" 2>/dev/null
+  mv -f "$merged" "$OVR" 2>/dev/null
+  chmod 0666 "$OVR" 2>/dev/null; chown 0:0 "$OVR" 2>/dev/null
+  cmd_deploy
+  echo "OK 批量设置完成：应用 ${keep} 个模板、移除 ${drop} 个自定义、忽略 ${bad} 个非法"
 }
 
 # ---------- 启停 ----------
@@ -311,5 +356,6 @@ case "$1" in
   apps)     cmd_apps ;;
   set)      cmd_set "$2" "$3" ;;
   del)      cmd_del "$2" ;;
+  setbatch) cmd_setbatch ;;
   *) echo "err: unknown command '$1'"; exit 1 ;;
 esac

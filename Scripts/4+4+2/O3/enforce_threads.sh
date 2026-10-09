@@ -128,8 +128,7 @@ sig_inputs_newer() {   # 0 = 有输入比标记新（需要重算）
     # ⚠ v10：Scene 的 powercfg.xml / settings.conf 已**不再是输入**
     #   （档位改由 app_assign.tsv 自持，详见 util.sh 的 import_scene_apply）——
     #   继续拿它们当 mtime 判据只会让守护白重算一遍目标表。
-    for f in "$APP_TPL_FILE" "$APP_ASSIGN_FILE" "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE" \
-             "$SCENE_GAMES_XML"; do
+    for f in "$APP_TPL_FILE" "$APP_ASSIGN_FILE" "$GAME_TPL_FILE" "$GAME_ASSIGN_FILE"; do
         [ -f "$f" ] && [ "$f" -nt "$SIGF" ] && return 0
     done
     return 1
@@ -175,7 +174,7 @@ if [ ! -s "$TGT" ] || [ ! -s "$SIGF" ] || sig_inputs_newer; then
 awk \
     -v TAB="$(printf '\t')" \
     -v APPTPL="$APP_TPL_FILE" -v APPASG="$APP_ASSIGN_FILE" \
-    -v GTPL="$GAME_TPL_FILE" -v GASG="$GAME_ASSIGN_FILE" -v GAMEXML="$SCENE_GAMES_XML" \
+    -v GTPL="$GAME_TPL_FILE" -v GASG="$GAME_ASSIGN_FILE" -v GAMEXML="$GAME_ASSIGN_FILE" \
     -v ONL="$ONLINE" \
     -v CAMRE="$CAMERA_RE" \
     -v SE="$SEM_e" -v SP1="$SEM_p1" -v SP2="$SEM_p2" \
@@ -249,13 +248,10 @@ BEGIN {
     while ((getline l < GASG) > 0)   { if (l == "" || l ~ /^#/) continue; split(l, f, TAB); if (f[1] != "" && f[2] != "") ASGG[f[1]] = f[2] }
     close(GASG)
 
-    # Scene 真正标记为游戏的包（唯一权威来源 games.xml；不能只看 game_assign.tsv，
-    # 历史脏数据里可能塞了几百个普通应用）
+    # 模块游戏名单（game_assign.tsv 的包名，第一列；v18 起不再依赖 Scene games.xml）
     while ((getline l < GAMEXML) > 0) {
-        if (match(l, /<boolean name="[^"]*" value="true"/)) {
-            g = l; sub(/^.*<boolean name="/, "", g); sub(/".*/, "", g)
-            if (g != "") GSET[g] = 1
-        }
+        if (l == "" || l ~ /^#/) continue
+        split(l, f, TAB); if (f[1] != "") GSET[f[1]] = 1
     }
     close(GAMEXML)
 

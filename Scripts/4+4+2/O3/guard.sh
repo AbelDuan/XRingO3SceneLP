@@ -64,11 +64,11 @@ screen_on() {
 
 # 输入（模板 / 分配 / Scene 模式表 / 游戏名单 / 开关）里有没有比「上次重建标记」更新的
 #   —— 用内建 `-nt`，0 子进程；旧写法是 7 次 md5sum（约 70~150ms）
-SRC_MARK="${STATE_DIR}/scene.mark"
+SRC_MARK="${STATE_DIR}/src.mark"
 src_changed() {
     [ -f "$SRC_MARK" ] || return 0
     local f
-    for f in "$SCENE_POWERCFG" "$SCENE_GAMES_XML" "$GAME_ASSIGN_FILE" "$GAME_TPL_FILE" \
+    for f in "$GAME_ASSIGN_FILE" "$GAME_TPL_FILE" \
              "$APP_ASSIGN_FILE" "$APP_TPL_FILE" "${WEBUI_DIR}/settings.conf"; do
         [ -f "$f" ] && [ "$f" -nt "$SRC_MARK" ] && return 0
     done
@@ -141,30 +141,13 @@ while :; do
     # 每轮重读开关（内建 read，不起子进程）：日志开关/频率开关改了立刻生效
     settings_load
 
-    # ---- Scene 启用开关看护（与 profile_sync.sh do_push ② 配合）----
-    #  ⚠ Scene 每次（重新）启动都会把 global.xml 的 scene_profile_source /
-    #    dynamic_control 冲掉（回到「未启用」），正是「性能调节打不开」的根因。
-    #    do_push 负责首次启用；这里负责长期维持：只要 Scene 活着且开关不对就重写，
-    #    Scene 任意一次重启后 ≤5s 自愈（仅做轻量 sed，不起额外进程）。
-    if pidof "$SCENE_PKG" >/dev/null 2>&1; then
-        if [ "$(scene_source_get)" != "$SCENE_SOURCE_WANT" ] || [ "$(scene_dyn_get)" != "true" ]; then
-            scene_source_set "$SCENE_SOURCE_WANT" >/dev/null 2>&1
-            scene_dyn_set true >/dev/null 2>&1
-        fi
-    fi
-
     # 每 24 轮（≈120s）刷新模块卡片描述（内容没变就不落盘）
     [ $(( ROUND % 24 )) -eq 1 ] && update_module_desc >/dev/null 2>&1
 
     # ---- 亮/息屏切换 ----
-    #   ⚠ CPU 调频已**交回 Scene 接管**（本模块不写任何频率节点）。
-    #   ⚠⚠ 这里曾经每次都跑 apply_freq.sh 清 v2 遗留的 QoS 值。实测它有个坑：
-    #      它把 QoS 上限清成 `cpuinfo_max_freq`，而 **cpuinfo_max_freq 会跟着
-    #      thermal 限频 + 光感变**（夜间相机 = 被砍到 1190400）。于是「亮屏/息屏」
-    #      这个和相机毫无关系的动作，会把相机正在用的频率区间直接掀掉 ——
-    #      这正是用户看到的「打开相机频率冲高后马上回落并严重限频」。
-    #      QoS 是跨重启持久化的，遗留值只在**模块刚升级/改过档位**时才存在，
-    #      不是每次亮息屏都会有。所以改成「只清一次」：清过就落个标记，不再碰。
+    #   v18：频率完全由本模块 PM QoS 接管。屏幕状态切换时把「全局模式」频率重新
+    #   下发一遍（只做一次，落标记避免反复写），确保 QoS 上下限回到模块设定的档位
+    #   （thermal 可能在息屏期间把上限砍低，亮屏后由本模块拉回）。
     if [ "$on" != "$ON_PREV" ]; then
         if [ ! -f "$QOS_CLEARED" ]; then
             sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" >/dev/null 2>&1
@@ -217,34 +200,41 @@ while :; do
         # 只在「真的干活」时记一行（便于用户/我们判断功耗来源；WORK 轮很少）
         log_quiet "▶ work 第 $ROUND 轮 · 前台=${FG:-（息屏/无）}"
 
-        # ---- 1) 目录可进入（Scene 卡 splash 的直接原因）----
-        if ! dir_x_ok "$SCENE_DIR"; then
-            log_quiet "⚠ Scene files 目录缺执行位 → 修复"
-            ensure_scene_dir_perm >/dev/null
+        # ---- 1) 频率兜底：每 WORK 轮把「全局模式」频率重新下发 ----
+        #  v18：频率完全由本模块 PM QoS 接管（不再交给 Scene）。
+        #  这里做兜底，防止被 thermal / 其它进程改掉；前台变化时再由 ② 做更精细的按-app 覆盖。
+        current_mode_read 2>/dev/null
+        if ! apply_mode_freq "${CUR_MODE:-balance}" >/dev/null 2>&1; then
+            log_quiet "⚠ 全局模式频率下发失败（下轮重试）"
         fi
 
-        # ---- 2) Scene 配置必须可写 ----
-        # 只在「确实写不进去」时才修复，避免每轮都 cp 一遍文件。
-        if ! can_write "${SCENE_DIR}/profile.json" 2>/dev/null; then
-            r=$(repair_scene_writable)
-            log "🔧 Scene 配置被锁住 → 已修复可写性（$r）"
+        # ---- 2) 前台应用按 app 模式覆盖频率（app_assign / game_assign）----
+        #  例如某游戏设了 performance，而全局是 balance —— 这里把它抬到 performance 档。
+        #  不设则保持全局模式，避免无谓改写。
+        if [ -n "$FG" ]; then
+            APP_MODE=$(pkg_mode_of "$FG")
+            if [ -n "$APP_MODE" ] && [ "$APP_MODE" != "${CUR_MODE:-balance}" ]; then
+                if apply_mode_freq "$APP_MODE" >/dev/null 2>&1; then
+                    log_quiet "▶ 前台 $FG → 按 app 模式覆盖频率[$APP_MODE]"
+                fi
+            fi
         fi
 
         # ---- 3) 输入变了才会重建线程分配（0 子进程判据）----
         CHANGED=0
         if src_changed; then
             CHANGED=1
-            if out=$(gen_threads_from_scene 2>&1); then
+            if out=$(gen_threads 2>&1); then
                 touch "$SRC_MARK" 2>/dev/null
-                log "🔁 Scene 配置变化 → 已重建线程分配（默认模式=$(scene_default_mode)）"
+                log "🔁 配置变化 → 已重建线程分配（默认模式=${CUR_MODE:-balance}）"
             else
                 log_quiet "⚠ 重建线程分配失败（下轮重试）：$out"
             fi
         fi
 
         # ---- 4) threads.json 丢了/空了 → 重建 ----
-        if [ ! -s "${SCENE_DIR}/threads.json" ]; then
-            gen_threads_from_scene >/dev/null 2>&1
+        if [ ! -s "$AETHER_THREADS" ]; then
+            gen_threads >/dev/null 2>&1
             touch "$SRC_MARK" 2>/dev/null
             CHANGED=1
         fi
