@@ -200,10 +200,11 @@ cmd_freqview() {
     echo "QMIN_L=$(qmin 0)"; echo "QMIN_M=$(qmin 4)"; echo "QMIN_P=$(qmin 8)"
 }
 
-# ---------- 频率档位：编辑并应用 ----------
+# ---------- 频率档位：写入 tiers 文件（仅落地，不应用）----------
 #   入参两种：① 标准输入：每行 mode<TAB>Lmin Lmax Mmin Mmax Pmin Pmax
-#            ② 单个位置参数：base64(同上内容) —— 适配 KSU 桥（无 stdin）
-cmd_freqedit() {
+#            ② 单个位置参数：base64(同上)，适配 KSU 桥（无 stdin）
+#   仅校验 + 落地到 FREQ_TIERS_FILE，回显忽略条数；不碰 QoS（应用交给 cmd_freqapply）。
+freq_write_tiers() {
     local src="$1" tmp="${TMPD}/freq_tiers.tsv" bad=0
     if [ -n "$src" ]; then
         has base64 || { echo "ERR 缺少 base64"; return 1; }
@@ -218,7 +219,6 @@ EOF
         done
     fi
     [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 没有有效的档位输入"; return 1; }
-    # 校验并落地
     local out="${TMPD}/freq_tiers.valid" m vals n
     : > "$out"
     while IFS= read -r line || [ -n "$line" ]; do
@@ -233,9 +233,22 @@ EOF
     [ -s "$out" ] || { rm -f "$out"; echo "ERR 没有有效的档位输入"; return 1; }
     mkdir -p "$WEBUI_DIR"
     cp -f "$out" "$FREQ_TIERS_FILE" 2>/dev/null; chmod 0666 "$FREQ_TIERS_FILE" 2>/dev/null; rm -f "$out"
-    # 重新下发当前全局模式（应用自定义档位）
+    echo "$bad"
+}
+
+# ---------- 频率档位：仅保存（不应用）----------
+cmd_freqsave() {
+    local bad; bad=$(freq_write_tiers "$1")
+    [ $? -eq 0 ] || { echo "ERR 保存失败"; return 1; }
+    echo "OK 频率档位已保存（未下发；${bad} 条非法已忽略）"
+}
+
+# ---------- 频率档位：保存 + 应用 ----------
+cmd_freqedit() {
+    local bad; bad=$(freq_write_tiers "$1")
+    [ $? -eq 0 ] || { echo "ERR 保存失败"; return 1; }
     local cm; cm=$(active_mode)
-    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$cm" >/dev/null 2>&1
+    apply_mode_freq_bg "$cm"   # 后台异步下发，WebUI 不阻塞
     echo "OK 频率档位已保存并应用（忽略 ${bad} 条非法）；当前模式 ${cm}"
 }
 
@@ -306,8 +319,9 @@ cmd_ksufix() {
 
 cmd_live() {
     local m; m=$(active_mode)
-    sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$m" >/dev/null 2>&1
-    echo "OK 频率配置已下发（模式 ${m}）"
+    # 后台异步下发，WebUI 调用不阻塞（真正的写入在后台跑，守护每轮兜底）
+    apply_mode_freq_bg "$m"
+    echo "OK 频率配置下发中（模式 ${m}）"
 }
 
 # ============================================================
@@ -395,7 +409,8 @@ case "$1" in
   modeset)       cmd_modeset "$2" ;;
   freqs)         cmd_freqs ;;
   freqview)      cmd_freqview ;;
-  freqedit)      cmd_freqedit ;;
+  freqsave)      cmd_freqsave "$2" ;;
+  freqedit)      cmd_freqedit "$2" ;;
   appmodes)      cmd_appmodes ;;
   setappmode)    shift; cmd_setappmode "$1" "$2" ;;
   fasxres)       cmd_fasxres ;;

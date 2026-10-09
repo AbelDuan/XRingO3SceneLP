@@ -428,6 +428,7 @@ const Api = {
   async modeset(mode) { return await this.run('modeset ' + this.shq(mode)); },
   async freqs() { return this._kv(await this.run('freqs')); },
   async freqview() { return this._kv(await this.run('freqview')); },
+  async freqsave(b64) { return await this.run('freqsave ' + this.shq(b64)); },
   async freqedit(b64) { return await this.run('freqedit ' + this.shq(b64)); },
   async live() { return await this.run('live'); },
   async profilepush() { return await this.run('profilepush'); }, // 保留兼容，后端已不再使用
@@ -463,7 +464,7 @@ const Demo = {
     const ok = (s) => ({ code: 0, out: s });
     switch (sub) {
       case 'status': return ok([
-        'VER=18.0 (2026-10-09)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
+        'VER=18.1 (2026-10-09)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
         'SCHEME=sweet_bal', 'DAEMON=1', 'ACC=1', 'PRESET_OK=1',
         'SCMAX_L=1939200', 'SCUR_L=1939200', 'HWMAX_L=3148800',
         'SCMAX_M=2688000', 'SCUR_M=2688000', 'HWMAX_M=2688000',
@@ -576,7 +577,7 @@ async function viewFreq() {
       '<div class="btn-grid">' +
         '<button class="btn" data-act="reload">刷新</button>' +
       '</div>' +
-      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>，不再依赖 Scene。改完任一模式档位点它的「应用」即可立即下发；顶部「应用频率」按当前全局模式重新下发三簇上下限。</div>' +
+      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>，不再依赖 Scene。每模式档位可<b>保存</b>（仅存盘，不下发）或<b>应用</b>（存盘并立即下发当前全局模式）；顶部「应用频率」按当前全局模式重新下发三簇上下限。</div>' +
     '</div>';
 
   try {
@@ -652,6 +653,7 @@ function renderFreqEditor(fv, st) {
         }).join('') +
         '<div class="freqmode-actions">' +
           '<button class="btn btn-xs ghost" data-act="freqreset" data-mode="' + m + '">恢复默认</button>' +
+          '<button class="btn btn-xs" data-act="freqsave" data-mode="' + m + '">保存</button>' +
           '<button class="btn btn-xs primary" data-act="freqapply" data-mode="' + m + '">应用</button>' +
         '</div>' +
       '</div>';
@@ -671,6 +673,11 @@ function collectTier(m) {
     const k = sel.dataset.k, fk = sel.dataset.fk, i = idx[k] * 2 + (fk === 'max' ? 1 : 0);
     vals[i] = sel.value;
   });
+  // 每簇保证 最低<=最高（拖错也不会把反置值写进去导致冻屏）
+  for (let c = 0; c < 3; c++) {
+    const lo = +vals[c * 2], hi = +vals[c * 2 + 1];
+    if (lo > hi) { vals[c * 2] = hi; vals[c * 2 + 1] = lo; }
+  }
   return m + '\t' + vals.join(' ');
 }
 
@@ -889,6 +896,14 @@ const ACTIONS = {
     if (el) el.classList.add('on');
     el && el.scrollIntoView({ behavior: 'smooth', block: 'center' });
   },
+  freqsave: async (b) => {
+    const m = b.dataset.mode;
+    const line = collectTier(m);
+    const b64 = b64enc(line);
+    const r = await busy('保存中…', () => Api.freqsave(b64));
+    showToast(/OK/.test(r) ? ('已保存 ' + (MODE_CN[m] || m) + ' 档位（未下发）') : ('失败：' + (r || '').slice(0, 60)));
+    await viewFreq();
+  },
   freqapply: async (b) => {
     const m = b.dataset.mode;
     const line = collectTier(m);
@@ -922,7 +937,7 @@ const ACTIONS = {
 
 // 内置默认频率档位（与 util.sh mode_freq 一致），用于「恢复默认」
 const DEFAULT_TIERS = {
-  powersave: '417792 1353600 556800 1468800 1113600 2044800',
+  powersave: '417792 1728000 556800 1996800 1113600 2217600',
   balance:   '417792 1939200 556800 2419200 1113600 2371200',
   performance: '672000 2246400 835200 3148800 1497600 2860800',
   fast:      '912000 3148800 1142400 3686400 2044800 4358400'

@@ -973,7 +973,7 @@ mode_freq() {
         fi
     fi
     case "$md" in
-      powersave)     echo "417792 1353600 556800 1468800 1113600 2044800" ;;
+      powersave)     echo "417792 1728000 556800 1996800 1113600 2217600" ;;
       balance)       echo "417792 1939200 556800 2419200 1113600 2371200" ;;
       performance)   echo "672000 2246400 835200 3148800 1497600 2860800" ;;
       fast)          echo "912000 3148800 1142400 3686400 2044800 4358400" ;;
@@ -1258,10 +1258,29 @@ pkg_mode_of() {
 }
 
 # 把某模式的频率下发到 PM QoS（active 档：前台频率）
+# 每簇 min<=max：UI 手拖可能把某簇「最低」设得比「最高」还大，写下去会被
+#   内核钳死（频率卡在错误区间 → 冻屏/卡顿）。这里强制归正，绝不把反置值写进 QoS。
+reorder_triplet() {   # in: Lmin Lmax Mmin Mmax Pmin Pmax -> out: 同序但每簇 min<=max
+    local a=$1 b=$2 c=$3 d=$4 e=$5 f=$6
+    [ "${a:-0}" -gt "${b:-0}" ] 2>/dev/null && { a=$2; b=$1; }
+    [ "${c:-0}" -gt "${d:-0}" ] 2>/dev/null && { c=$4; d=$3; }
+    [ "${e:-0}" -gt "${f:-0}" ] 2>/dev/null && { e=$6; f=$5; }
+    echo "$a $b $c $d $e $f"
+}
+
+# 后台异步下发（WebUI「应用频率」调用不阻塞）：通过 ( ... & ) 双 fork 脱离 KSU
+#   进程组，命令立即回 OK，真正的 QoS 写入在后台跑（守护每轮也会再次兜底）。
+#   这样即便某个 sysfs 写入偶发较慢，也不会把 WebUI 调用卡住导致「模块冻死」。
+apply_mode_freq_bg() {
+    local md="${1:-$(active_mode)}"
+    ( sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$md" >/dev/null 2>&1 & )
+    return 0
+}
+
 apply_mode_freq() {
     local md="$1"
     case "$md" in powersave|balance|performance|fast) ;; *) echo "ERR 未知模式: $md"; return 1 ;; esac
-    set -- $(mode_freq "$md" active)
+    set -- $(reorder_triplet $(mode_freq "$md" active))
     [ $# -lt 6 ] && { echo "ERR 无频率表: $md"; return 1; }
     # mode_freq 输出顺序: Lmin Lmax Mmin Mmax Pmin Pmax
     # apply_qos_triplet 入参: lmax mmax pmax lmin mmin pmin
