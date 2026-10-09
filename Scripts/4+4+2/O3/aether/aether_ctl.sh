@@ -351,8 +351,19 @@ cmd_start() {
   [ -x "$BIN" ] || { echo "ERR 二进制缺失或不可执行: $BIN"; return 1; }
   [ -f "$CFG" ] || cmd_deploy >/dev/null 2>&1
   pkill -f "aether-optext" 2>/dev/null; sleep 1
-  nohup "$BIN" -c "$CFG" -s >> "$LOG" 2>&1 &
-  echo "OK 已启动 aether-optext (pid $!)"
+  # ★ 关键：常驻 native 进程必须**完全脱离**调用方的进程树与 stdio 管道。
+  #   旧写法 `nohup $BIN ... &` 只是让 SIGHUP 不杀它，但它仍是 action 脚本的
+  #   子进程、且**继承了 stdin（KSU action 的输出管道）**。KSU 的 action 运行器
+  #   会一直读到 EOF 才返回，而常驻进程永不退出 → 管道写端不关闭 → 面板卡死、
+  #   Manager 被系统杀掉（现象就是「划到 action 按钮 KSU 闪退」）。
+  #   这里用 ( ... & ) 再 fork 一次把子进程过继给 init，并把三路 fd 全重定向
+  #   （stdin→/dev/null，out/err→日志），彻底断开与 action 管道的连接。
+  if command -v setsid >/dev/null 2>&1; then
+    ( setsid "$BIN" -c "$CFG" -s </dev/null >> "$LOG" 2>&1 & )
+  else
+    ( "$BIN" -c "$CFG" -s </dev/null >> "$LOG" 2>&1 & )
+  fi
+  echo "OK 已启动 aether-optext（已脱离 action 进程树）"
 }
 
 cmd_stop() {
