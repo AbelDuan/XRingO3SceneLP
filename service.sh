@@ -12,6 +12,13 @@ MODDIR="${0%/*}"
 export MODDIR
 . "$MODDIR/lib/util.sh"
 
+# ★ 关键：先把 CWD 切到模块目录之外（/），再拉任何守护。
+#   守护与 aether-optext 会反复 exec sh "$MODDIR/.../*.sh" 子进程，这些子进程
+#   继承 CWD。若 CWD 停在模块目录，常驻进程会一直持有该目录的 fd →
+#   KSU「禁用/卸载」时要 umount/rm 模块目录会 EBUSY、管理线程卡死，
+#   表现为 KSU 闪退、模块无法禁用/卸载。切走后卸载路径才能干净释放。
+cd / || cd /data
+
 # 等 /data 就绪
 until [ -d "/data/data" ] || [ -d "/data/user/0" ]; do sleep 5; done
 mkdir -p "$STATE_DIR" "$TMPD" 2>/dev/null
@@ -48,6 +55,7 @@ else
 fi
 
 # 4) 调度守护 guard.sh —— 每轮兜底频率 + 线程分配 + 大核限制
+#   （CWD 已在文件顶部切到 /，守护与子进程均不持有模块目录，见顶部注释）
 GUARD_SH="$MODDIR/Scripts/4+4+2/O3/guard.sh"
 if [ -f "$GUARD_SH" ]; then
     nohup sh "$GUARD_SH" </dev/null >> "$LOG_FILE" 2>&1 &

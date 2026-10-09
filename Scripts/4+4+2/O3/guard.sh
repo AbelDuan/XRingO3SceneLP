@@ -28,6 +28,9 @@ MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
 
 INTERVAL="${1:-5}"
 ROUND=0
+# ★ 自保：守护及其所有子进程都不持有模块目录（service.sh 已 cd /，这里再兜底一次，
+#   防止被其它路径直接拉起时 CWD 停在模块目录 → KSU 禁用/卸载时 umount EBUSY 闪退）。
+cd / || cd /data
 # 「QoS 遗留值只清一次」的标记（见主循环里亮/息屏切换那段的原因说明）
 QOS_CLEARED="${STATE_DIR}/qos_cleared"
 
@@ -136,6 +139,16 @@ rd() { read -r v < "$1" 2>/dev/null; echo "${v:-}"; }
 
 while :; do
     ROUND=$((ROUND+1))
+    # ★ 自保 / 配合 KSU 禁用：KSU 禁用或卸载模块时会撤掉模块挂载，
+    #   ${MODDIR}/Scripts 目录随之消失 → 守护立刻退出，避免常驻进程挡住 KSU
+    #   卸载时的目录释放（否则 KSU 卡死闪退、模块无法禁用/卸载）。
+    if [ ! -d "${MODDIR}/Scripts" ]; then
+        # 模块要没了：顺手把独立的线程引擎（aether-optext）也停掉，
+        # 否则它仍持有二进制文件、挡住卸载目录释放。
+        pkill -f "O3/aether/aether-optext" 2>/dev/null
+        pkill -f "O3/pinwatch" 2>/dev/null
+        exit 0
+    fi
     on=$(screen_on)
 
     # 每轮重读开关（内建 read，不起子进程）：日志开关/频率开关改了立刻生效

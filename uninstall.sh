@@ -8,8 +8,14 @@ MODDIR="${0%/*}"
 
 uninstall_module() {
     until [ -d "/data/data" ]; do sleep 5; done
+    # ★ 先杀光所有常驻进程（含线程引擎与事件落核器），避免它们仍持有模块目录 /
+    #   其下脚本文件 → KSU 卸载时 umount/rm EBUSY，进而管理器卡死闪退。
     pkill -f "O3/guard\.sh" 2>/dev/null
     pkill -f "O3/camera_freq_guard\.sh" 2>/dev/null
+    pkill -f "O3/aether/aether-optext" 2>/dev/null
+    pkill -f "O3/pinwatch" 2>/dev/null
+    pkill -f "O3/pinwatch\.sh" 2>/dev/null
+    sleep 1
     # 顺手清掉旧版遗留的锁定标记（机制已废除）
     rm -f "${STATE_DIR}/unlocked" "${STATE_DIR}/locked" "${STATE_DIR}/qos_cleared" "${STATE_DIR}/src.mark" 2>/dev/null
 
@@ -24,6 +30,9 @@ uninstall_module() {
     restore_stock_freq
 }
 
+# 切到模块目录之外再执行，确保本脚本自身（CWD=模块目录）不会因下面删除操作
+# 而持有目录 → 卸载流程能干净释放。
+cd / || cd /data
 uninstall_module >/dev/null 2>&1
 
 echo "✅ 已停止调度守护；线程已释放；CPU 频率上限已恢复（不限频）"
