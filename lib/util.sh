@@ -740,10 +740,14 @@ cluster_stockmax() {
 #  频率数值直接对齐 Scene profile.json 里 <mode>_active / <mode>_inactive
 #  preset 的 @cpu_freq（实测读出来的值，不是自己臆造的）：
 #     mode           L min/max        M min/max        P min/max
-#     powersave      417792/1353600   556800/1468800   1113600/2044800
+#     powersave      417792/1560000   556800/1651200   1113600/2169600
 #     balance        417792/1939200   556800/1968000   1113600/2371200
 #     performance    672000/2246400   835200/2294400   1497600/2860800
 #     fast           912000/3148800   1142400/3686400  2044800/4358400
+#  ⚠ v18.2 校正（对齐 O3 实测能效，见 README §「档位现读，不写死」）：
+#     · 省电档取实测偏低档（折中：比 sweet_eco 略高一点，日常仍跟手）；
+#     · 流畅/性能的**中核上限**曾被抬到 2419200/3148800 —— 实测「M 簇 1550MHz
+#       以上纯浪费」（能效 33.5→25.9 fps/W），已收回 1968000/2294400。
 #  inactive 各自更低一档（后台不抢性能）。
 # ============================================================
 MODE_LIST="powersave balance performance fast"
@@ -973,9 +977,9 @@ mode_freq() {
         fi
     fi
     case "$md" in
-      powersave)     echo "417792 1728000 556800 1996800 1113600 2217600" ;;
-      balance)       echo "417792 1939200 556800 2419200 1113600 2371200" ;;
-      performance)   echo "672000 2246400 835200 3148800 1497600 2860800" ;;
+      powersave)     echo "417792 1560000 556800 1651200 1113600 2169600" ;;
+      balance)       echo "417792 1939200 556800 1968000 1113600 2371200" ;;
+      performance)   echo "672000 2246400 835200 2294400 1497600 2860800" ;;
       fast)          echo "912000 3148800 1142400 3686400 2044800 4358400" ;;
       *)             echo "" ;;
     esac
@@ -1254,6 +1258,18 @@ pkg_mode_of() {
     [ -z "$p" ] && { echo ""; return; }
     [ -s "$GAME_ASSIGN_FILE" ] && m=$(awk -F'\t' -v P="$p" '$1==P{print $2; exit}' "$GAME_ASSIGN_FILE" 2>/dev/null)
     [ -z "$m" ] && [ -s "$APP_ASSIGN_FILE" ] && m=$(awk -F'\t' -v P="$p" '$1==P{print $2; exit}' "$APP_ASSIGN_FILE" 2>/dev/null)
+    echo "$m"
+}
+
+# 分应用频率（WebUI「分应用频率」页）—— 优先级高于 pkg_mode_of。
+#   app_freq.tsv 每行: 包名<TAB>模式档（powersave/balance/performance/fast）
+#   未配置返回空。
+APP_FREQ_FILE="${WEBUI_DIR}/app_freq.tsv"
+pkg_freq_of() {
+    local p="$1" m=""
+    [ -z "$p" ] && { echo ""; return; }
+    [ -s "$APP_FREQ_FILE" ] && m=$(awk -F'\t' -v P="$p" '$1==P{print $2; exit}' "$APP_FREQ_FILE" 2>/dev/null)
+    mode_valid "$m" || m=""
     echo "$m"
 }
 

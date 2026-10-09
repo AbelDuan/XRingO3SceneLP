@@ -208,14 +208,16 @@ while :; do
             log_quiet "⚠ 全局模式频率下发失败（下轮重试）"
         fi
 
-        # ---- 2) 前台应用按 app 模式覆盖频率（app_assign / game_assign）----
-        #  例如某游戏设了 performance，而全局是 balance —— 这里把它抬到 performance 档。
-        #  不设则保持全局模式，避免无谓改写。
+        # ---- 2) 前台应用频率覆盖（优先级：app_freq > app_assign/game_assign）----
+        #  ① app_freq.tsv：用户在「分应用频率」页为该应用单独指定的模式档（最高优先）
+        #  ② pkg_mode_of：app_assign / game_assign 里的模式档
+        #  都没有则保持全局模式，避免无谓改写。
         if [ -n "$FG" ]; then
-            APP_MODE=$(pkg_mode_of "$FG")
+            APP_MODE=$(pkg_freq_of "$FG")
+            [ -z "$APP_MODE" ] && APP_MODE=$(pkg_mode_of "$FG")
             if [ -n "$APP_MODE" ] && [ "$APP_MODE" != "${CUR_MODE:-balance}" ]; then
                 if apply_mode_freq "$APP_MODE" >/dev/null 2>&1; then
-                    log_quiet "▶ 前台 $FG → 按 app 模式覆盖频率[$APP_MODE]"
+                    log_quiet "▶ 前台 $FG → 按应用频率覆盖[$APP_MODE]"
                 fi
             fi
         fi

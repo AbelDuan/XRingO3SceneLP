@@ -137,21 +137,85 @@ cmd_deploy() {
 }
 
 # ---------- 合并：base + 自定义覆盖 → CFG ----------
+#  ⚠ v18.2 重做：覆盖**不再是「整个应用压到某一簇」**（旧写法只发
+#     {"other": X, "comm": X}，把 RenderThread/音频/加载线程全压到一起，
+#     与艇长的「分进程负载」模型相反）。现在按**角色**展开成五层：
+#       main_thread    主线程
+#       heaviest_thread/cores  最重线程 → 大核
+#       heavy_thread/cores     重线程   → 中核
+#       comm{...}      按线程名路由（音频/IO → 小核；渲染/任务 → 中核）
+#       other          其余
+#    占位符（{e_core}/{p1_core}/{hp_core}…）在 deploy 时按真机拓扑展开。
 merge_overrides() {
-  local ovr_file="${TMPD}/aether_ovr.txt"
-  awk -F'\t' -v n="$(grep -c . "$OVR" 2>/dev/null || echo 0)" '
-    BEGIN{ i=0 }
-    NF>=2 {
-       i++
-       rule="    {\n      \"friendly\": \"自定义·" $1 "\",\n      \"packages\": [\"" $1 "\"],\n      \"cpuset\": { \"other\": \"" $2 "\", \"comm\": \"" $2 "\" }\n    }"
-       if (i < n) printf ",\n  %s,\n", rule
-       else       printf ",\n  %s\n", rule
+  detect_topo
+  [ -s "$OVR" ] || { cp -f "$BASE" "$CFG" 2>/dev/null; chmod 0666 "$CFG" 2>/dev/null; return 0; }
+  # 每个覆盖包生成一条完整的 rule（cpuset 由角色展开为五层）
+  local full="${TMPD}/aether_ovr_full.txt"
+  : > "$full"
+  local i=0 pkg role
+  while IFS='	' read -r pkg role || [ -n "$pkg" ]; do
+    [ -z "$pkg" ] && continue
+    [ "${pkg#\#}" != "$pkg" ] && continue
+    role=$(printf '%s' "$role" | tr -d ' \r'); [ -z "$role" ] && role=balance
+    i=$((i+1))
+    [ $i -eq 1 ] || printf ',\n' >> "$full"
+    {
+      printf '    {\n'
+      printf '      "friendly": "自定义·%s",\n' "$pkg"
+      printf '      "packages": ["%s"],\n' "$pkg"
+      printf '      "cpuset": '
+      tpl_cpuset "$role"
+      printf '\n    }'
+    } >> "$full"
+  done < "$OVR"
+  # 插入点：**最后一行只含 `]`（可有前导空格）**——兼容两种格式：
+  #   艇长 Config 模板结尾是「  ]」，设备/二进制规范化后是「]」。
+  #   旧写法硬匹配 /^  \]$/ 在后者上永不命中（覆盖静默失效），这里改为
+  #   「记住最后一个 ^[[:space:]]*]$ 的行号，在其前插入」。
+  awk -v full="$full" '
+    { lines[NR] = $0 }
+    /^[[:space:]]*\][[:space:]]*$/ { last = NR }
+    END {
+      if (last == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
+      for (i = 1; i < last; i++) print lines[i]
+      # 给已有规则补逗号，再接覆盖规则
+      printf ",\n"
+      while ((getline l < full) > 0) print l
+      print lines[last]
     }
-  ' "$OVR" > "$ovr_file" 2>/dev/null
-  # 把覆盖规则插到 rules 数组闭合符（^  ]$）之前
-  awk 'FNR==NR{o=o $0 "\n"; next} /^  \]$/ && !d{printf "%s", o; d=1} {print}' "$ovr_file" "$BASE" > "$CFG" 2>/dev/null
+  ' "$BASE" > "$CFG" 2>/dev/null
   [ -s "$CFG" ] || cp -f "$BASE" "$CFG" 2>/dev/null
   chmod 0666 "$CFG" 2>/dev/null; chown 0:0 "$CFG" 2>/dev/null
+}
+
+# 角色 → 五层分进程 cpuset（JSON 片段，单行）。核位用真机拓扑展开。
+tpl_cpuset() {
+  local role="$1"
+  local E="$E_CORE" P1="$P1_CORE" HP="$HP_CORE" ALL="$ALL_CORE"
+  [ -z "$HP" ] && HP="${E}"
+  [ -z "$P1" ] && P1="${E}"
+  case "$role" in
+    powersave)
+      # 轻线程/主线程压小核，只给渲染线程留一条通向中核的窄出口
+      printf '{"main_thread":"%s","heaviest_thread":"RenderThread","heaviest_cores":"%s","heavy_thread":"RenderThread","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"]},"other":"%s"}' \
+        "$E" "$P1" "$P1" "$E" "$E" ;;
+    balance)
+      printf '{"main_thread":"%s","heaviest_thread":"RenderThread","heaviest_cores":"%s","heavy_thread":"RenderThread","heavy_cores":"%s","comm":{"%s":["Worker","Job","Async","Pool","Audio","AudioTrack","FMOD","Http","Socket","Download"]},"other":"%s"}' \
+        "$P1" "$P1" "$P1" "$E" "$E" ;;
+    performance)
+      printf '{"main_thread":"%s","heaviest_thread":"RenderThread;2.raster;rt-launcher","heaviest_cores":"%s","heavy_thread":"RenderThread,2.raster,rt-launcher","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background"]},"other":"%s,%s"}' \
+        "$P1" "$P1" "$P1" "$E" "$P1" "$E" "$P1" ;;
+    fast)
+      # 中低负载 0-7 由系统分配，高负载线程由 load_aware 上探 4-9
+      printf '{"main_thread":"%s","heaviest_thread":"RenderThread;GameThread;UnityMain","heaviest_cores":"%s","heavy_thread":"RenderThread;RHIThread;UnityGfx","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread"]},"other":"%s"}' \
+        "$P1" "$HP" "$P1" "$E" "$P1" "$E,$P1" ;;
+    game)
+      # 游戏：主线程/最重线程上大核，渲染与任务线程走中核，音频/IO 留小核
+      printf '{"main_thread":"%s,%s","heaviest_thread":"UnityMain;GameThread;UEGameThread;Thread-;Main","heaviest_cores":"%s","heavy_thread":"UnityGfx;RHIThread;RenderThread","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread","UnityGfx"]},"other":"%s"}' \
+        "$E" "$HP" "$HP" "$P1" "$E" "$P1" "$E" ;;
+    *)
+      printf '{"main_thread":"%s","other":"%s"}' "$E" "$E" ;;
+  esac
 }
 
 # ---------- 由 base 生成 应用→核位 映射（艇长已定义的线程分配）----------
@@ -208,21 +272,26 @@ cmd_apps() {
   rm -f "$ovrf" "$aprf" "$spf" "$lpf" 2>/dev/null
 }
 
-# ---------- set：为未分配的应用自定义线程核位 ----------
+# ---------- set：为应用套用「角色档」（分进程五层策略）----------
 cmd_set() {
-  local pkg="$1" cluster="$2"
-  [ -z "$pkg" ] && { echo "ERR 用法: set <包名> <核位>"; return 1; }
+  local pkg="$1" role="$2"
+  [ -z "$pkg" ] && { echo "ERR 用法: set <包名> <角色档>"; return 1; }
   case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) echo "ERR 包名含非法字符"; return 1 ;; esac
-  case "$cluster" in
-    0-3|4-7|8-9|0-7|4-9) ;;
-    *) echo "ERR 非法核位: $cluster（可用 0-3 小核 / 4-7 中核 / 8-9 大核 / 0-7 / 4-9）"; return 1 ;;
+  role=$(printf '%s' "$role" | tr -d ' \r')
+  case "$role" in
+    powersave|balance|performance|fast|game) ;;
+    # 旧核位 → 等价角色
+    0-3)       role=powersave ;;
+    4-7|0-7)   role=performance ;;
+    8-9|4-9)   role=fast ;;
+    *) echo "ERR 非法角色档: $role（可用 powersave/balance/performance/fast/game）"; return 1 ;;
   esac
   mkdir -p "$STATE_DIR"
   [ -f "$OVR" ] && awk -F'\t' -v p="$pkg" '$1!=p' "$OVR" > "${OVR}.tmp" 2>/dev/null && mv -f "${OVR}.tmp" "$OVR" 2>/dev/null
-  printf '%s\t%s\n' "$pkg" "$cluster" >> "$OVR"
+  printf '%s\t%s\n' "$pkg" "$role" >> "$OVR"
   chmod 0666 "$OVR" 2>/dev/null; chown 0:0 "$OVR" 2>/dev/null
   cmd_deploy
-  echo "OK 已为 ${pkg} 设置线程分配：${cluster}（其余仍由艇长自动分配）"
+  echo "OK 已为 ${pkg} 套用线程角色档：${role}（分进程下发，其余仍由艇长自动分配）"
 }
 
 # ---------- del：移除自定义，恢复由艇长自动分配 ----------
@@ -236,26 +305,31 @@ cmd_del() {
   echo "OK 已移除 ${pkg} 的自定义分配（恢复由艇长自动分配）"
 }
 
-# ---------- setbatch：批量设置核位（仅一次 deploy）----------
-#   入参：多行 pkg<TAB>cluster；cluster=auto 表示移除该包自定义。
-#   用于 WebUI「勾选应用 → 套用模板」的批量通道，避免 N 次 cmd_deploy。
+# ---------- setbatch：批量套用「角色档」（仅一次 deploy）----------
+#   入参：多行 pkg<TAB>role；role=auto 表示移除该包自定义。
+#   role ∈ powersave|balance|performance|fast|game（分进程五层，不是单簇核位）。
+#   兼容旧的裸核位（0-3/4-7/…）—— 映射到等价角色，避免老前端写入非法值。
 cmd_setbatch() {
   local tmp="${TMPD}/aether_batch.tsv" keep=0 drop=0 bad=0
   : > "$tmp"
   while IFS= read -r line || [ -n "$line" ]; do
     [ -z "$line" ] && continue
     pkg=$(printf '%s' "$line" | cut -f1)
-    cl=$(printf '%s' "$line" | cut -f2-)
+    cl=$(printf '%s' "$line" | cut -f2- | tr -d ' \r')
     [ -z "$pkg" ] && { bad=$((bad+1)); continue; }
     case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) bad=$((bad+1)); continue ;; esac
     case "$cl" in
-      0-3|4-7|8-9|0-7|4-9) keep=$((keep+1)) ;;
-      auto|"")               drop=$((drop+1)) ;;
-      *)                     bad=$((bad+1)); continue ;;
+      powersave|balance|performance|fast|game) keep=$((keep+1)) ;;
+      # 旧核位 → 等价角色（老前端 / 历史数据兼容）
+      0-3)                     cl=powersave;   keep=$((keep+1)) ;;
+      4-7|0-7)                 cl=performance; keep=$((keep+1)) ;;
+      8-9|4-9)                 cl=fast;        keep=$((keep+1)) ;;
+      auto|"")                 drop=$((drop+1)) ;;
+      *)                       bad=$((bad+1)); continue ;;
     esac
     printf '%s\t%s\n' "$pkg" "$cl" >> "$tmp"
   done
-  [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 没有有效的包=核位 输入"; return 1; }
+  [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 没有有效的 包=角色 输入"; return 1; }
   mkdir -p "$STATE_DIR"
   # 用批处理表重建 OVR：旧 OVR 中未被本批「auto」命中的行先保留，再叠加 set 行
   local merged="${TMPD}/aether_ovr_merged.tsv"
@@ -268,7 +342,7 @@ cmd_setbatch() {
   mv -f "$merged" "$OVR" 2>/dev/null
   chmod 0666 "$OVR" 2>/dev/null; chown 0:0 "$OVR" 2>/dev/null
   cmd_deploy
-  echo "OK 批量设置完成：应用 ${keep} 个模板、移除 ${drop} 个自定义、忽略 ${bad} 个非法"
+  echo "OK 批量套用完成：设置 ${keep} 个角色档、移除 ${drop} 个自定义、忽略 ${bad} 个非法"
 }
 
 # ---------- 启停 ----------

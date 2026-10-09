@@ -238,18 +238,30 @@ textarea.f { resize: vertical; line-height: 1.5; }
 /* ---------- 各模式频率档位编辑器 ---------- */
 .freqmode { border-top: 1px solid var(--line-soft); }
 .freqmode:first-child { border-top: 0; }
-.freqmode.on { background: color-mix(in srgb, var(--accent) 5%, var(--card)); }
+.freqmode.cur > .freqmode-h { background: color-mix(in srgb, var(--accent) 5%, transparent); }
 .freqmode-h { display: flex; align-items: center; gap: 10px; padding: 13px 15px; cursor: pointer; }
+.freqmode-h:active { background: var(--line-soft); }
+.freqmode.on .freqmode-h { background: color-mix(in srgb, var(--accent) 7%, transparent); }
 .fmode-t { flex: 1; min-width: 0; }
-.freqmode-caret { color: var(--sub); transition: transform .2s; flex: none; }
-.freqmode.on .freqmode-caret { transform: rotate(180deg); }
-.freqmode-body { display: none; padding: 4px 15px 16px; }
-.freqmode.on .freqmode-body { display: block; }
-.freq3 { display: flex; align-items: center; gap: 7px; padding: 6px 0; flex-wrap: wrap; }
+.freqmode-caret { color: var(--sub); transition: transform .28s cubic-bezier(.4, 0, .2, 1); flex: none; }
+.freqmode.on .freqmode-caret { transform: rotate(180deg); color: var(--accent); }
+/* 展开动画：max-height + opacity 过渡，避免 display 切换导致的布局跳动 */
+.freqmode-body {
+  max-height: 0; overflow: hidden; opacity: 0;
+  padding: 0 15px;
+  transition: max-height .28s cubic-bezier(.4, 0, .2, 1), opacity .2s ease, padding .28s ease;
+}
+.freqmode.on .freqmode-body {
+  opacity: 1; padding: 6px 15px 16px;
+  background: color-mix(in srgb, var(--accent) 4%, transparent);
+  box-shadow: inset 0 1px 0 var(--line-soft);
+}
+.freq3 { display: flex; align-items: center; gap: 7px; padding: 7px 0; flex-wrap: wrap; }
+.freq3 + .freq3 { border-top: 1px dashed var(--line-soft); }
 .f3-n { font-size: 13.5px; font-weight: 600; width: 46px; flex: none; }
 .f3-l { font-size: 11.5px; color: var(--sub); }
 .f3-s { width: auto; flex: 1; min-width: 96px; }
-.freqmode-actions { display: flex; gap: 9px; margin-top: 10px; }
+.freqmode-actions { display: flex; gap: 9px; margin-top: 12px; }
 .freqmode-actions .btn { flex: 1; }
 
 /* ---------- 线程：选择栏 / 模板栏 ---------- */
@@ -288,7 +300,7 @@ textarea.f { resize: vertical; line-height: 1.5; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">17.12</span>
+    <span class="h-ver" id="ver">18.2</span>
     <div class="h-chips">
       <button class="btn btn-xs primary" id="conn-chip" data-act="live" title="按当前全局模式重新下发模块 QoS 频率">应用频率</button>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
@@ -303,6 +315,7 @@ textarea.f { resize: vertical; line-height: 1.5; }
   </div>
   <nav class="tabs">
     <button data-tab="freq" class="on">CPU频率</button>
+    <button data-tab="appfreq">分应用频率</button>
     <button data-tab="thread">线程分配</button>
   </nav>
 </header>
@@ -429,13 +442,19 @@ const Api = {
   async freqs() { return this._kv(await this.run('freqs')); },
   async freqview() { return this._kv(await this.run('freqview')); },
   async freqsave(b64) { return await this.run('freqsave ' + this.shq(b64)); },
-  async freqedit(b64) { return await this.run('freqedit ' + this.shq(b64)); },
+  async frequse(mode, b64) { return await this.run('frequse ' + this.shq(mode) + ' ' + this.shq(b64)); },
   async live() { return await this.run('live'); },
-  async profilepush() { return await this.run('profilepush'); }, // 保留兼容，后端已不再使用
+  // 分应用频率：每应用一个模式档
+  async appfreq() { return await this.run('appfreq'); },
+  async appfreqapps() { return await this.run('appfreqapps'); },
+  async appfreqset(pkg, mode) { return await this.run('appfreqset ' + this.shq(pkg) + ' ' + this.shq(mode)); },
+  async appfreqdel(pkg) { return await this.run('appfreqdel ' + this.shq(pkg)); },
+  async appfreqbatch(b64) { return await this.run('appfreqbatch ' + this.shq(b64)); },
+  // 线程接管（艇长 Aether）
   async aether() { return await this.run('aether'); },
   async aetherswitch(onoff) { return await this.run('aetherswitch ' + this.shq(onoff)); },
   async aetherapps() { return await this.run('aetherapps'); },
-  async aetherset(pkg, cluster) { return await this.run('aetherset ' + this.shq(pkg) + ' ' + this.shq(cluster)); },
+  async aetherset(pkg, tpl) { return await this.run('aetherset ' + this.shq(pkg) + ' ' + this.shq(tpl)); },
   async aetherdel(pkg) { return await this.run('aetherdel ' + this.shq(pkg)); },
   async aethersetbatch(b64) { return await this.run('aethersetbatch ' + this.shq(b64)); }
 };
@@ -464,7 +483,7 @@ const Demo = {
     const ok = (s) => ({ code: 0, out: s });
     switch (sub) {
       case 'status': return ok([
-        'VER=18.1 (2026-10-09)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
+        'VER=18.2 (2026-10-09)', 'MODNAME=玄戒O3 · Abel 调度工具箱',
         'SCHEME=sweet_bal', 'DAEMON=1', 'ACC=1', 'PRESET_OK=1',
         'SCMAX_L=1939200', 'SCUR_L=1939200', 'HWMAX_L=3148800',
         'SCMAX_M=2688000', 'SCUR_M=2688000', 'HWMAX_M=2688000',
@@ -515,9 +534,10 @@ const Demo = {
    4) 全局状态 + 工具
    ============================================================ */
 const S = {
-  tab: 'freq', status: {}, schemes: [], aether: {}, freqview: {},
-  apps: [], appsLoaded: false, appfilter: 'all', appsearch: '',
-  sel: new Set(), showCount: 120
+  tab: 'freq', status: {}, schemes: [], freqview: {},
+  appfreq: {}, appList: null, appShow: 30, appSearch: '',
+  aether: {}, apps: [], appsLoaded: false, appfilter: 'all', appsearch: '',
+  sel: new Set(), showCount: 40
 };
 
 function showToast(m) {
@@ -544,11 +564,10 @@ function parseApps(text) {
   const out = [];
   String(text || '').split('\n').forEach(l => {
     if (l.indexOf('APP=') !== 0) return;
-    const body = l.slice(4);
-    const f = body.split('|');
+    const f = l.slice(4).split('|');
     out.push({
       pkg: f[0] || '', sys: f[1] || '0', defined: f[2] || '0',
-      custom: f[3] || '0', cluster: f[4] || '', friendly: f[5] || ''
+      custom: f[3] || '0', tpl: f[4] || '', friendly: f[5] || ''
     });
   });
   return out;
@@ -570,14 +589,14 @@ async function viewFreq() {
     '</div>' +
     '<div class="group">' +
       '<div class="g-title rowhead">各模式频率档位 <span class="pill" id="freq-pinned"></span></div>' +
-      '<div class="g-foot" style="padding-bottom:8px">显示的是<b>已设定的频率范围</b>（非实时频率）。点「查看」展开可编辑三簇最低/最高，改完点「应用」即按当前全局模式下发。</div>' +
+      '<div class="g-foot" style="padding-bottom:8px">显示的是<b>已设定的频率范围</b>（非实时频率）。点标题展开可编辑三簇最低/最高；<b>保存</b>只存盘不下发，<b>应用</b>才会切到该档并立即下发。</div>' +
       '<div class="card" id="freq-card">加载中…</div>' +
     '</div>' +
     '<div class="group">' +
       '<div class="btn-grid">' +
         '<button class="btn" data-act="reload">刷新</button>' +
       '</div>' +
-      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>，不再依赖 Scene。每模式档位可<b>保存</b>（仅存盘，不下发）或<b>应用</b>（存盘并立即下发当前全局模式）；顶部「应用频率」按当前全局模式重新下发三簇上下限。</div>' +
+      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>。展开档位只是查看/编辑，<b>不会切换频率</b>；点「应用」才会切到该档并下发。顶部「应用频率」按当前全局模式重新下发三簇上下限。</div>' +
     '</div>';
 
   try {
@@ -640,7 +659,7 @@ function renderFreqEditor(fv, st) {
     const tier = (fv['TIER_' + m] || '').split(/\s+/).filter(Boolean);
     const [lmin, lmax, mmin, mmax, pmin, pmax] = tier;
     const cn = MODE_CN[m] || m;
-    const on = (curMode === m) ? ' on' : '';
+    const on = (curMode === m) ? ' cur' : '';
     const body =
       '<div class="freqmode-body">' +
         CLUSTER_KEYS.map(([k, nm], idx) => {
@@ -659,7 +678,7 @@ function renderFreqEditor(fv, st) {
       '</div>';
     return '<div class="freqmode' + on + '" id="freqmode-' + m + '">' +
       '<div class="freqmode-h" data-act="freqtoggle" data-mode="' + m + '">' +
-        '<div class="fmode-t"><div class="mc-n">' + esc(cn) + '</div>' +
+        '<div class="fmode-t"><div class="mc-n">' + esc(cn) + (curMode === m ? ' <span class="pill ok" style="font-size:10px">当前</span>' : '') + '</div>' +
         '<div class="mc-b">小 ' + fmtFreq(lmin) + '~' + fmtFreq(lmax) + ' · 中 ' + fmtFreq(mmin) + '~' + fmtFreq(mmax) + ' · 大 ' + fmtFreq(pmin) + '~' + fmtFreq(pmax) + '</div></div>' +
         '<span class="freqmode-caret">▾</span>' +
       '</div>' + body + '</div>';
@@ -682,11 +701,101 @@ function collectTier(m) {
 }
 
 /* ============================================================
-   6) 视图：线程分配（读取本机有界面应用 + 艇长已定义 / 自定义 / 自动）
+   6) 视图：分应用频率（给特定应用单独指定一个频率档，前台时生效）
    ============================================================ */
+const APP_MODE_OPTS = [['', '跟随全局'], ['powersave', '省电'], ['balance', '流畅'], ['performance', '性能'], ['fast', '极速']];
+
+async function viewAppFreq() {
+  const v = document.getElementById('view');
+  S.appShow = 30;
+  v.innerHTML =
+    '<div class="group">' +
+      '<div class="g-title rowhead">分应用频率 <span class="pill" id="appfreq-count"></span></div>' +
+      '<div class="g-foot" style="padding-bottom:8px">给特定应用单独指定一个频率档；该应用在前台时用它，切走即回到全局模式。<b>只有已配置的应用才会列出</b>，在下面搜索添加。</div>' +
+      '<div class="card" style="padding:12px 15px 4px">' +
+        '<input class="f" id="appfreq-search" placeholder="搜索并添加应用（包名关键字）…">' +
+        '<div id="appfreq-hits"></div>' +
+      '</div>' +
+      '<div class="card" id="appfreq-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
+    '</div>' +
+    '<div class="group"><div class="btn-grid"><button class="btn" data-act="reload">刷新</button></div></div>';
+
+  await loadAppFreq();
+  await loadAppList();
+  renderAppFreq();
+}
+
+async function loadAppFreq() {
+  try { S.appfreq = await Api.appfreq(); } catch (e) { S.appfreq = {}; }
+}
+async function loadAppList() {
+  if (S.appList) return;
+  try { S.appList = parseAppList(await Api.appfreqapps()); } catch (e) { S.appList = []; }
+}
+function parseAppList(text) {
+  return String(text || '').split('\n').filter(l => l.indexOf('APP=') === 0)
+    .map(l => { const f = l.slice(4).split('|'); return { pkg: f[0] || '', sys: f[1] || '0' }; })
+    .filter(a => a.pkg);
+}
+
+function renderAppFreq() {
+  const card = document.getElementById('appfreq-card'); if (!card) return;
+  const m = S.appfreq || {};
+  const pkgs = Object.keys(m).sort();
+  const cnt = document.getElementById('appfreq-count');
+  if (cnt) { cnt.textContent = pkgs.length + ' 个'; cnt.className = 'pill'; }
+  if (!pkgs.length) {
+    card.innerHTML = '<div class="empty">还没有分应用频率配置<br>在上面搜索框输入包名即可添加</div>';
+  } else {
+    const list = pkgs.slice(0, S.appShow);
+    card.innerHTML = list.map(p => {
+      const cur = m[p] || '';
+      const opts = APP_MODE_OPTS.map(o => '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
+      return '<div class="row" style="padding:11px 15px;gap:10px">' +
+        '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p) + '</div></div>' +
+        '<select class="f" data-appfreq="' + esc(p) + '" style="width:auto;flex:none;min-width:92px">' + opts + '</select>' +
+        '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p) + '">移除</button>' +
+      '</div>';
+    }).join('');
+    if (pkgs.length > list.length) {
+      card.innerHTML += '<div class="empty" data-act="appfreqmore" style="cursor:pointer">加载更多（已显示 ' + list.length + '/' + pkgs.length + '）</div>';
+    }
+  }
+  renderAppFreqHits();
+}
+
+function renderAppFreqHits() {
+  const box = document.getElementById('appfreq-hits'); if (!box) return;
+  const kw = (S.appSearch || '').trim().toLowerCase();
+  if (kw.length < 2) { box.innerHTML = ''; return; }
+  const hits = (S.appList || []).filter(a => a.pkg.toLowerCase().indexOf(kw) >= 0).slice(0, 12);
+  if (!hits.length) { box.innerHTML = '<div class="empty" style="padding:8px 0">没有匹配的应用</div>'; return; }
+  box.innerHTML = hits.map(a =>
+    '<div class="row" style="padding:9px 0;gap:8px">' +
+      '<div class="r-main"><div class="r-t mono" style="font-size:12px">' + esc(a.pkg) + '</div></div>' +
+      '<button class="btn btn-xs primary" data-act="appfreqadd" data-pkg="' + esc(a.pkg) + '">添加</button>' +
+    '</div>').join('');
+}
+
+/* ============================================================
+   6b) 视图：线程分配（艇长 Aether）
+   ------------------------------------------------------------
+   模板不是「把应用放在某一簇」，而是**分进程/线程角色**下发五层：
+     主线程 · 最重线程(→大核) · 重线程(→中核) · 按线程名 comm 路由 · 其余
+   前端只选「角色档」，具体核位由后端按设备拓扑展开。
+   ============================================================ */
+const TPL_OPTS = [
+  ['auto', '跟随艇长'],
+  ['powersave', '省电（轻载）'],
+  ['balance', '流畅（日用）'],
+  ['performance', '性能（重载）'],
+  ['fast', '极速（全核）'],
+  ['game', '游戏（分线程路由）']
+];
+
 async function viewThread() {
   const v = document.getElementById('view');
-  S.showCount = 120;
+  S.showCount = 40;
   v.innerHTML =
     '<div class="group">' +
       '<div class="card" id="aether-card">' +
@@ -701,16 +810,9 @@ async function viewThread() {
       '</div>' +
     '</div>' +
     '<div class="group">' +
-      '<div class="g-title rowhead">应用线程分配 <span class="pill" id="apps-count"></span></div>' +
+      '<div class="g-title rowhead">应用线程档位 <span class="pill" id="apps-count"></span></div>' +
+      '<div class="g-foot" style="padding-bottom:8px">按<b>角色档</b>下发：主线程 / 重线程 / 按线程名路由分别落到不同簇，<b>不是把整个应用压到一个簇</b>。</div>' +
       '<div class="card" style="padding:12px 15px 4px">' +
-        '<div class="btn-row" style="padding:0 0 8px;flex-wrap:wrap">' +
-          '<button class="btn btn-xs' + (S.appfilter === 'all' ? ' primary' : '') + '" data-filter="all">全部</button>' +
-          '<button class="btn btn-xs' + (S.appfilter === 'builtin' ? ' primary' : '') + '" data-filter="builtin">艇长已配</button>' +
-          '<button class="btn btn-xs' + (S.appfilter === 'custom' ? ' primary' : '') + '" data-filter="custom">自定义</button>' +
-          '<button class="btn btn-xs' + (S.appfilter === 'none' ? ' primary' : '') + '" data-filter="none">未接管</button>' +
-          '<button class="btn btn-xs' + (S.appfilter === 'sys' ? ' primary' : '') + '" data-filter="sys">系统</button>' +
-          '<button class="btn btn-xs' + (S.appfilter === '3rd' ? ' primary' : '') + '" data-filter="3rd">第三方</button>' +
-        '</div>' +
         '<input class="f" id="app-search" placeholder="搜索包名…">' +
         '<div class="selbar">' +
           '<span id="selcount" class="pill accent">已选 0</span>' +
@@ -718,13 +820,13 @@ async function viewThread() {
           '<button class="btn btn-xs ghost" data-act="selclear">清空</button>' +
         '</div>' +
         '<div class="tplbar">' +
-          '<span class="tplbar-l">套用模板到所选：</span>' +
-          CLUSTER_OPTS.map(o => '<button class="btn btn-xs" data-act="batch" data-cl="' + o[0] + '">' + o[1] + '</button>').join('') +
+          '<span class="tplbar-l">套用到所选：</span>' +
+          TPL_OPTS.filter(o => o[0] !== 'auto').map(o => '<button class="btn btn-xs" data-act="batch" data-cl="' + o[0] + '">' + o[1] + '</button>').join('') +
+          '<button class="btn btn-xs ghost" data-act="batch" data-cl="auto">跟随艇长</button>' +
         '</div>' +
       '</div>' +
       '<div class="card" id="apps-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
-    '</div>' +
-    '<div class="g-foot">· <b>艇长已配</b>＝艇长已为应用定义线程；<b>自定义</b>＝你手动指定；<b>未接管</b>＝由艇长自动分配。勾选多个应用后，点上方模板可<b>批量套用</b>线程核位（小核/中核/大核/中小核/中+大/自动）。</div>';
+    '</div>';
 
   await refreshAether();
   if (!S.appsLoaded) { await loadApps(); }
@@ -754,36 +856,21 @@ function renderAetherCard(m) {
 }
 
 async function loadApps() {
-  try { const t = await Api.aetherapps(); S.apps = parseApps(t); S.appsLoaded = true; }
+  try { S.apps = parseApps(await Api.aetherapps()); S.appsLoaded = true; }
   catch (e) { S.apps = []; }
 }
+function appStatusOf(a) { return a.custom === '1' ? 'custom' : (a.defined === '1' ? 'builtin' : 'none'); }
 
-const CLUSTER_OPTS = [
-  ['auto', '自动（艇长）'],
-  ['0-3', '小核 0-3'],
-  ['4-7', '中核 4-7'],
-  ['8-9', '大核 8-9'],
-  ['0-7', '小+中 0-7'],
-  ['4-9', '中+大 4-9']
-];
-function appStatusOf(a) {
-  if (a.custom === '1') return 'custom';
-  if (a.defined === '1') return 'builtin';
-  return 'none';
-}
 function currentPkgs() {
   const kw = S.appsearch;
   return S.apps.filter(a => {
     const st = appStatusOf(a);
-    if (S.appfilter === 'builtin' && st !== 'builtin') return false;
-    if (S.appfilter === 'custom' && st !== 'custom') return false;
-    if (S.appfilter === 'none' && st !== 'none') return false;
-    if (S.appfilter === 'sys' && a.sys !== '1') return false;
-    if (S.appfilter === '3rd' && a.sys !== '0') return false;
+    if (S.appfilter !== 'all' && st !== S.appfilter) return false;
     if (kw && a.pkg.toLowerCase().indexOf(kw) < 0) return false;
     return true;
   });
 }
+
 function renderApps() {
   const card = document.getElementById('apps-card'); if (!card) return;
   const all = currentPkgs();
@@ -792,21 +879,17 @@ function renderApps() {
   const list = all.slice(0, S.showCount);
   if (!list.length) { card.innerHTML = '<div class="empty">没有匹配的应用</div>'; return; }
   card.innerHTML = list.map(a => {
-    const isSys = a.sys === '1';
-    const badge = isSys ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
+    const badge = a.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
     let statusPill, selVal, extra = '';
     if (a.custom === '1') {
-      statusPill = '<span class="pill accent">自定义</span>';
-      selVal = a.cluster;
+      statusPill = '<span class="pill accent">自定义</span>'; selVal = a.tpl;
       extra = '<button class="btn btn-xs ghost" data-act="aetherdel" data-pkg="' + esc(a.pkg) + '">恢复自动</button>';
     } else if (a.defined === '1') {
-      statusPill = '<span class="pill ok">艇长已配</span>';
-      selVal = a.cluster;
+      statusPill = '<span class="pill ok">艇长已配</span>'; selVal = a.tpl;
     } else {
-      statusPill = '<span class="pill">未接管</span>';
-      selVal = a.cluster || 'auto';
+      statusPill = '<span class="pill">未接管</span>'; selVal = a.tpl || '';
     }
-    const opts = CLUSTER_OPTS.map(o => '<option value="' + o[0] + '"' + (selVal === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
+    const opts = TPL_OPTS.map(o => '<option value="' + o[0] + '"' + (selVal === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
     const checked = S.sel.has(a.pkg) ? ' checked' : '';
     return '<div class="row app-row' + (S.sel.has(a.pkg) ? ' sel' : '') + '" data-pkg="' + esc(a.pkg) + '" style="display:block;padding:13px 15px">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
@@ -828,9 +911,9 @@ function updateSelCount() {
   if (el) el.textContent = '已选 ' + S.sel.size;
 }
 
-async function aetherSet(pkg, cluster) {
-  const r = await busy('设置中…', () => Api.aetherset(pkg, cluster));
-  showToast(/OK/.test(r) ? ('已设置 ' + pkg + ' → ' + cluster) : ('失败：' + r.slice(0, 60)));
+async function aetherSet(pkg, tpl) {
+  const r = await busy('设置中…', () => Api.aetherset(pkg, tpl));
+  showToast(/OK/.test(r) ? ('已设置 ' + pkg + ' → ' + tpl) : ('失败：' + r.slice(0, 60)));
   await loadApps(); await refreshAether(); renderApps();
 }
 async function aetherDel(pkg) {
@@ -839,14 +922,14 @@ async function aetherDel(pkg) {
   await loadApps(); await refreshAether(); renderApps();
 }
 
-async function batchApply(cluster) {
+async function batchApply(tpl) {
   const pkgs = currentPkgs().filter(a => S.sel.has(a.pkg)).map(a => a.pkg);
   if (!pkgs.length) { showToast('请先勾选应用'); return; }
-  const payload = pkgs.map(p => p + '\t' + cluster).join('\n');
+  const payload = pkgs.map(p => p + '\t' + tpl).join('\n');
   const b64 = b64enc(payload);
-  const r = await busy('批量套用中…', () => Api.aethersetbatch(b64));
+  const r = await busy('套用中…', () => Api.aethersetbatch(b64));
   if (/OK/.test(r)) {
-    showToast('已批量套用 ' + pkgs.length + ' 个应用 → ' + (cluster === 'auto' ? '自动' : cluster));
+    showToast('已套用 ' + pkgs.length + ' 个应用 → ' + tpl);
     S.sel.clear();
     await loadApps(); await refreshAether(); renderApps();
   } else {
@@ -857,16 +940,16 @@ async function batchApply(cluster) {
 /* ============================================================
    7) 渲染调度 + 页签（lint 要求：tabs 与视图一一对应）
    ============================================================ */
-const fn = { freq: viewFreq, thread: viewThread }[S.tab];
+const TABS = { freq: viewFreq, appfreq: viewAppFreq, thread: viewThread };
 
 function switchTab() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab));
-  const f = { freq: viewFreq, thread: viewThread }[S.tab];
+  const f = TABS[S.tab];
   if (f) f();
 }
 function render() {
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === S.tab));
-  const f = { freq: viewFreq, thread: viewThread }[S.tab];
+  const f = TABS[S.tab];
   if (f) f();
 }
 
@@ -874,27 +957,29 @@ function render() {
    8) 动作（lint 要求：data-act 全部在此实现）
    ============================================================ */
 const ACTIONS = {
-  reload: async () => { if (S.tab === 'freq') viewFreq(); else viewThread(); },
+  reload: async () => { const f = TABS[S.tab]; if (f) f(); },
   live: async () => {
     const r = await busy('下发频率…', () => Api.live());
     showToast(/OK/.test(r) ? '✅ 模块 QoS 频率已生效' : ('失败：' + r.slice(0, 60)));
   },
   scheme: () => openSchemeSheet(),
   // —— 频率档位：展开/收起 + 应用 + 恢复默认 ——
-  freqtoggle: async (b) => {
+  //  展开只是「看/改」，绝不切频率；只有点「应用」才切全局模式并下发。
+  freqtoggle: (b) => {
     const m = b.dataset.mode;
-    // 点标题 = 设为当前全局模式并展开查看
-    const r = await busy('切换模式…', () => Api.modeset(m));
-    showToast(/OK/.test(r) ? ('已切到 ' + (MODE_CN[m] || m)) : ('失败：' + r.slice(0, 60)));
-    await viewFreq();
     const el = document.getElementById('freqmode-' + m);
-    if (el) el.classList.add('on');
+    if (!el) return;
+    const open = el.classList.toggle('on');
+    const body = el.querySelector('.freqmode-body');
+    if (body) body.style.maxHeight = open ? (body.scrollHeight + 40) + 'px' : '0px';
   },
-  freqview: async (b) => {
+  freqview: (b) => {
     const m = b.dataset.mode;
     const el = document.getElementById('freqmode-' + m);
-    if (el) el.classList.add('on');
-    el && el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    if (!el) return;
+    el.classList.add('on');
+    const body = el.querySelector('.freqmode-body');
+    if (body) body.style.maxHeight = (body.scrollHeight + 40) + 'px';
   },
   freqsave: async (b) => {
     const m = b.dataset.mode;
@@ -902,44 +987,64 @@ const ACTIONS = {
     const b64 = b64enc(line);
     const r = await busy('保存中…', () => Api.freqsave(b64));
     showToast(/OK/.test(r) ? ('已保存 ' + (MODE_CN[m] || m) + ' 档位（未下发）') : ('失败：' + (r || '').slice(0, 60)));
-    await viewFreq();
   },
   freqapply: async (b) => {
     const m = b.dataset.mode;
     const line = collectTier(m);
     const b64 = b64enc(line);
-    const r = await busy('应用频率…', () => Api.freqedit(b64));
-    showToast(/OK/.test(r) ? ('已保存并应用 ' + (MODE_CN[m] || m) + ' 档位') : ('失败：' + (r || '').slice(0, 60)));
+    // 应用 = 存盘 + 切到该档 + 下发（用户要的「点击应用再切换」）
+    const r = await busy('应用中…', () => Api.frequse(m, b64));
+    showToast(/OK/.test(r) ? ('已应用并切到 ' + (MODE_CN[m] || m)) : ('失败：' + (r || '').slice(0, 60)));
     await viewFreq();
+    const el = document.getElementById('freqmode-' + m);
+    if (el) { el.classList.add('on'); const bd = el.querySelector('.freqmode-body'); if (bd) bd.style.maxHeight = (bd.scrollHeight + 40) + 'px'; }
   },
   freqreset: async (b) => {
     const m = b.dataset.mode;
-    // 用内置默认档位写回（清掉自定义）
+    // 用内置默认档位写回（清掉自定义）；只存盘，不切换、不下发
     const line = m + '\t' + DEFAULT_TIERS[m];
     const b64 = b64enc(line);
-    const r = await busy('恢复默认…', () => Api.freqedit(b64));
-    showToast(/OK/.test(r) ? ('已恢复 ' + (MODE_CN[m] || m) + ' 默认档位') : ('失败：' + (r || '').slice(0, 60)));
+    const r = await busy('恢复默认…', () => Api.freqsave(b64));
+    showToast(/OK/.test(r) ? ('已恢复 ' + (MODE_CN[m] || m) + ' 默认档位（未下发）') : ('失败：' + (r || '').slice(0, 60)));
     await viewFreq();
+    const el = document.getElementById('freqmode-' + m);
+    if (el) { el.classList.add('on'); const bd = el.querySelector('.freqmode-body'); if (bd) bd.style.maxHeight = (bd.scrollHeight + 40) + 'px'; }
   },
-  // —— 线程：批量套用 / 全选 / 清空 ——
+  // —— 线程分配：角色档套用 / 全选 / 清空 ——
   batch: async (b) => { await batchApply(b.dataset.cl); },
   selall: () => { currentPkgs().forEach(a => S.sel.add(a.pkg)); renderApps(); },
   selclear: () => { S.sel.clear(); renderApps(); },
-  loadmore: () => { S.showCount += 120; renderApps(); },
+  loadmore: () => { S.showCount += 40; renderApps(); },
   aetherswitch: async (b) => {
     const on = b.checked;
     const r = await busy(on ? '启用线程引擎…' : '停用线程引擎…', () => Api.aetherswitch(on ? 'on' : 'off'));
     showToast(/OK/.test(r) ? (on ? '✅ 已启用 Aether' : '已停用 Aether') : ('失败：' + r.slice(0, 60)));
     refreshAether();
   },
-  aetherdel: async (b) => { await aetherDel(b.dataset.pkg); }
+  aetherdel: async (b) => { await aetherDel(b.dataset.pkg); },
+  // —— 分应用频率：添加 / 删除 / 改档 / 加载更多 ——
+  appfreqadd: async (b) => {
+    const pkg = b.dataset.pkg;
+    const r = await busy('添加中…', () => Api.appfreqset(pkg, 'balance'));
+    showToast(/OK/.test(r) ? ('已添加 ' + pkg + ' → 流畅') : ('失败：' + (r || '').slice(0, 60)));
+    S.appSearch = ''; const si = document.getElementById('appfreq-search'); if (si) si.value = '';
+    await loadAppFreq(); renderAppFreq();
+  },
+  appfreqdel: async (b) => {
+    const pkg = b.dataset.pkg;
+    const r = await busy('移除中…', () => Api.appfreqdel(pkg));
+    showToast(/OK/.test(r) ? ('已移除 ' + pkg + ' 的分应用频率') : ('失败：' + (r || '').slice(0, 60)));
+    await loadAppFreq(); renderAppFreq();
+  },
+  appfreqmore: () => { S.appShow += 30; renderAppFreq(); }
 };
 
 // 内置默认频率档位（与 util.sh mode_freq 一致），用于「恢复默认」
+// v18.2：对齐 O3 实测能效（M 簇 1550MHz 以上纯浪费，中核上限收回实测值）
 const DEFAULT_TIERS = {
-  powersave: '417792 1728000 556800 1996800 1113600 2217600',
-  balance:   '417792 1939200 556800 2419200 1113600 2371200',
-  performance: '672000 2246400 835200 3148800 1497600 2860800',
+  powersave: '417792 1560000 556800 1651200 1113600 2169600',
+  balance:   '417792 1939200 556800 1968000 1113600 2371200',
+  performance: '672000 2246400 835200 2294400 1497600 2860800',
   fast:      '912000 3148800 1142400 3686400 2044800 4358400'
 };
 
@@ -974,13 +1079,6 @@ function openSchemeSheet() {
    9) 事件绑定 + 启动
    ============================================================ */
 document.addEventListener('click', async (e) => {
-  const flt = e.target.closest('[data-filter]');
-  if (flt) {
-    S.appfilter = flt.dataset.filter;
-    document.querySelectorAll('[data-filter]').forEach(b => b.classList.toggle('primary', b.dataset.filter === S.appfilter));
-    renderApps();
-    return;
-  }
   const act = e.target.closest('[data-act]');
   if (act) { const fn = ACTIONS[act.dataset.act]; if (fn) { await fn(act); return; } }
   if (e.target.closest('[data-scheme]')) return;
@@ -1004,10 +1102,20 @@ document.addEventListener('change', async (e) => {
     if (val === 'auto') { await aetherDel(pkg); } else { await aetherSet(pkg, val); }
     return;
   }
+  const af = e.target.closest('[data-appfreq]');
+  if (af) {
+    const pkg = af.dataset.appfreq; const val = af.value;
+    if (!val) { await ACTIONS.appfreqdel({ dataset: { pkg: pkg } }); return; }
+    const r = await busy('设置中…', () => Api.appfreqset(pkg, val));
+    showToast(/OK/.test(r) ? ('已设置 ' + pkg + ' → ' + (MODE_CN[val] || val)) : ('失败：' + (r || '').slice(0, 60)));
+    await loadAppFreq(); renderAppFreq();
+    return;
+  }
 });
 
 document.addEventListener('input', (e) => {
   if (e.target.id === 'app-search') { S.appsearch = e.target.value.trim().toLowerCase(); renderApps(); }
+  if (e.target.id === 'appfreq-search') { S.appSearch = e.target.value.trim().toLowerCase(); renderAppFreqHits(); }
 });
 
 window.addEventListener('scroll', () => {

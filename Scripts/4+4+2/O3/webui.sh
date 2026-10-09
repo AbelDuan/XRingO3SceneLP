@@ -252,6 +252,88 @@ cmd_freqedit() {
     echo "OK 频率档位已保存并应用（忽略 ${bad} 条非法）；当前模式 ${cm}"
 }
 
+# ---------- 频率档位：保存 + 切到该档 + 下发（「应用」按钮）----------
+cmd_frequse() {
+    local md="$1" b64="$2"
+    mode_valid "$md" || { echo "ERR 未知模式: $md"; return 1; }
+    local bad; bad=$(freq_write_tiers "$b64")
+    [ $? -eq 0 ] || { echo "ERR 保存失败"; return 1; }
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s' "$md" > "${STATE_DIR}/active_mode" 2>/dev/null
+    chmod 0666 "${STATE_DIR}/active_mode" 2>/dev/null
+    apply_mode_freq_bg "$md"
+    echo "OK 已切到 ${md} 并下发（忽略 ${bad} 条非法）"
+}
+
+# ---------- 分应用频率（每应用一个模式档，前台时生效）----------
+APP_FREQ_FILE="${WEBUI_DIR}/app_freq.tsv"
+
+cmd_appfreq() {
+    if [ -s "$APP_FREQ_FILE" ]; then
+        awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/ { print "AF_"$1"="$2 }' "$APP_FREQ_FILE" 2>/dev/null
+    fi
+    echo "AF_N=$(awk -F"\t" 'NF>=2 && $1!="" && $1!~/^#/' "$APP_FREQ_FILE" 2>/dev/null | wc -l | tr -d ' ')"
+}
+
+# 列出设备上的应用（复用艇长的 app 枚举；失败则退回 pm list packages）
+cmd_appfreqapps() {
+    local ctl="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
+    local out=""
+    [ -f "$ctl" ] && out=$(sh "$ctl" apps 2>/dev/null)
+    if [ -z "$out" ] && has pm; then
+        out=$(pm list packages 2>/dev/null | sed 's/^package://' | while IFS= read -r p; do
+            [ -n "$p" ] && printf 'APP=%s|0\n' "$p"
+        done)
+    fi
+    printf '%s\n' "$out"
+}
+
+cmd_appfreqset() {
+    local pkg="$1" md="$2"
+    [ -n "$pkg" ] || { echo "ERR 缺少包名"; return 1; }
+    mode_valid "$md" || { echo "ERR 未知模式: $md"; return 1; }
+    case "$pkg" in *[!A-Za-z0-9._:-]*) echo "ERR 包名非法"; return 1 ;; esac
+    mkdir -p "$WEBUI_DIR" 2>/dev/null
+    local tmp="${TMPD}/app_freq.new"
+    : > "$tmp"
+    if [ -s "$APP_FREQ_FILE" ]; then
+        awk -F'\t' -v P="$pkg" '!($1==P)' "$APP_FREQ_FILE" >> "$tmp" 2>/dev/null
+    fi
+    printf '%s\t%s\n' "$pkg" "$md" >> "$tmp"
+    cp -f "$tmp" "$APP_FREQ_FILE" 2>/dev/null; chmod 0666 "$APP_FREQ_FILE" 2>/dev/null; rm -f "$tmp"
+    echo "OK 已为 ${pkg} 设置 ${md}"
+}
+
+cmd_appfreqdel() {
+    local pkg="$1"
+    [ -n "$pkg" ] || { echo "ERR 缺少包名"; return 1; }
+    [ -s "$APP_FREQ_FILE" ] || { echo "OK 无此配置"; return 0; }
+    local tmp="${TMPD}/app_freq.new"
+    awk -F'\t' -v P="$pkg" '!($1==P)' "$APP_FREQ_FILE" > "$tmp" 2>/dev/null
+    cp -f "$tmp" "$APP_FREQ_FILE" 2>/dev/null; chmod 0666 "$APP_FREQ_FILE" 2>/dev/null; rm -f "$tmp"
+    # 若被删的正是当前前台覆盖档，立刻回落全局模式
+    local cm; cm=$(active_mode)
+    apply_mode_freq_bg "${cm:-balance}"
+    echo "OK 已移除 ${pkg}"
+}
+
+cmd_appfreqbatch() {
+    local src="$1"
+    [ -n "$src" ] || { echo "ERR 缺少输入"; return 1; }
+    has base64 || { echo "ERR 缺少 base64"; return 1; }
+    local tmp="${TMPD}/app_freq.b64"
+    printf '%s' "$src" > "$tmp"
+    local lines; lines=$(base64 -d "$tmp" 2>/dev/null)
+    rm -f "$tmp"
+    [ -n "$lines" ] || { echo "ERR 输入为空"; return 1; }
+    local n=0 p m
+    printf '%s\n' "$lines" | while IFS='	' read -r p m; do
+        [ -z "$p" ] && continue
+        cmd_appfreqset "$p" "$m" >/dev/null 2>&1 && n=$((n+1))
+    done
+    echo "OK 批量设置完成"
+}
+
 cmd_profilebackup() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" backup; }
 cmd_profilerestore() { shift; sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" restore "$1"; }
 cmd_profilelist() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" list; }
@@ -325,7 +407,9 @@ cmd_live() {
 }
 
 # ============================================================
-#  线程引擎（艇长 Aether）
+#  线程接管（艇长 Aether）—— 角色档 → 分进程五层策略
+#   ⚠ 不再暴露「应用→单核簇」：模板由 aether_ctl 的 tpl_cpuset 展开成
+#     主线程 / 最重线程 / 重线程 / 按线程名 comm 路由 / 其余 五层。
 # ============================================================
 cmd_aether() {
     sh "$AETHER_CTL" status 2>&1
@@ -363,12 +447,10 @@ EOF
     echo "OK 已写入并重载 Aether 配置（$(wc -c < "$raw" | tr -d ' ') B）"
 }
 
-# ---------- 应用级线程分配（读取本机有界面应用 + 艇长已定义 / 自定义 / 未分配）----------
-cmd_aetherapps() {
-    sh "$AETHER_CTL" apps 2>&1
-}
+# ---------- 应用级线程档位（角色档，不是单簇核位）----------
+cmd_aetherapps() { sh "$AETHER_CTL" apps 2>&1; }
 cmd_aetherset() {
-    [ -n "$2" ] || { echo "ERR 用法: aetherset <包名> <核位>"; return 1; }
+    [ -n "$2" ] || { echo "ERR 用法: aetherset <包名> <角色档>"; return 1; }
     sh "$AETHER_CTL" set "$2" "$3" 2>&1
 }
 cmd_aetherdel() {
@@ -376,13 +458,13 @@ cmd_aetherdel() {
     sh "$AETHER_CTL" del "$2" 2>&1
 }
 cmd_aethersetbatch() {
-    # 入参两种：① 标准输入 pkg<TAB>cluster（多行）；② 单个位置参数 base64(同上)
-    # cluster=auto 表示移除该包自定义
+    # 入参两种：① 标准输入 pkg<TAB>role（多行）；② 单个位置参数 base64(同上)
+    # role=auto 表示移除该包自定义
     if [ -n "$1" ]; then
         has base64 || { echo "ERR 缺少 base64"; return 1; }
         local d="${TMPD}/aetherbatch.b64"
         printf '%s' "$1" > "$d"
-        if base64 -d "$d" 2>/dev/null | sh "$AETHER_CTL" setbatch 2>&1; then :; fi
+        base64 -d "$d" 2>/dev/null | sh "$AETHER_CTL" setbatch 2>&1
     else
         sh "$AETHER_CTL" setbatch 2>&1
     fi
@@ -410,7 +492,13 @@ case "$1" in
   freqs)         cmd_freqs ;;
   freqview)      cmd_freqview ;;
   freqsave)      cmd_freqsave "$2" ;;
+  frequse)       cmd_frequse "$2" "$3" ;;
   freqedit)      cmd_freqedit "$2" ;;
+  appfreq)       cmd_appfreq ;;
+  appfreqapps)   cmd_appfreqapps ;;
+  appfreqset)    cmd_appfreqset "$2" "$3" ;;
+  appfreqdel)    cmd_appfreqdel "$2" ;;
+  appfreqbatch)  cmd_appfreqbatch "$2" ;;
   appmodes)      cmd_appmodes ;;
   setappmode)    shift; cmd_setappmode "$1" "$2" ;;
   fasxres)       cmd_fasxres ;;
