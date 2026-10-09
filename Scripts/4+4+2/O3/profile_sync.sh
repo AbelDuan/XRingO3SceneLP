@@ -10,9 +10,12 @@
 #
 #  ⚠ 「传递调度」到底在做什么 —— 四件事缺一不可（2026-09-16 设备实测定论）：
 #
-#    ① 停 Scene   先 `am force-stop`。运行中的 Scene 会做两件把我们成果冲掉的事：
+#    ① 停 Scene   先「plain kill」Scene 主进程（restart_scene_app，不是 am force-stop）。
+#                运行中的 Scene 会做两件把我们成果冲掉的事：
 #                 · 把内存里的偏好整份写回 shared_prefs/global.xml（改的开关会丢）
 #                 · 用自己的运行时格式重写 files/profile.json（43KB 配置被换成 8KB）
+#                plain kill 后 AMS 自动重绑无障碍、重启 Scene 并重读配置，代价远小于
+#                force-stop（后者会禁用该包无障碍服务 → Scene 直接失效）。
 #
 #    ② 灌文件     把 Config/4+4+2/O3/<scheme>/ 下的 profile.json / manifest.json /
 #                 _Apps.json / _Games.json / _Camera.json / _ELP.json / powercfg.sh
@@ -93,13 +96,6 @@ do_push() {
 
     ensure_scene_dir_perm
 
-    # ---- ⚠ 刻意**不** force-stop Scene（2026-09-16 调整）----
-    #  早先版本会先 `am force-stop` 再写，理由是「运行中的 Scene 会把偏好写回、
-    #  并重写 profile.json」。但那会**连带掉无障碍服务 → Scene 直接失效**，
-    #  代价太大。实测：只要两个开关本来就已经是对的值（SOURCE_SCENE_ONLINE /
-    #  dynamic_control=true —— 这是稳定态），直接写文件即可，Scene 会自己重读；
-    #  写入后我们会读回 md5 复核，真被回写了会明确报出来。
-    #  开关只有在「确实不对」时才写（首次启用那种一次性场景）。
     # ---- ① 灌文件 ----
     #  ⚠ manifest.json **必须**跟着灌，而且必须是**我们的**身份（SCENE9 / LP / versionCode）。
     #    它就是 Scene 眼里「当前启用的这套配置」的身份，先在调节页被显示出来。
@@ -109,9 +105,20 @@ do_push() {
       ''|*[!0-9]*) echo "ERR 同步失败（sync_scheme 未返回文件数）"; return 1 ;;
     esac
 
-    # ---- ② 启用配置：来源通道 + 「性能调节」总开关（★ v17.7 强制）----
-    #  「传递调度」= 强制传递 + 强制启用：写一次若被运行中的 Scene 写回，就再写一次；
-    #  两次都不到位则本函数返回非 0，让 WebUI 明确报错，而不是「成功 + 一行警告」。
+    # ---- ② 让 Scene 重读新灌的文件 + 过完启动提交期，再写启用开关 ----
+    #  ⚠⚠ 关键时序（2026-10-09 真机定位）：Scene 在**进程启动那一刻**会把内存偏好整份
+    #    写回 global.xml，把 scene_profile_source / dynamic_control 全冲掉 → 表现就是
+    #    「Scene 仍是自定义模式、无法启用」。所以**绝不能先杀再写**（写完后 Scene 一重启
+    #    又抹掉）。正确顺序：先重启 Scene（kill + am start），等它读到新文件并过完启动提交
+    #    （wait_scene_up），**之后**再写启用开关 —— 此时 Scene 已过了启动提交期，值留得住。
+    #  ⚠ 用 plain kill（不 force-stop，保无障碍）+ 显式 am start 拉起：本机实测 kill 后
+    #    无障碍不会自动重绑，必须显式拉起 Activity。
+    restart_scene_app >/dev/null 2>&1
+    am start -n com.omarea.vtools/.activities.ActivityMain >/dev/null 2>&1
+    wait_scene_up 15 || log_quiet "profile: Scene 未拉起（仅文件层就绪，需用户手动开 Scene）"
+
+    # ---- ③ 启用配置：来源通道 + 「性能调节」总开关（★ v17.7 强制）----
+    #  Scene 已 settle，现在写的值不会再被启动提交冲掉；写两次兜底。
     local src_out dyn_out src_ok="" dyn_ok="" try
     for try in 1 2; do
         src_out=$(scene_source_set "$SCENE_SOURCE_WANT" 2>&1)
@@ -147,13 +154,13 @@ do_push() {
         dir_x_ok "$SCENE_DIR" || { echo "ERR Scene files 目录缺执行位"; return 1; }
     fi
 
-    # ---- ③ 让 scene-daemon 重读配置（不碰 Scene 进程）----
-    #  实测 scene-daemon 被 kill 后由 Scene 自身在 4~8 秒内自动拉起并重读配置；
-    #  它只是个后台调度进程，杀掉不影响 Scene 界面与无障碍服务。
+    # ---- ④ 让 scene-daemon 重读线程配置 ----
+    #  ⚠ 只重启 scene-daemon（调度进程），**绝不**再杀 Scene 主进程 —— 否则刚写好的
+    #    启用开关会被 Scene 启动提交冲掉（见 ②）。scene-daemon 与启用开关无关。
     restart_scene_daemon >/dev/null 2>&1 || pkill -f scene-daemon 2>/dev/null
-    sleep 3
+    sleep 2
 
-    # ---- ④ 端到端复核：身份 / 开关 / 文件有没有被 Scene 改回去 ----
+    # ---- ⑤ 端到端复核：身份 / 开关 / 文件有没有被 Scene 改回去 ----
     local idv ida src_now mf_ok="" pf_ok=""
     idv=$(sed -n 's/.*"version"[ ]*:[ ]*"\([^"]*\)".*/\1/p' "${SCENE_DIR}/manifest.json" 2>/dev/null | head -1)
     ida=$(sed -n 's/.*"author"[ ]*:[ ]*"\([^"]*\)".*/\1/p' "${SCENE_DIR}/manifest.json" 2>/dev/null | head -1)

@@ -306,9 +306,12 @@ ensure_scene_dir_perm() {
 #    实测结果：调节页显示「Scene / 🌍 Version: LP 20260916」，性能调节保持开启，
 #    manifest 与 profile 的 md5 与模块源完全一致（没有被 Scene 覆盖）。
 #
-#  ⚠ 写入顺序铁律：**先 am force-stop Scene** 再改这两个键。
-#    运行中的 Scene 会把内存里的偏好整份写回 global.xml，我们改的值会被冲掉；
-#    同时它还会用自己的格式重写 profile.json。停掉 → 写 → 再启动，才留得住。
+#  ⚠ 写入时机铁律（2026-10-09 真机定位）：Scene 在**进程启动那一刻**会把内存偏好
+#    整份写回 global.xml，把这两个键冲掉 —— 这正是「Scene 打开后还是自定义、无法启用」
+#    的根因。**绝不能「先杀再写」**：那样写完后 Scene 一重启又把开关抹掉。
+#    正确顺序（见 profile_sync.sh do_push ②）：先重启 Scene 让它读完新文件 + 过完启动
+#    提交期（wait_scene_up），**之后**再写这两个键，值才能稳定保留。Scene 正常运行期
+#    不会改写这两个键，只有启动那一刻会。
 # ============================================================
 SCENE_GLOBAL_XML="/data/data/${SCENE_PKG}/shared_prefs/global.xml"
 SCENE_SOURCE_KEY="scene_profile_source"
@@ -439,6 +442,37 @@ restart_scene_daemon() {
     fi
     log "util: daemon 已重启 before=[$before] after=[$after]"
     printf '%s' "${after%% *}"
+}
+
+# 让 Scene 重新读取配置（杀主进程，而非 force-stop）
+# ⚠ 必须用 plain kill，**不能** am force-stop：force-stop 会被 Android 禁用该包的
+#    无障碍服务（Scene 调节依赖它），代价太大。plain kill 后 AMS 会自动重绑无障碍，
+#    且重启后的 Scene 会重读 global.xml —— 我们写入的启用开关才能真生效。
+#    运行中的 Scene 若不杀，会把内存里旧偏好写回 global.xml，冲掉我们改的值。
+restart_scene_app() {
+    local p
+    for p in $(pidof "$SCENE_PKG" 2>/dev/null); do
+        kill -9 "$p" 2>/dev/null
+    done
+    return 0
+}
+
+# 等 Scene 进程重新起来并「settle」（启动期 global.xml 提交完成）。
+# 返回 0 = 在 max 秒内看到进程且已过提交期；1 = 没拉起来。
+# ⚠ 为什么要等：Scene 在**进程启动那一刻**会把内存偏好整份写回 global.xml，
+#    把我们的启用开关冲掉。所以写完文件后必须等它起到位 + 过完启动提交期，
+#    再写启用开关，值才留得住（详见 profile_sync.sh do_push 的 ②）。
+wait_scene_up() {
+    local max="${1:-15}" i=0
+    while [ $i -lt "$max" ]; do
+        sleep 1
+        if pidof "$SCENE_PKG" >/dev/null 2>&1; then
+            sleep 2          # 给启动期提交留时间
+            return 0
+        fi
+        i=$((i+1))
+    done
+    return 1
 }
 
 # ---------- 采纳当前状态为新基准 ----------

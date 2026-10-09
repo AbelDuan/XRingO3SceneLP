@@ -76,6 +76,8 @@ def crlf_check(paths):
                 d = fh.read()
         except OSError:
             continue
+        if b"\x00" in d:   # 二进制（ELF / 可执行体等，如 aether-optext）—— 字节里偶发的 \r\n 是噪声，不检查
+            continue
         if b"\r\n" in d:
             bad.append((rel, d.count(b"\r\n")))
     return bad

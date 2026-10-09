@@ -116,73 +116,23 @@ fi
 #    若从旧版升级，顺手清掉它们。
 rm -f "${STATE_DIR}/locked" "${STATE_DIR}/unlocked" 2>/dev/null
 
-# ---------- WebUI 种子 ----------
-chmod 0755 "$MODPATH/Scripts/4+4+2/O3/webui.sh" 2>/dev/null
-# 事件驱动辅助是**编译好的 ELF**，必须可执行才能被 service.sh 拉起。
-# 虽然上面 set_perm_recursive 已覆盖 Scripts/（0755），这里显式再来一次 ——
-# 靠"压缩包里的权限位 + 合并时保留"是脆的（chmod 一次几乎零成本，失败也没副作用）。
-chmod 0755 "$MODPATH/Scripts/4+4+2/O3/pinwatch" 2>/dev/null
-
-# 1) 页面模型（内置模板 + 应用归类 + 游戏规则）
-if [ ! -f "${STATE_DIR}/webui/model.json" ] && [ -f "$MODPATH/Config/webui_model.seed.json" ]; then
-    cp -f "$MODPATH/Config/webui_model.seed.json" "${STATE_DIR}/webui/model.json"
-    chmod 0666 "${STATE_DIR}/webui/model.json" 2>/dev/null
-    ui_print "- WebUI 模型已初始化"
+# ---------- 艇长线程引擎（Aether）：部署二进制 + 展开拓扑配置 ----------
+ui_print " "
+ui_print "---------- 线程引擎（艇长 Aether）----------"
+chmod 0755 "$MODPATH/Scripts/4+4+2/O3/aether/aether_ctl.sh" 2>/dev/null
+chmod 0755 "$MODPATH/Scripts/4+4+2/O3/aether/aether-optext" 2>/dev/null
+# 默认开启艇长线程引擎（用户要求：线程核心分配直接用艇长的方案）
+if [ ! -f "${STATE_DIR}/aether.on" ]; then
+    touch "${STATE_DIR}/aether.on" 2>/dev/null
+    ui_print "- 默认启用艇长线程引擎"
+else
+    ui_print "- 保留原设置：艇长线程引擎 $([ -f "${STATE_DIR}/aether.on" ] && echo 开 || echo 关)"
 fi
-
-# 2) 线程档位表（app_templates.tsv / game_templates.tsv）
-#
-#    ⚠ 这两个表由 lib/util.sh 的 seed_app_templates() / seed_game_templates()
-#      **唯一维护**。早期版本在 Config/ 下另存了一份种子文件，两份内容会各自
-#      漂移 —— v9 就出现过「包内是新的、设备上是旧的」而没人发现。那个种子
-#      文件已删除，这里直接调函数。
-#    ⚠ 两个 seed 函数都有「文件已存在则直接返回」的保护，不会覆盖你改过的档位表。
-seed_app_templates
-seed_game_templates
-_rdy=""
-for _t in app_templates.tsv game_templates.tsv; do
-    if [ -f "${STATE_DIR}/webui/$_t" ]; then
-        chmod 0666 "${STATE_DIR}/webui/$_t" 2>/dev/null
-        _rdy="$_rdy $_t"
-    fi
-done
-[ -n "$_rdy" ] && ui_print "- 线程档位表已就绪：${_rdy# }"
-
-if [ -f "$MODPATH/Config/game_assign.tsv" ]; then
-    # ⚠ 原设计是「游戏默认不套任何档位」、种子只留表头。
-    #   ★ 2026-09-18 按用户要求改为**预置他自己固化的分配**（Config/game_assign.tsv，
-    #     由设备现状导出）。仍然只在「文件不存在」时落地，不覆盖已装设备的选择。
-    if [ ! -f "${STATE_DIR}/webui/game_assign.tsv" ]; then
-        cp -f "$MODPATH/Config/game_assign.tsv" "${STATE_DIR}/webui/game_assign.tsv"
-        ui_print "- 游戏档位分配：默认留空（由你在 WebUI 里勾选套用）"
-    else
-        # 升级路径：清掉指向「已不存在的档位 id」的僵尸条目
-        # （档位 id 在各版本间变过：tpl_moba/tpl_unity → unity/default → powersave/balance/…）
-        _ga="${STATE_DIR}/webui/game_assign.tsv"
-        _gt="${STATE_DIR}/webui/game_templates.tsv"
-        if [ -s "$_gt" ]; then
-            cp -f "$_ga" "${TMPD}/ga.old" 2>/dev/null
-            awk -F'\t' -v TPL="$_gt" '
-              BEGIN { while ((getline l < TPL) > 0) { if (l == "" || l ~ /^#/) continue; n=split(l,a,"\t"); if (n>=2) ok[a[1]]=1 } close(TPL) }
-              /^#/ { print; next }
-              NF>=2 && $2 != "" && ($2 in ok) { print; next }
-              NF>=2 { dropped++ }
-              END { if (dropped) print "# 已清除 " dropped " 条无效分配（模板已不存在）" > "/dev/stderr" }
-            ' "${TMPD}/ga.old" > "$_ga" 2>/dev/null
-            chmod 0666 "$_ga" 2>/dev/null
-        fi
-    fi
-    chmod 0666 "${STATE_DIR}/webui/game_assign.tsv" 2>/dev/null
-fi
-
-# APP 档位分配种子（★ 2026-09-18 按用户要求新增：把设备现状固化为新装默认）
-#   同样只在缺失时落地 —— 已装设备在 STATE_DIR 里已有的分配不会被覆盖。
-if [ -f "$MODPATH/Config/app_assign.tsv" ]; then
-    if [ ! -f "${STATE_DIR}/webui/app_assign.tsv" ]; then
-        cp -f "$MODPATH/Config/app_assign.tsv" "${STATE_DIR}/webui/app_assign.tsv"
-        ui_print "- APP 档位分配：已预置 $(($(wc -l < "$MODPATH/Config/app_assign.tsv") - 1)) 条"
-    fi
-    chmod 0666 "${STATE_DIR}/webui/app_assign.tsv" 2>/dev/null
+# 按本机拓扑把语义占位符展开 → /sdcard/Android/Aether/threads.json
+if sh "$MODPATH/Scripts/4+4+2/O3/aether/aether_ctl.sh" deploy 2>&1; then
+    ui_print "- 艇长线程配置已按本机拓扑部署"
+else
+    ui_print "- ⚠ 艇长线程配置部署失败（见上方原因）"
 fi
 
 # ---------- 把模块内置的全部配置文件同步进 Scene（替换原文件 + 修正确权限）----------
@@ -454,14 +404,10 @@ if [ -d "$SCENE_DIR" ]; then
         fi
     fi
 
-    # d) 按 Scene 的「应用→模式」表生成线程分配
-    ui_print "- $(gen_threads_from_scene 2>&1 | tail -1)"
-    echo "$(md5of "$SCENE_POWERCFG")/$(md5of "$SCENE_GAMES_XML")" > "${STATE_DIR}/scene.hash"
-    # 落一个「输入已处理」标记：守护用 mtime（-nt）判断要不要重建线程分配，
-    # 有这个标记装完就不会再多跑一轮无意义的重建。
-    touch "${STATE_DIR}/scene.mark" 2>/dev/null
+    # d) 线程分配交给艇长的 aether-optext（service.sh 拉起），本步骤不再生成。
+    ui_print "- 线程分配：已交由艇长引擎（Aether）处理"
 else
-    ui_print "⚠ Scene 尚未启动过，配置将在首次开机由 service.sh 处理"
+    ui_print "⚠ Scene 尚未启动过，频率配置将在首次开机由 service.sh 处理"
 fi
 
 # ---------- 自我保护：把 KSU 的「待重启生效」就地做掉（本机不能重启）----------
@@ -640,13 +586,12 @@ ui_print "  （日志：/data/adb/SceneO3Tuner/fix_pending.log）"
 
 ui_print " "
 ui_print "✅ 安装完成"
-ui_print "ℹ 分工：线程档位 = 本模块 cgroup 分组落核（WebUI「应用 / 游戏」页）"
-ui_print "         CPU 频率 = Scene 按模式下发（WebUI「模式」页图形化编辑）"
-ui_print "👉 模块 WebUI = 概览 / 模式 / 应用 / 游戏 / 日志"
-ui_print "👉 配置不加锁：Scene 内所有设置（含小齿轮里的特性）都可自由调整"
-ui_print "👉 Scene 的「核心分配」保持关闭 —— 它的组级预算会把各档位压平成同一个核位"
-ui_print "👉 辅助调速器（应用 + 游戏）保持开启 —— 相机已在 _Camera.json 里单独豁免"
-ui_print "👉 FAS 调速器统一为 O3 支持的 xres（与「CPU 控制」页、各模式 preset 三处一致）"
-ui_print "   详见 Config/.../features/{fas,limiter}.conf 的注释"
+ui_print "ℹ 玄戒O3 调度工具箱 = 两块"
+ui_print "   ① CPU 频率 —— WebUI 配置，同步给 Scene，由 Scene 下发"
+ui_print "   ② 线程分配 —— 艇长(Aether)引擎，WebUI 可开关与自定义"
+ui_print "👉 模块 WebUI = 频率 / 线程 两大块"
+ui_print "👉 线程引擎默认开启（艇长的方案）；如需关闭在 WebUI「线程」页翻开关"
+ui_print "👉 Scene 的「核心分配」保持关闭 —— 线程完全由 Aether 接管，避免两套打架"
+ui_print "👉 辅助调速器（应用 + 游戏）保持开启；FAS 调速器统一为 xres"
 ui_print " "
-ui_print "ℹ 模块 Config 里的文件是备份副本，需要时可从 WebUI 显式施加"
+ui_print "ℹ 模块 Config 里的频率文件是备份副本，需要时可从 WebUI 显式施加"

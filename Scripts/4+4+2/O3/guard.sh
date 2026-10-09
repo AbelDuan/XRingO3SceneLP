@@ -33,6 +33,19 @@ QOS_CLEARED="${STATE_DIR}/qos_cleared"
 
 log "🛡 守护启动（亮屏 ${INTERVAL}s / 息屏 $((INTERVAL*6))s；同步线程分配 + 落核，不锁定配置）"
 
+# ── 单例保护 ───────────────────────────────────────────────
+#  service.sh 可能在开机 / `ksud services` 重跑时多次执行，若每次都拉起一个 guard，
+#  会出现多实例抢写 Scene 配置、互相打架。这里用 pidfile 去重：已有存活实例就退出。
+GUARD_PIDFILE="${STATE_DIR}/guard.pid"
+if [ -f "$GUARD_PIDFILE" ]; then
+    old=$(cat "$GUARD_PIDFILE" 2>/dev/null)
+    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+        log "· 守护已在运行（pid $old），跳过重复拉起"
+        exit 0
+    fi
+fi
+echo $$ > "$GUARD_PIDFILE" 2>/dev/null
+
 # 亮屏=1 / 息屏=0：所有背光都为 0 视为息屏
 screen_on() {
     local f v
@@ -127,6 +140,18 @@ while :; do
 
     # 每轮重读开关（内建 read，不起子进程）：日志开关/频率开关改了立刻生效
     settings_load
+
+    # ---- Scene 启用开关看护（与 profile_sync.sh do_push ② 配合）----
+    #  ⚠ Scene 每次（重新）启动都会把 global.xml 的 scene_profile_source /
+    #    dynamic_control 冲掉（回到「未启用」），正是「性能调节打不开」的根因。
+    #    do_push 负责首次启用；这里负责长期维持：只要 Scene 活着且开关不对就重写，
+    #    Scene 任意一次重启后 ≤5s 自愈（仅做轻量 sed，不起额外进程）。
+    if pidof "$SCENE_PKG" >/dev/null 2>&1; then
+        if [ "$(scene_source_get)" != "$SCENE_SOURCE_WANT" ] || [ "$(scene_dyn_get)" != "true" ]; then
+            scene_source_set "$SCENE_SOURCE_WANT" >/dev/null 2>&1
+            scene_dyn_set true >/dev/null 2>&1
+        fi
+    fi
 
     # 每 24 轮（≈120s）刷新模块卡片描述（内容没变就不落盘）
     [ $(( ROUND % 24 )) -eq 1 ] && update_module_desc >/dev/null 2>&1
