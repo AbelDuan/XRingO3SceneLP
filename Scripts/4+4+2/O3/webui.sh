@@ -448,6 +448,119 @@ cmd_live() {
     echo "OK 频率配置下发中（模式 ${m}）"
 }
 
+# 自愈：若调度守护没在跑，由 WebUI/action 打开时拉起它（免重启）。
+#  判定与 guard.sh 单例一致：仅当 /proc/$pid/cmdline 含 guard.sh 才算活着，
+#  避免陈旧 pidfile + pid 回收复用造成的「假已运行」。
+cmd_ensureguard() {
+    local pf="${STATE_DIR}/guard.pid" pid="" alive=0
+    [ -f "$pf" ] && pid=$(cat "$pf" 2>/dev/null)
+    if [ -n "$pid" ] && [ -r "/proc/$pid/cmdline" ] && case "$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)" in *guard.sh*) ;; *) false ;; esac; then
+        alive=1
+    else
+        # 再兜底扫一遍进程表，防止 pidfile 丢失但进程还在
+        for d in /proc/[0-9]*; do
+            [ -r "$d/cmdline" ] || continue
+            case "$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)" in
+                *guard.sh*) alive=1; pid="${d#/proc/}"; break ;;
+            esac
+        done
+    fi
+    if [ "$alive" = "1" ]; then
+        echo "OK 守护已在运行（pid $pid）"
+        return 0
+    fi
+    local g="$MODDIR/Scripts/4+4+2/O3/guard.sh"
+    [ -f "$g" ] || { echo "ERR 找不到 guard.sh"; return 1; }
+    nohup sh "$g" </dev/null >> "$LOG_FILE" 2>&1 &
+    sleep 1
+    echo "OK 已重新拉起调度守护（pid $!）"
+}
+
+# 应用元信息兜底（当 WebUI 桥没有 getPackagesInfo 时）：
+#   输出 PKG=<pkg>\t<label>\t<sys(1/0)>。label 用兄弟模块自带 aapt 解析 APK 的
+#   application-label；没有 aapt / 解析失败则回退包名。系统/第三方以 pm path 落在
+#   /system|/vendor|/product|/system_ext 判定。
+PKGINFO_AAPT=""
+for _pa in /data/adb/modules/Hyper_MagicWindow/common/utils/aapt /data/adb/modules/*/common/utils/aapt; do
+    [ -x "$_pa" ] && { PKGINFO_AAPT="$_pa"; break; }
+done
+cmd_pkginfo() {
+    local pkgs="$1"; [ -n "$pkgs" ] || { echo "ERR 缺少包名列表"; return 1; }
+    echo "$pkgs" | while IFS= read -r pkg; do
+        [ -z "$pkg" ] && continue
+        local apk label sys=0
+        apk=$(pm path "$pkg" 2>/dev/null | head -1 | sed 's/package://')
+        case "$apk" in
+            /system/*|/vendor/*|/product/*|/system_ext/*|/odm/*) sys=1 ;;
+        esac
+        label="$pkg"
+        if [ -n "$PKGINFO_AAPT" ] && [ -n "$apk" ]; then
+            local l; l=$("$PKGINFO_AAPT" d badging "$apk" 2>/dev/null | grep -m1 "^application-label:" | sed "s/^application-label:'//;s/'$//")
+            [ -n "$l" ] && label="$l"
+        fi
+        echo "PKG=${pkg}	${label}	${sys}"
+    done
+}
+
+# 取某簇「最接近目标频率、且不超过目标」的可用档位（目标用于省电上限）。
+#   $1=可用档位(空格分隔,升序)  $2=目标Hz  →  返回 ≤目标 的最高档；若全超目标则返回最低档。
+nearest_le() {
+    local steps="$1" t="$2" best="" b=0
+    for s in $steps; do
+        [ -z "$best" ] && best="$s"
+        if [ "$s" -le "$t" ]; then best="$s"; fi
+    done
+    echo "$best"
+}
+# 取某簇「绝对最接近目标」的可用档位（大核用：档位稀疏，2G 附近只有 2.04G 一档，
+# 若强行取 ≤2G 会掉到 1.49G，反而把大核压死）。
+nearest_abs() {
+    local steps="$1" t="$2" best="" bd=999999999
+    for s in $steps; do
+        local d=$(( s > t ? s - t : t - s ))
+        if [ "$d" -lt "$bd" ]; then bd="$d"; best="$s"; fi
+    done
+    echo "$best"
+}
+
+# 省电默认：把「省电模式」的预设频率按本机可用档位对齐到
+#   小核/中核 ≈1.5~1.6GHz、大核 ≈2.0GHz 附近（取 ≤目标 的最高可用档），
+#   并把全局默认模式设为 powersave、立即下发。
+#   说明：玄戒O3 的能效点目前没有公开的逐频功耗表，最接近「能效行」的可行取法就是
+#   「落到目标上限以下的最高可用档位」——既压住峰值功耗，又不至于卡在低能效的极低频。
+cmd_powersave_default() {
+    # 可用档位（缺则退回内置）
+    local sL sM sP
+    sL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)
+    sM=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)
+    sP=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null)
+    [ -z "$sL" ] && sL="417792 556800 835200 1113600 1497600 1939200 2246400 3148800"
+    [ -z "$sM" ] && sM="$sL"
+    [ -z "$sP" ] && sP="$sL"
+    local lmax mmax pmax
+    # 小核：≤1.56G 的最高档（实测 1.5G 档即 1497600，能效区）
+    lmax=$(nearest_le "$sL" 1560000); [ -z "$lmax" ] && lmax=$(echo $sL | awk '{print $1}')
+    # 中核：≤1.55G 的最高档。O3 实测「中核 1550MHz 以上纯浪费」，故硬顶在 1.55G，
+    #       本机档位落到 1468800（1.47G）。
+    mmax=$(nearest_le "$sM" 1550000); [ -z "$mmax" ] && mmax=$(echo $sM | awk '{print $1}')
+    # 大核：取最接近 2.0G 的档。本机 2G 附近只有 2044800 一档，用绝对最近避免掉到 1.49G。
+    pmax=$(nearest_abs "$sP" 2000000); [ -z "$pmax" ] && pmax=$(echo $sP | awk '{print $1}')
+    # 下限用各簇 stock 地板（放开低频睡眠），上限即上面的省电上限。
+    # freq_write_tiers 的入参是 base64；传空串则从 stdin 读明文（每行 mode<TAB>六值）。
+    local bad rc
+    bad=$(freq_write_tiers "" <<EOF
+powersave	417792 ${lmax} 556800 ${mmax} 1113600 ${pmax}
+EOF
+)
+    rc=$?
+    [ "$rc" -eq 0 ] || { echo "ERR 写入省电档失败（freq_write_tiers rc=$rc）"; return 1; }
+    mkdir -p "$STATE_DIR" 2>/dev/null
+    printf '%s' "powersave" > "${STATE_DIR}/active_mode" 2>/dev/null
+    chmod 0666 "${STATE_DIR}/active_mode" 2>/dev/null
+    apply_mode_freq_bg "powersave"
+    echo "OK 已将省电档设为默认（小≤${lmax} 中≤${mmax} 大≤${pmax}）并立即下发"
+}
+
 # ============================================================
 #  线程接管（艇长 Aether）—— 角色档 → 分进程五层策略
 #   ⚠ 不再暴露「应用→单核簇」：模板由 aether_ctl 的 tpl_cpuset 展开成
@@ -550,6 +663,9 @@ case "$1" in
   apps)          cmd_apps ;;
   ksufix)        cmd_ksufix ;;
   live)          cmd_live ;;
+  ensureguard)   cmd_ensureguard ;;
+  powersave_default) cmd_powersave_default ;;
+  pkginfo)       cmd_pkginfo "$2" ;;
   aether)        cmd_aether ;;
   aetherswitch)  cmd_aetherswitch "$2" ;;
   aetherfeat)    cmd_aetherfeat "$2" "$3" "$4" ;;

@@ -109,6 +109,8 @@ def main():
           documentElement: mkEl('html'),
         };
         global.window = global;
+        global.addEventListener = function(){};
+        global.removeEventListener = function(){};
         global.location = { href: 'http://x/', search: '', hash: '' };
         global.navigator = { userAgent: 'node' };
         global.localStorage = { getItem(){ return null; }, setItem(){}, removeItem(){} };

@@ -90,6 +90,15 @@ header.scrolled { border-bottom-color: var(--line); }
   background: var(--chip-bg); padding: 2px 8px; border-radius: 99px;
 }
 .h-chips { margin-left: auto; display: flex; align-items: center; gap: 6px; }
+/* 顶部刷新按钮：背景与「应用」主按钮保持一致 */
+.h-btn {
+  width: 27px; height: 27px; flex: none; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 0; border-radius: 9px; cursor: pointer;
+  background: var(--accent); color: #fff;
+  transition: transform .12s, opacity .12s;
+}
+.h-btn:active { transform: scale(.94); opacity: .86; }
 
 .h-sub {
   display: flex; align-items: center; gap: 6px;
@@ -295,17 +304,35 @@ textarea.f { resize: vertical; line-height: 1.5; }
 .winmore { padding: 11px 16px; text-align: center; color: var(--sub); font-size: 12.5px; }
 .winmore.loading { color: var(--accent); }
 
+/* ---------- 应用行：图标 + 名称 + 包名 + 标签 ---------- */
+.app-row .ai {
+  width: 34px; height: 34px; border-radius: 9px; flex: none;
+  object-fit: cover; background: rgba(140,150,170,.18);
+}
+.app-row .ai.letter {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 15px; font-weight: 700; color: #fff; background: var(--accent);
+}
+.app-row .app-main { min-width: 0; flex: 1; }
+.app-row .app-name { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-row .app-pkg { font-size: 11.5px; color: var(--sub); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.app-row .ai-wrap { width: 34px; height: 34px; flex: none; }
+.app-row .tagrow { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.selcount { font-size: 12.5px; color: var(--sub); margin-right: 2px; }
+
 /* ---------- Toast ---------- */
 #toast {
-  position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom, 0px));
-  transform: translate(-50%, 14px); z-index: 90;
+  position: fixed; left: 0; right: 0; bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+  margin: 0 auto; width: -webkit-fit-content; width: fit-content;
+  z-index: 90;
   max-width: 84vw; padding: 11px 18px; border-radius: 13px;
   background: rgba(20, 21, 26, .94); color: #fff;
   font-size: 13.5px; line-height: 1.45; text-align: center;
-  opacity: 0; pointer-events: none; transition: opacity .2s, transform .2s;
+  opacity: 0; pointer-events: none; transition: opacity .18s ease;
+  will-change: opacity;
 }
 @media (prefers-color-scheme: dark) { #toast { background: rgba(240, 241, 245, .96); color: #101114; } }
-#toast.on { opacity: 1; transform: translate(-50%, 0); }
+#toast.on { opacity: 1; }
 
 /* ---------- 加载指示 ---------- */
 .spin {
@@ -324,9 +351,9 @@ textarea.f { resize: vertical; line-height: 1.5; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">18.2</span>
+    <span class="h-ver" id="ver">18.2.4</span>
     <div class="h-chips">
-      <button class="btn btn-xs primary" id="conn-chip" data-act="live" title="按当前全局模式重新下发模块 QoS 频率">应用频率</button>
+      <button class="btn btn-xs primary" id="conn-chip" data-act="apply" title="保存当前页所有变更并应用">应用</button>
       <button class="h-btn" id="hrefresh" data-act="reload" title="重新读取" aria-label="重新读取">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 4v7h-7"/></svg>
       </button>
@@ -439,7 +466,79 @@ const Bridge = {
       default: return Demo.exec(cmd);
     }
   },
-  toast(m) { try { if (this.has('toast')) { this.K.toast(String(m)); return true; } } catch (e) { } return false; }
+  toast(m) { try { if (this.has('toast')) { this.K.toast(String(m)); return true; } } catch (e) { } return false; },
+  // 批量取应用元信息（label / 是否系统 / 图标 URL）。
+  //   优先用 KSU 官方桥 Api.getPackagesInfo（直接给 appLabel，图标走 ksu://icon）；
+  //   仅在 official 形状且方法存在时走这条路，其它形状/无方法则回退后端 aapt 兜底。
+  async pkgInfo(pkgs) {
+    const list = pkgs.filter(Boolean);
+    if (!list.length) return {};
+    const norm = (raw) => {
+      // KernelSU 官方桥 getPackagesInfo 可能回 JSON 字符串，也可能回数组
+      let arr = raw;
+      if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch (e) { arr = null; } }
+      if (!Array.isArray(arr)) return null;
+      const m = {};
+      arr.forEach(it => {
+        if (!it || !it.packageName) return;
+        m[it.packageName] = {
+          label: it.appLabel || it.packageName,
+          sys: it.isSystem ? 1 : 0,
+          icon: 'ksu://icon/' + it.packageName
+        };
+      });
+      return m;
+    };
+    if (this.execMode === 'official' && this.has('getPackagesInfo')) {
+      try {
+        // 优先回调式（官方签名 getPackagesInfo(pkgs, cb)）；失败再试 Promise 式
+        const raw = await new Promise((res, rej) => {
+          let settled = false;
+          const fin = (v) => { if (!settled) { settled = true; res(v); } };
+          try {
+            const r = this.K.getPackagesInfo(list, (v) => fin(v));
+            if (r && typeof r.then === 'function') r.then(fin, rej);
+            else if (r !== undefined && r !== null) fin(r);
+          } catch (e) { rej(e); }
+          setTimeout(() => fin(null), 8000);
+        });
+        const m = norm(raw);
+        if (m && Object.keys(m).length) {
+          list.forEach(p => { if (!m[p]) m[p] = { label: p, sys: 0, icon: '' }; });
+          return m;
+        }
+      } catch (e) { /* 落到 aapt 兜底 */ }
+    }
+    // 回退：后端 aapt 解析 label + pm path 判系统/第三方
+    try {
+      const text = await Api.pkginfo(list.join('\n'));
+      const m = {};
+      String(text).split('\n').forEach(l => {
+        if (l.indexOf('PKG=') !== 0) return;
+        const rest = l.slice(4); const i = rest.indexOf('\t');
+        if (i < 0) return;
+        const pkg = rest.slice(0, i); const tail = rest.slice(i + 1).split('\t');
+        m[pkg] = { label: tail[0] || pkg, sys: tail[1] === '1' ? 1 : 0, icon: '' };
+      });
+      list.forEach(p => { if (!m[p]) m[p] = { label: p, sys: 0, icon: '' }; });
+      return m;
+    } catch (e) {
+      const m = {}; list.forEach(p => m[p] = { label: p, sys: 0, icon: '' }); return m;
+    }
+  }
+};
+
+// 应用元信息缓存：S.pkgMeta[pkg] = {label, sys, icon}
+const Meta = {
+  cache: {},
+  async load(pkgs) {
+    const need = pkgs.filter(p => p && !this.cache[p]);
+    if (need.length) {
+      const got = await Bridge.pkgInfo(need);
+      Object.keys(got).forEach(k => this.cache[k] = got[k]);
+    }
+    return this.cache;
+  }
 };
 
 /* ============================================================
@@ -468,6 +567,8 @@ const Api = {
   async freqsave(b64) { return await this.run('freqsave ' + this.shq(b64)); },
   async frequse(mode, b64) { return await this.run('frequse ' + this.shq(mode) + ' ' + this.shq(b64)); },
   async live() { return await this.run('live'); },
+  async ensureguard() { return await this.run('ensureguard'); },
+  async pkginfo(pkgs) { return await this.run('pkginfo ' + this.shq(pkgs)); },
   // 分应用频率：每应用一个模式档
   async appfreq() { return await this.run('appfreq'); },
   async appfreqapps() { return await this.run('appfreqapps'); },
@@ -566,6 +667,9 @@ const S = {
 
 function showToast(m) {
   const t = document.getElementById('toast');
+  // 重新触发时先去掉 .on 并强制 reflow，避免「从非居中态瞬间跳到居中」的动画抖动。
+  t.classList.remove('on');
+  void t.offsetWidth;
   t.textContent = m; t.classList.add('on');
   clearTimeout(showToast._t);
   showToast._t = setTimeout(() => t.classList.remove('on'), 1900);
@@ -612,7 +716,8 @@ async function viewFreq() {
       '<div class="card" id="scheme-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
     '</div>' +
     '<div class="group">' +
-      '<div class="g-title rowhead">各模式频率档位 <span class="pill" id="freq-pinned"></span></div>' +
+      '<div class="g-title rowhead">各模式频率档位 <span class="pill" id="freq-pinned"></span>' +
+        '<button class="btn btn-xs" data-act="appfreqpowdefault" title="把省电档预设对齐到小/中核≈1.5-1.6G、大核≈2.0G 附近的可用档，并设为默认">省电默认</button></div>' +
       '<div class="g-foot" style="padding-bottom:8px">显示的是<b>已设定的频率范围</b>（非实时频率）。点标题展开可编辑三簇最低/最高；<b>保存</b>只存盘不下发，<b>应用</b>才会切到该档并立即下发。</div>' +
       '<div class="card" id="freq-card">加载中…</div>' +
     '</div>' +
@@ -620,7 +725,7 @@ async function viewFreq() {
       '<div class="btn-grid">' +
         '<button class="btn" data-act="reload">刷新</button>' +
       '</div>' +
-      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>。展开档位只是查看/编辑，<b>不会切换频率</b>；点「应用」才会切到该档并下发。顶部「应用频率」按当前全局模式重新下发三簇上下限。</div>' +
+      '<div class="g-foot">频率由模块<b>自有 PM QoS 接管</b>。展开档位只是查看/编辑，<b>不会切换频率</b>；点「应用」才会切到该档并下发。顶部「应用」会<b>保存本页全部档位</b>并按当前全局模式下发三簇上下限。</div>' +
     '</div>';
 
   try {
@@ -724,6 +829,47 @@ function collectTier(m) {
   return m + '\t' + vals.join(' ');
 }
 
+// 顶部「应用」→ 频率页：把四个模式的档位全部写盘 + 以当前全局模式下发
+async function applyFreqAll() {
+  const lines = MODE_ORDER.map(m => collectTier(m)).join('\n');
+  const b64 = b64enc(lines);
+  const cm = (S.status && S.status.MODE) || 'balance';
+  const r = await busy('保存并应用全部档位…', () => Api.frequse(cm, b64));
+  showToast(/OK/.test(r) ? '✅ 已保存全部档位并应用' : ('失败：' + (r || '').slice(0, 60)));
+  await viewFreq();
+}
+
+// 顶部「应用」→ 分应用频率页：把当前窗口里所有下拉选择写回 app_freq.tsv，并保活守护
+async function applyAppFreqAll() {
+  const rows = [];
+  document.querySelectorAll('#appfreq-win select[data-appfreq]').forEach(sel => {
+    const pkg = sel.dataset.appfreq; const md = sel.value;
+    rows.push(pkg + '\t' + md);
+  });
+  if (!rows.length) { showToast('没有可保存的分应用频率'); return; }
+  const b64 = b64enc(rows.join('\n'));
+  const r = await busy('保存分应用频率…', () => Api.appfreqbatch(b64));
+  // 保活守护（分应用频率靠守护前台切换时下发）
+  await Api.ensureguard();
+  showToast(/OK/.test(r) ? ('✅ 已保存 ' + rows.length + ' 条分应用频率') : ('失败：' + (r || '').slice(0, 60)));
+  await viewAppFreq();
+}
+
+// 顶部「应用」→ 线程页：把当前所有下拉选择（含未批量套用的）批量写回
+async function applyThreadAll() {
+  const rows = [];
+  document.querySelectorAll('#apps-card select[data-set]').forEach(sel => {
+    const pkg = sel.dataset.set; const tpl = sel.value;
+    if (tpl && tpl !== 'auto') rows.push(pkg + '\t' + tpl);
+    else rows.push(pkg + '\t' + 'auto');
+  });
+  if (!rows.length) { showToast('没有可保存的线程配置'); return; }
+  const b64 = b64enc(rows.join('\n'));
+  const r = await busy('保存线程配置…', () => Api.aethersetbatch(b64));
+  showToast(/OK/.test(r) ? ('✅ 已保存 ' + rows.length + ' 个应用线程档') : ('失败：' + (r || '').slice(0, 60)));
+  await loadApps(); await refreshAether(); renderApps();
+}
+
 /* ============================================================
    6) 视图：分应用频率（给特定应用单独指定一个频率档，前台时生效）
    ------------------------------------------------------------
@@ -740,6 +886,7 @@ async function viewAppFreq() {
   S.appShow = 40;
   S.appFilter = 'all';
   S.appSearch = '';
+  S.selSet = new Set();
   v.innerHTML =
     '<div class="group">' +
       '<div class="g-title rowhead">分应用频率 <span class="pill" id="appfreq-count"></span></div>' +
@@ -751,6 +898,7 @@ async function viewAppFreq() {
         '</div>' +
       '</div>' +
       '<div class="card"><div class="appwin" id="appfreq-win"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div></div>' +
+       '<div class="selbar" id="appfreq-selbar"></div>' +
     '</div>' +
     '<div class="group"><div class="btn-grid"><button class="btn" data-act="reload">刷新</button></div></div>';
 
@@ -776,7 +924,12 @@ async function loadAppFreq() {
 }
 async function loadAppList() {
   if (S.appList) return;
-  try { S.appList = parseAppList(await Api.appfreqapps()); } catch (e) { S.appList = []; }
+  try {
+    S.appList = parseAppList(await Api.appfreqapps());
+  } catch (e) { S.appList = []; }
+  // 预拉应用名 / 图标 / 系统·第三方（和线程页共用缓存）
+  S.selSet = new Set();
+  try { await Meta.load(S.appList.map(a => a.pkg)); } catch (e) {}
 }
 function parseAppList(text) {
   // 与线程页一致：APP=pkg|sys(0/1)；附 applied=1 表示该应用已设分应用频率
@@ -789,7 +942,11 @@ function appfreqFiltered() {
   const m = S.appfreq || {};
   const kw = (S.appSearch || '').trim().toLowerCase();
   return (S.appList || []).filter(a => {
-    if (kw && a.pkg.toLowerCase().indexOf(kw) < 0) return false;
+    if (kw) {
+      const meta = Meta.cache[a.pkg] || {};
+      const hay = (a.pkg + ' ' + (meta.label || '')).toLowerCase();
+      if (hay.indexOf(kw) < 0) return false;
+    }
     switch (S.appFilter) {
       case 'sys':   return a.sys === '1';
       case 'third': return a.sys !== '1';
@@ -800,12 +957,45 @@ function appfreqFiltered() {
   });
 }
 
+// 图标 + 名称 + 包名 + 标签 的通用片段（分应用频率 / 线程页共用）
+function appMediaHtml(p, extraBadges) {
+  const meta = Meta.cache[p.pkg] || { label: p.pkg, sys: p.sys === '1' ? 1 : 0, icon: '' };
+  const label = meta.label || p.pkg;
+  const sys = meta.sys === 1 ? 1 : 0;
+  const badge = sys ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
+  let icon;
+  if (meta.icon) {
+    icon = '<img class="ai" src="' + esc(meta.icon) + '" alt="" ' +
+      'onerror="this.onerror=null;this.outerHTML=\'<span class=&quot;ai letter&quot;>' + esc((label[0] || '?').toUpperCase()) + '</span>\'">';
+  } else {
+    icon = '<span class="ai letter">' + esc((label[0] || '?').toUpperCase()) + '</span>';
+  }
+  return '<div class="ai-wrap">' + icon + '</div>' +
+    '<div class="app-main">' +
+      '<div class="app-name">' + esc(label) + '</div>' +
+      '<div class="tagrow"><span class="app-pkg mono">' + esc(p.pkg) + '</span>' + badge + (extraBadges || '') + '</div>' +
+    '</div>';
+}
+
 function renderAppFreq() {
   const win = document.getElementById('appfreq-win'); if (!win) return;
   const m = S.appfreq || {};
   const all = appfreqFiltered();
   const cnt = document.getElementById('appfreq-count');
+  const selbar = document.getElementById('appfreq-selbar');
   if (cnt) { cnt.textContent = all.length + ' 个'; cnt.className = 'pill'; }
+  // 多选工具条
+  if (selbar) {
+    const n = S.selSet ? S.selSet.size : 0;
+    selbar.style.display = n ? 'flex' : 'none';
+    selbar.innerHTML = '<span class="selcount">已选 ' + n + ' 个</span>' +
+      '<button class="btn btn-xs" data-act="appfreqselall">全选</button>' +
+      '<button class="btn btn-xs ghost" data-act="appfreqselclear">清空</button>' +
+      '<select class="f" id="appfreq-tpl" style="width:auto;min-width:92px">' +
+        APP_MODE_OPTS.filter(o => o[0] !== '').map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('') +
+      '</select>' +
+      '<button class="btn btn-xs primary" data-act="appfreqbatchtpl">套用</button>';
+  }
   const list = all.slice(0, S.appShow);
   if (!list.length) {
     win.innerHTML = '<div class="empty">没有匹配的应用<br>换个筛选或搜索词试试</div>';
@@ -814,10 +1004,11 @@ function renderAppFreq() {
   win.innerHTML = list.map(p => {
     const cur = m[p.pkg] || '';
     const opts = APP_MODE_OPTS.map(o => '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
-    const badge = p.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
     const cfg = cur ? '<span class="pill ok">已设</span>' : '';
-    return '<div class="row" style="display:flex;align-items:center;gap:10px">' +
-      '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p.pkg) + ' ' + badge + ' ' + cfg + '</div></div>' +
+    const checked = S.selSet && S.selSet.has(p.pkg) ? ' checked' : '';
+    return '<div class="row app-row" style="display:flex;align-items:center;gap:10px">' +
+      '<input type="checkbox" class="app-sel" data-sel="' + esc(p.pkg) + '"' + checked + '>' +
+      appMediaHtml(p, cfg) +
       '<select class="f" data-appfreq="' + esc(p.pkg) + '" style="width:auto;flex:none;min-width:96px">' + opts + '</select>' +
       (cur ? '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p.pkg) + '">移除</button>' : '') +
     '</div>';
@@ -914,11 +1105,12 @@ function renderAetherCard(m) {
 async function loadApps() {
   try { S.apps = parseApps(await Api.aetherapps()); S.appsLoaded = true; }
   catch (e) { S.apps = []; }
+  try { await Meta.load(S.apps.map(a => a.pkg)); } catch (e) {}
 }
 function appStatusOf(a) { return a.custom === '1' ? 'custom' : (a.defined === '1' ? 'builtin' : 'none'); }
 
 function currentPkgs() {
-  const kw = S.appsearch;
+  const kw = (S.appsearch || '').trim().toLowerCase();
   return S.apps.filter(a => {
     const st = appStatusOf(a);
     switch (S.appfilter) {
@@ -927,7 +1119,10 @@ function currentPkgs() {
       case 'set':   if (st === 'none') return false; break;
       case 'unset': if (st !== 'none') return false; break;
     }
-    if (kw && a.pkg.toLowerCase().indexOf(kw) < 0) return false;
+    if (kw) {
+      const meta = Meta.cache[a.pkg] || {};
+      if (((a.pkg + ' ' + (meta.label || '')).toLowerCase()).indexOf(kw) < 0) return false;
+    }
     return true;
   });
 }
@@ -940,7 +1135,6 @@ function renderApps() {
   const list = all.slice(0, S.showCount);
   if (!list.length) { card.innerHTML = '<div class="empty">没有匹配的应用<br>换个筛选或搜索词试试</div>'; return; }
   card.innerHTML = list.map(a => {
-    const badge = a.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
     let statusPill, selVal, extra = '';
     if (a.custom === '1') {
       statusPill = '<span class="pill accent">自定义</span>'; selVal = a.tpl;
@@ -955,7 +1149,7 @@ function renderApps() {
     return '<div class="row app-row' + (S.sel.has(a.pkg) ? ' sel' : '') + '" data-pkg="' + esc(a.pkg) + '" style="display:block;padding:13px 15px">' +
       '<div style="display:flex;align-items:center;gap:8px">' +
         '<input type="checkbox" class="app-sel" data-sel="' + esc(a.pkg) + '"' + checked + '>' +
-        '<div class="r-main"><div class="r-t" style="font-size:13px">' + esc(a.pkg) + ' ' + badge + ' ' + statusPill + '</div></div>' +
+        appMediaHtml(a, statusPill) +
         extra +
       '</div>' +
       '<div style="margin-top:8px"><select class="f" data-set="' + esc(a.pkg) + '">' + opts + '</select></div>' +
@@ -1020,9 +1214,13 @@ function render() {
    ============================================================ */
 const ACTIONS = {
   reload: async () => { const f = TABS[S.tab]; if (f) f(); },
-  live: async () => {
-    const r = await busy('下发频率…', () => Api.live());
-    showToast(/OK/.test(r) ? '✅ 模块 QoS 频率已生效' : ('失败：' + r.slice(0, 60)));
+  // 顶部「应用」：保存本页全部变更并应用（替代旧的「应用频率」单次下发）
+  apply: async () => {
+    try {
+      if (S.tab === 'freq') return await applyFreqAll();
+      if (S.tab === 'appfreq') return await applyAppFreqAll();
+      if (S.tab === 'thread') return await applyThreadAll();
+    } catch (e) { showToast('应用失败：' + (e.message || e)); }
   },
   scheme: () => openSchemeSheet(),
   // —— 频率档位：展开/收起 + 应用 + 恢复默认 ——
@@ -1098,8 +1296,43 @@ const ACTIONS = {
     showToast(/OK/.test(r) ? ('已移除 ' + pkg + ' 的分应用频率') : ('失败：' + (r || '').slice(0, 60)));
     await loadAppFreq(); renderAppFreq();
   },
-  appfreqmore: () => { S.appShow += 40; renderAppFreq(); }
+  appfreqmore: () => { S.appShow += 40; renderAppFreq(); },
+  // —— 分应用频率：多选 + 模板套用（对齐线程页逻辑）——
+  appfreqselall: () => {
+    if (!S.selSet) S.selSet = new Set();
+    appfreqFiltered().forEach(a => S.selSet.add(a.pkg));
+    renderAppFreq();
+  },
+  appfreqselclear: () => { if (S.selSet) S.selSet.clear(); renderAppFreq(); },
+  appfreqbatchtpl: async () => {
+    const tpl = document.getElementById('appfreq-tpl');
+    const md = tpl ? tpl.value : '';
+    if (!md) { showToast('请先选择要套用的频率档'); return; }
+    if (!S.selSet || !S.selSet.size) { showToast('请先勾选应用'); return; }
+    const rows = Array.from(S.selSet).map(p => p + '\t' + md);
+    const b64 = b64enc(rows.join('\n'));
+    const r = await busy('套用中…', () => Api.appfreqbatch(b64));
+    if (!/OK/.test(r)) { showToast('失败：' + (r || '').slice(0, 60)); return; }
+    S.selSet.clear();
+    await loadAppFreq(); await Api.ensureguard(); renderAppFreq();
+    showToast('✅ 已为 ' + rows.length + ' 个应用套用「' + md + '」');
+  },
+  appfreqpowdefault: async () => {
+    const r = await busy('设置省电默认…', () => Api.run('powersave_default'));
+    showToast(/OK/.test(r) ? '✅ 已把省电档设为默认并下发' : ('失败：' + (r || '').slice(0, 70)));
+    await viewFreq();
+  }
 };
+// 分应用频率页勾选联动
+document.addEventListener('change', (e) => {
+  const cb = e.target;
+  if (cb && cb.classList && cb.classList.contains('app-sel') && cb.dataset.sel) {
+    if (!S.selSet) S.selSet = new Set();
+    if (cb.checked) S.selSet.add(cb.dataset.sel); else S.selSet.delete(cb.dataset.sel);
+    const bar = document.getElementById('appfreq-selbar');
+    if (bar) { renderAppFreq(); }
+  }
+});
 
 // 内置默认频率档位（与 util.sh mode_freq 一致），用于「恢复默认」
 // v18.2：对齐 O3 实测能效（M 簇 1550MHz 以上纯浪费，中核上限收回实测值）

@@ -39,14 +39,27 @@ log "🛡 守护启动（亮屏 ${INTERVAL}s / 息屏 $((INTERVAL*6))s；同步�
 # ── 单例保护 ───────────────────────────────────────────────
 #  service.sh 可能在开机 / `ksud services` 重跑时多次执行，若每次都拉起一个 guard，
 #  会出现多实例抢写 Scene 配置、互相打架。这里用 pidfile 去重：已有存活实例就退出。
+#  ⚠ 2026-10-10 修正：旧写法只 `kill -0 $old`，但 pid 会被**回收复用**（实测 pid 21378
+#    被 com.tencent.wework:push 复用）→ `kill -0` 仍成功 → 守护误判「自己还活着」并立即
+#    退出，导致守护实际从未运行（WebUI 一直显示「未运行」）。改为校验 /proc/$old/cmdline
+#    确实含 guard.sh，避免陈旧 pidfile 造成的假单例。
 GUARD_PIDFILE="${STATE_DIR}/guard.pid"
+guard_alive() {  # $1=pid；仅当 /proc/$1/cmdline 含本脚本名才算活着
+    [ -n "$1" ] || return 1
+    [ -r "/proc/$1/cmdline" ] || return 1
+    case "$(tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null)" in
+        *guard.sh*) return 0 ;;
+    esac
+    return 1
+}
 if [ -f "$GUARD_PIDFILE" ]; then
     old=$(cat "$GUARD_PIDFILE" 2>/dev/null)
-    if [ -n "$old" ] && kill -0 "$old" 2>/dev/null; then
+    if guard_alive "$old"; then
         log "· 守护已在运行（pid $old），跳过重复拉起"
         exit 0
     fi
 fi
+rm -f "$GUARD_PIDFILE" 2>/dev/null
 echo $$ > "$GUARD_PIDFILE" 2>/dev/null
 
 # 亮屏=1 / 息屏=0：所有背光都为 0 视为息屏
