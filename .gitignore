@@ -1,4 +1,4 @@
-# ---- 打包 / 编辑器产物 ----
+# ---- 鎵撳寘 / 缂栬緫鍣ㄤ骇鐗?----
 *.zip
 *.tgz
 *.bak
@@ -10,11 +10,11 @@ Thumbs.db
 __pycache__/
 *.pyc
 
-# ---- 自检脚本的沙盒（tools/test_sync_skip.sh 会在这里建假 Scene 目录）----
+# ---- 鑷鑴氭湰鐨勬矙鐩掞紙tools/test_sync_skip.sh 浼氬湪杩欓噷寤哄亣 Scene 鐩綍锛?---
 .test_sync_skip/
 dist/
 
-# ---- 本地采集到的设备数据（可能含个人包名/截图，不入库）----
+# ---- 鏈湴閲囬泦鍒扮殑璁惧鏁版嵁锛堝彲鑳藉惈涓汉鍖呭悕/鎴浘锛屼笉鍏ュ簱锛?---
 *.png
 *.apk
 *.db
@@ -22,14 +22,16 @@ dist/
 scratch/
 _scratch_*/
 
-# ---- 自检脚本在模块目录内建的临时沙盒（见 tools/test_*.py 的 mkdtmp）----
-#   ⚠ 故意**不**在测试退出时 rmtree：宿主 safe-delete 钩子会因「批量删除 >50 文件」
-#     抛 SystemExit(1)，把全绿测试的退出码染成 1。残留目录交给本规则忽略。
-_t_*/
+# ---- 鑷鑴氭湰鍦ㄦā鍧楃洰褰曞唴寤虹殑涓存椂娌欑洅锛堣 tools/test_*.py 鐨?mkdtmp锛?---
+#   鈿?鏁呮剰**涓?*鍦ㄦ祴璇曢€€鍑烘椂 rmtree锛氬涓?safe-delete 閽╁瓙浼氬洜銆屾壒閲忓垹闄?>50 鏂囦欢銆?#     鎶?SystemExit(1)锛屾妸鍏ㄧ豢娴嬭瘯鐨勯€€鍑虹爜鏌撴垚 1銆傛畫鐣欑洰褰曚氦缁欐湰瑙勫垯蹇界暐銆?_t_*/
 _t_*
 
-# ---- 测试/调试报告（本地产物，不入库）----
+# ---- 娴嬭瘯/璋冭瘯鎶ュ憡锛堟湰鍦颁骇鐗╋紝涓嶅叆搴擄級----
 _rep_*.txt
 _test_all_report.txt
 _t[0-9]*.log
 _probe*.txt
+
+# 测试/桩运行时产物（由 tools/test_webui_render.py 与本地 DOM 桩生成）
+tools/_ui_extract.js
+tools/_ui_*.js

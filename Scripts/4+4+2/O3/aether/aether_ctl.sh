@@ -157,6 +157,13 @@ cmd_deploy() {
 merge_overrides() {
   detect_topo
   [ -s "$OVR" ] || { cp -f "$BASE" "$CFG" 2>/dev/null; chmod 0666 "$CFG" 2>/dev/null; return 0; }
+  # 一次性迁移历史值（幂等）：极速 fast 与「游戏 game」实测行为一致，v18.2.7 起
+  # 删除 fast 角色，历史条目自动并入 game；老前端写入的裸核位同样归一到角色。
+  awk -F'\t' 'BEGIN{OFS="\t"}
+    $2=="fast"||$2=="8-9"||$2=="4-9"        {$2="game"}
+    $2=="0-3"                               {$2="powersave"}
+    $2=="4-7"||$2=="0-7"                    {$2="performance"}
+    {print}' "$OVR" > "${OVR}.mig" 2>/dev/null && mv -f "${OVR}.mig" "$OVR" 2>/dev/null
   # 每个覆盖包生成一条完整的 rule（cpuset 由角色展开为五层）
   local full="${TMPD}/aether_ovr_full.txt"
   : > "$full"
@@ -186,21 +193,35 @@ merge_overrides() {
     [ "${pkg#\#}" != "$pkg" ] && continue
     printf '%s\n' "$pkg" >> "$ovrpk"
   done < "$OVR"
+  # ⚠ BASE 顶层结构是 { "features": {...}, "rules": [ ... ] }，必须只处理 rules 数组：
+  #    · rules 区间外（features / 首尾大括号 / "rules": [ ）原样透传；
+  #    · rules 内按 4 空格缩进的 `{`…`}` 块做包名去重；
+  #    · BASE 的每条规则都以 `},` 结尾（含最后一条），插入 OVR 前必须先去掉
+  #      尾逗号——否则无条件补 `,` 会生成 `},\n,{` 双逗号 → JSON 非法 → aether 加载失败。
   local base_filtered="${TMPD}/aether_base_filtered.json"
   awk -v ovr="$ovrpk" '
-    BEGIN { while ((getline l < ovr) > 0) { gsub(/\r/,"",l); if (l ~ /\./) ovrp[l]=1 } }
+    BEGIN { while ((getline l < ovr) > 0) { gsub(/\r/,"",l); sub(/\t.*/,"",l); if (l ~ /\./) ovrp[l]=1 } }
     function flush_block(){
       if (inb == 0) return
       hit=0
       n=split(bpkgs,arr,SUBSEP)
       for(k=1;k<=n;k++){ if(arr[k] in ovrp){ hit=1; break } }
-      if (hit == 0) { for(j=0;j<bc;j++) print buf[j] }
+      if (hit == 0) for(j=0;j<bc;j++) print buf[j]
       inb=0; bc=0; bpkgs=""
     }
-    /^[[:space:]]*[{][[:space:]]*$/ { inb=1; bc=0; bpkgs=""; buf[bc++]=$0; next }
-    inb && /"friendly"/ { buf[bc++]=$0; next }
-    inb && /"packages"[[:space:]]*:[[:space:]]*\[/ { inpkg=1; buf[bc++]=$0; next }
-    inb && inpkg {
+    /^[[:space:]]*"rules"[[:space:]]*:/{ inrules=1; print; next }
+    # —— 计算前导空格数与正文（可移植写法，不用区间表达式 {n}，兼容 mawk/busybox）——
+    {
+      ind = $0; sub(/[^ ].*$/, "", ind); nil = length(ind)
+      body = $0; sub(/^ +/, "", body)
+    }
+    # rules 数组闭合：前导空格 ≤2 且正文以 ] 开头（块内 comm 数组缩进为 8-12 空格，
+    # 若按任意 ] 判定会误清零 inrules → 块状态机整体失效）。
+    inrules && nil <= 2 && body ~ /^\]/ { flush_block(); inrules=0; print; next }
+    inrules && !inb && body == "{" && nil == 4 { inb=1; bc=0; bpkgs=""; buf[bc++]=$0; next }
+    inrules && inb && /"friendly"/ { buf[bc++]=$0; next }
+    inrules && inb && /"packages"[[:space:]]*:[[:space:]]*\[/ { inpkg=1; buf[bc++]=$0; next }
+    inrules && inb && inpkg {
       line=$0
       while (match(line, /"[a-zA-Z][a-zA-Z0-9._]*"/)) {
         p=substr(line,RSTART,RLENGTH); p=substr(p,2,length(p)-2)
@@ -211,29 +232,79 @@ merge_overrides() {
       if ($0 ~ /\]/) inpkg=0
       next
     }
-    inb && /"cpuset"/ { buf[bc++]=$0; next }
-    inb && /^[[:space:]]*\}/ { buf[bc++]=$0; flush_block(); next }
-    inb { buf[bc++]=$0; next }
+    inrules && inb && /"cpuset"/ { buf[bc++]=$0; next }
+    # 规则块闭合：只认 4 空格缩进的 `}` / `},`——cpuset/comm 的闭合缩进是 6/8 空格，
+    # 若按任意 `}` 判定会在 comm 闭合处提前结束块 → 残留尾行 → JSON 非法。
+    inrules && inb && nil == 4 && body ~ /^\},?$/ { buf[bc++]=$0; flush_block(); next }
+    inrules && inb { buf[bc++]=$0; next }
     { print }
   ' "$BASE" > "$base_filtered" 2>/dev/null
   [ -s "$base_filtered" ] || cp -f "$BASE" "$base_filtered" 2>/dev/null
-  # 把去重后的 BASE 与 OVR 规则拼接：找到最后一个 ^[[:space:]]*]$ 行，其前插入 OVR 规则
+  # 把去重后的 BASE 与 OVR 规则拼接：在最后一个 `]` 行前插入 OVR 规则。
+  # ⚠ BASE 的每条规则后都带逗号（含最后一条），补 `,` 前必须先剥掉最后一个 `}`
+  #   行上的尾逗号，否则生成 `},\n  ,\n{` 双逗号 → JSON 非法 → aether 加载失败。
+  # 单趟完成：在 rules 数组的 `]` 前插入 OVR 规则；同时把最后一条规则的尾逗号剥掉。
+  # 缩进判定用「前导空格数 + 正文」而不是区间表达式 {n}，兼容 mawk / busybox awk。
   awk -v full="$full" '
+    function ind_of(s,   t){ t=s; sub(/[^ ].*$/, "", t); return length(t) }
+    function body_of(s,   t){ t=s; sub(/^ +/, "", t); return t }
     { lines[NR] = $0 }
-    /^[[:space:]]*\][[:space:]]*$/ { last = NR }
     END {
-      if (last == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
-      for (i = 1; i < last; i++) print lines[i]
+      # rules 数组闭合行：前导空格 ≤2 且正文以 ] 开头
+      bkt = 0
+      for (i = NR; i >= 1; i--) if (ind_of(lines[i]) <= 2 && body_of(lines[i]) ~ /^\]/) { bkt = i; break }
+      limit = (bkt > 0) ? bkt - 1 : NR
+      # 最后一条规则闭合行：4 空格缩进 + 正文 `}` 或 `},`
+      lastRule = 0
+      for (i = limit; i >= 1; i--) {
+        if (ind_of(lines[i]) == 4 && body_of(lines[i]) ~ /^\},?$/) { lastRule = i; break }
+      }
+      start = (bkt > 0) ? bkt : NR + 1
+      for (i = 1; i < start; i++) {
+        if (i == lastRule) { s = lines[i]; sub(/,[[:space:]]*$/, "", s); print s }
+        else print lines[i]
+      }
       printf ",\n"
       while ((getline l < full) > 0) print l
-      print lines[last]
+      for (i = start; i <= NR; i++) print lines[i]
     }
   ' "$base_filtered" > "$CFG" 2>/dev/null
   [ -s "$CFG" ] || cp -f "$BASE" "$CFG" 2>/dev/null
   chmod 0666 "$CFG" 2>/dev/null; chown 0:0 "$CFG" 2>/dev/null
 }
 
-# 角色 → 五层分进程 cpuset（JSON 片段，单行）。核位用真机拓扑展开。
+# 角色 → 五层分进程 cpuset（JSON 片段）。
+# ⚠ v18.2.7：输出改为**缩进多行**格式，与艇长内置默认配置的换行对齐风格一致
+#   （此前是单行 JSON，与内置条目混在一起显得很乱）；并删除「极速 fast」角色
+#   （实测与 game 行为一致，历史值在 merge_overrides 开头自动迁移为 game）。
+# 核位用真机拓扑展开；comm 数组每项一行，与内置一致。
+_tpl_ind_items() {  # $1=缩进空格 $2=逗号分隔项 → 每项一行
+  local ind="$1" list="$2" out="" it i=0 n
+  local IFS=','
+  set -- $list
+  IFS=' '
+  n=$#
+  for it; do
+    i=$((i+1))
+    out="${out}${ind}\"${it}\""
+    [ "$i" -lt "$n" ] && out="${out},\n"
+  done
+  printf '%b' "$out"
+}
+_tpl5() {  # $1=main $2=heaviestT $3=heaviestC $4=heavyT $5=heavyC $6=comm小核项 $7=comm中核项 $8=other
+  local main="$1" hT="$2" hC="$3" hvT="$4" hvC="$5" cE="$6" cP="$7" other="$8"
+  printf '{\n'
+  printf '        "main_thread": "%s",\n' "$main"
+  [ -n "$hT" ]  && printf '        "heaviest_thread": "%s",\n        "heaviest_cores": "%s",\n' "$hT" "$hC"
+  [ -n "$hvT" ] && printf '        "heavy_thread": "%s",\n        "heavy_cores": "%s",\n' "$hvT" "$hvC"
+  if [ -n "$cE" ] || [ -n "$cP" ]; then
+    printf '        "comm": {\n'
+    [ -n "$cE" ] && { printf '          "%s": [\n%b\n          ]' "$E" "$(_tpl_ind_items '            ' "$cE")"; [ -n "$cP" ] && printf ','; printf '\n'; }
+    [ -n "$cP" ] && printf '          "%s": [\n%b\n          ]\n' "$P1" "$(_tpl_ind_items '            ' "$cP")"
+    printf '        },\n'
+  fi
+  printf '        "other": "%s"\n      }' "$other"
+}
 tpl_cpuset() {
   local role="$1"
   local E="$E_CORE" P1="$P1_CORE" HP="$HP_CORE" ALL="$ALL_CORE"
@@ -242,29 +313,27 @@ tpl_cpuset() {
   case "$role" in
     powersave)
       # 轻线程/主线程压小核，只给渲染线程留一条通向中核的窄出口
-      printf '{"main_thread":"%s","heaviest_thread":"RenderThread","heaviest_cores":"%s","heavy_thread":"RenderThread","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"]},"other":"%s"}' \
-        "$E" "$P1" "$P1" "$E" "$E" ;;
+      _tpl5 "$E" "RenderThread" "$P1" "RenderThread" "$P1" \
+        "Audio,AudioTrack,FMOD,Http,Socket,Download,GC,Pool,TAsync" "" "$E" ;;
     balance)
-      printf '{"main_thread":"%s","heaviest_thread":"RenderThread","heaviest_cores":"%s","heavy_thread":"RenderThread","heavy_cores":"%s","comm":{"%s":["Worker","Job","Async","Pool","Audio","AudioTrack","FMOD","Http","Socket","Download"]},"other":"%s"}' \
-        "$P1" "$P1" "$P1" "$E" "$E" ;;
+      _tpl5 "$P1" "RenderThread" "$P1" "RenderThread" "$P1" \
+        "Worker,Job,Async,Pool,Audio,AudioTrack,FMOD,Http,Socket,Download" "" "$E" ;;
     performance)
-      printf '{"main_thread":"%s","heaviest_thread":"RenderThread;2.raster;rt-launcher","heaviest_cores":"%s","heavy_thread":"RenderThread,2.raster,rt-launcher","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background"]},"other":"%s,%s"}' \
-        "$P1" "$P1" "$P1" "$E" "$P1" "$E" "$P1" ;;
-    fast)
-      # 中低负载 0-7 由系统分配，高负载线程由 load_aware 上探 4-9
-      printf '{"main_thread":"%s","heaviest_thread":"RenderThread;GameThread;UnityMain","heaviest_cores":"%s","heavy_thread":"RenderThread;RHIThread;UnityGfx","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread"]},"other":"%s"}' \
-        "$P1" "$HP" "$P1" "$E" "$P1" "$E,$P1" ;;
-    none)
-      # 不接管：主线程与所有其余线程都放开到全部核心（0-9），交由系统调度器默认分配。
-      # 仅设 main_thread/other，中间层不约束，等效「按系统自带线程」执行。
-      [ -z "$ALL" ] && ALL="${E}"
-      printf '{"main_thread":"%s","other":"%s"}' "$ALL" "$ALL" ;;
+      _tpl5 "$P1" "RenderThread;2.raster;rt-launcher" "$P1" "RenderThread,2.raster,rt-launcher" "$P1" \
+        "Audio,AudioTrack,FMOD,Http,Socket,Download,GC,Pool,TAsync" \
+        "RenderThread,Job.,Loading.,TaskGraph,NativeThread,Background" "$E,$P1" ;;
     game)
       # 游戏：主线程/最重线程上大核，渲染与任务线程走中核，音频/IO 留小核
-      printf '{"main_thread":"%s,%s","heaviest_thread":"UnityMain;GameThread;UEGameThread;Thread-;Main","heaviest_cores":"%s","heavy_thread":"UnityGfx;RHIThread;RenderThread","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread","UnityGfx"]},"other":"%s"}' \
-        "$E" "$HP" "$HP" "$P1" "$E" "$P1" "$E" ;;
+      _tpl5 "$E,$HP" "UnityMain;GameThread;UEGameThread;Thread-;Main" "$HP" "UnityGfx;RHIThread;RenderThread" "$P1" \
+        "Audio,AudioTrack,FMOD,Http,Socket,Download,GC,Pool,TAsync" \
+        "RenderThread,Job.,Loading.,TaskGraph,NativeThread,Background,RHIThread,UnityGfx" "$E" ;;
+    none)
+      # 不接管：主线程与所有其余线程放开到全部核心，交由系统调度器默认分配。
+      # 仅设 main_thread/other，中间层不约束，等效「按系统自带线程」执行。
+      [ -z "$ALL" ] && ALL="${E}"
+      printf '{\n        "main_thread": "%s",\n        "other": "%s"\n      }' "$ALL" "$ALL" ;;
     *)
-      printf '{"main_thread":"%s","other":"%s"}' "$E" "$E" ;;
+      _tpl5 "$E" "" "" "" "" "" "" "$E" ;;
   esac
 }
 
@@ -335,12 +404,12 @@ cmd_set() {
   case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) echo "ERR 包名含非法字符"; return 1 ;; esac
   role=$(printf '%s' "$role" | tr -d ' \r')
   case "$role" in
-    powersave|balance|performance|fast|game|none) ;;
-    # 旧核位 → 等价角色
-    0-3)       role=powersave ;;
-    4-7|0-7)   role=performance ;;
-    8-9|4-9)   role=fast ;;
-    *) echo "ERR 非法角色档: $role（可用 powersave/balance/performance/fast/game/none）"; return 1 ;;
+    powersave|balance|performance|game|none) ;;
+    # v18.2.7：极速 fast 与 game 实测行为一致，已删除并并入 game；旧核位一并归一
+    fast|8-9|4-9) role=game ;;
+    0-3)          role=powersave ;;
+    4-7|0-7)      role=performance ;;
+    *) echo "ERR 非法角色档: $role（可用 powersave/balance/performance/game/none）"; return 1 ;;
   esac
   mkdir -p "$STATE_DIR"
   [ -f "$OVR" ] && awk -F'\t' -v p="$pkg" '$1!=p' "$OVR" > "${OVR}.tmp" 2>/dev/null && mv -f "${OVR}.tmp" "$OVR" 2>/dev/null
@@ -375,11 +444,11 @@ cmd_setbatch() {
     [ -z "$pkg" ] && { bad=$((bad+1)); continue; }
     case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) bad=$((bad+1)); continue ;; esac
     case "$cl" in
-      powersave|balance|performance|fast|game|none) keep=$((keep+1)) ;;
-      # 旧核位 → 等价角色（老前端 / 历史数据兼容）
+      powersave|balance|performance|game|none) keep=$((keep+1)) ;;
+      # v18.2.7：fast 与 game 实测一致已删除并入 game；旧核位一并归一
+      fast|8-9|4-9)            cl=game;        keep=$((keep+1)) ;;
       0-3)                     cl=powersave;   keep=$((keep+1)) ;;
       4-7|0-7)                 cl=performance; keep=$((keep+1)) ;;
-      8-9|4-9)                 cl=fast;        keep=$((keep+1)) ;;
       auto|"")                 drop=$((drop+1)) ;;
       *)                       bad=$((bad+1)); continue ;;
     esac
