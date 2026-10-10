@@ -1096,6 +1096,17 @@ FREQ_CACHE="${TMPD}/f.presets"
 FREQ_CACHE_SIG="${TMPD}/f.presets.sig"
 
 freq_presets_ensure() {
+    # ⚠ v18.2.8：频率档位早已由 freq_tiers.tsv + 内置 mode_freq 接管，profile.json
+    #   不再参与频率定义；但本函数仍会被 status/freqview 间接触发，逐次重建
+    #   （md5sum + 解析 100KB profile.json ≈ 365ms）是切页卡顿的一大来源。
+    #   现加 5 分钟 TTL：缓存存在且重建时间在 5 分钟内就直接返回（一次 date，≈15ms）。
+    local now mtime age
+    if [ -s "$FREQ_CACHE" ]; then
+        now=$(date +%s 2>/dev/null); mtime=$(stat -c %Y "$FREQ_CACHE" 2>/dev/null || echo 0)
+        [ -z "$mtime" ] && mtime=0
+        age=$(( now - mtime ))
+        [ "$age" -lt 300 ] && return 0
+    fi
     # ⚠ 用 mtime 判断「profile.json 是否比缓存新」，而不是 md5sum：
     #   本机一次 fork 要 10~40ms，md5sum+awk+cat 三个子进程 ≈ 60ms，
     #   而 apply_freq.sh 每当前台一变就会跑一次 —— 这是亮屏功耗的一大来源。

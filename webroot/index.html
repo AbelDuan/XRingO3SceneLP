@@ -269,6 +269,9 @@ textarea.f { resize: vertical; line-height: 1.5; }
 
 /* ---------- 线程：选择栏 / 模板栏 ---------- */
 .selbar { display: flex; align-items: center; gap: 8px; padding: 8px 0 4px; flex-wrap: wrap; }
+/* 模板直选行：勾选应用后点模板名即套用，不用二级菜单 */
+.tplrow { display: flex; flex-wrap: wrap; gap: 7px; padding: 9px 0 3px; }
+.tplbtn { flex: 1; min-width: 62px; text-align: center; }
 /* 搜索 + 预设筛选：一行两控件，等高对齐 */
 .toolrow { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
 .toolrow .f { flex: 1; min-width: 0; }
@@ -359,7 +362,7 @@ textarea.f { resize: vertical; line-height: 1.5; }
 <header>
   <div class="h-top">
     <h1>调度工具箱</h1>
-    <span class="h-ver" id="ver">18.2.7</span>
+    <span class="h-ver" id="ver">18.2.8</span>
     <div class="h-chips">
       <button class="btn btn-xs ghost h-txt" data-act="reload" title="重新读取当前页">刷新</button>
       <button class="btn btn-xs primary" id="conn-chip" data-act="apply" title="保存当前页所有变更并应用">应用</button>
@@ -722,8 +725,7 @@ async function viewFreq() {
       '<div class="card" id="scheme-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
     '</div>' +
     '<div class="group">' +
-      '<div class="g-title rowhead">各模式频率档位 <span class="pill" id="freq-pinned"></span>' +
-        '<button class="btn btn-xs" data-act="appfreqpowdefault" title="把省电档预设对齐到小/中核≈1.5-1.6G、大核≈2.0G 附近的可用档，并设为默认">省电默认</button></div>' +
+      '<div class="g-title rowhead">各模式频率档位 <span class="pill" id="freq-pinned"></span></div>' +
       '<div class="g-foot" style="padding-bottom:8px">显示的是<b>已设定的频率范围</b>（非实时频率）。点标题展开可编辑三簇最低/最高；<b>保存</b>只存盘不下发，<b>应用</b>才会切到该档并立即下发。</div>' +
       '<div class="card" id="freq-card">加载中…</div>' +
     '</div>' +
@@ -748,7 +750,7 @@ function renderSceneCard(st) {
   const pill = document.getElementById('scene-pill');
   if (pill) { pill.textContent = '模块自有'; pill.className = 'pill ok'; }
   card.innerHTML =
-    '<div class="kv-row"><span class="k">调度来源</span><span class="v mono">模块 QoS（不依赖 Scene）</span></div>' +
+    '<div class="kv-row"><span class="k">调度来源</span><span class="v mono">模块 QoS</span></div>' +
     '<div class="kv-row"><span class="k">全局模式</span><span class="v">' + esc(mode) + '</span></div>' +
     '<div class="kv-row"><span class="k">频率守护</span><span class="v">' + (daemon
       ? '<span class="pill ok">运行中</span>' : '<span class="pill warn">未运行</span>') + '</span></div>' +
@@ -883,19 +885,30 @@ const APP_MODE_OPTS = [['', '跟随全局'], ['powersave', '省电'], ['balance'
 const APPFREQ_FILTERS = [
   ['all', '全部'], ['sys', '系统'], ['third', '第三方'], ['set', '已配置'], ['unset', '未配置']
 ];
+// 分应用频率「按预设筛选」：跟随全局=未设置频率；其余=已设为该档
+const APPFREQ_PRESETS = [
+  ['all', '全部预设'], ['__follow__', '跟随全局'], ['powersave', '省电'], ['balance', '流畅'],
+  ['performance', '性能'], ['fast', '极速']
+];
 
 async function viewAppFreq() {
   const v = document.getElementById('view');
   S.appShow = 40;
   S.appFilter = 'all';
   S.appSearch = '';
+  S.appPresetFilter = 'all';
   S.selSet = new Set();
   v.innerHTML =
     '<div class="group">' +
       '<div class="g-title rowhead">分应用频率 <span class="pill" id="appfreq-count"></span></div>' +
-      '<div class="g-foot" style="padding-bottom:8px">给特定应用单独指定一个频率档；该应用在前台时用它，切走即回到全局模式。下方窗口可<b>滑动 / 搜索 / 按筛选</b>找应用，勾选后可在顶部<b>套用</b>到多个应用。</div>' +
+      '<div class="g-foot" style="padding-bottom:8px">给特定应用单独指定一个频率档；该应用在前台时用它，切走即回到全局模式。下方窗口可<b>滑动 / 搜索 / 按筛选</b>找应用，勾选后点下方模板名即可<b>直接套用</b>到多个应用。</div>' +
       '<div class="card apptoolbar">' +
-        '<input class="f" id="appfreq-search" placeholder="搜索应用（包名关键字）…">' +
+        '<div class="toolrow">' +
+          '<input class="f" id="appfreq-search" placeholder="搜索应用（包名关键字）…">' +
+          '<select class="f sel-tpl" id="appfreq-presetfilter">' +
+            APPFREQ_PRESETS.map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('') +
+          '</select>' +
+        '</div>' +
         '<div class="chiprow" id="appfreq-filters">' +
           APPFREQ_FILTERS.map(f => '<button class="fchip' + (f[0] === 'all' ? ' on' : '') + '" data-flt="' + f[0] + '">' + f[1] + '</button>').join('') +
         '</div>' +
@@ -903,10 +916,9 @@ async function viewAppFreq() {
           '<span class="selcount" id="appfreq-selcount">已选 0</span>' +
           '<button class="btn btn-xs ghost" data-act="freqselall">全选</button>' +
           '<button class="btn btn-xs ghost" data-act="freqselclear">清空</button>' +
-          '<select class="f sel-tpl" id="appfreq-tpl">' +
-            APPFREQ_BATCH_OPTS.map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('') +
-          '</select>' +
-          '<button class="btn btn-xs primary" data-act="freqbatch">套用</button>' +
+        '</div>' +
+        '<div class="tplrow">' +
+          APPFREQ_BATCH_OPTS.map(o => '<button class="btn btn-xs tplbtn" data-act="freqbatch" data-tpl="' + o[0] + '">' + o[1] + '</button>').join('') +
         '</div>' +
       '</div>' +
       '<div class="card"><div class="appwin" id="appfreq-win"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div></div>' +
@@ -950,11 +962,18 @@ function parseAppList(text) {
 function appfreqFiltered() {
   const m = S.appfreq || {};
   const kw = (S.appSearch || '').trim().toLowerCase();
+  const pf = S.appPresetFilter || 'all';
   return (S.appList || []).filter(a => {
     if (kw) {
       const meta = Meta.cache[a.pkg] || {};
       const hay = (a.pkg + ' ' + (meta.label || '')).toLowerCase();
       if (hay.indexOf(kw) < 0) return false;
+    }
+    // 按频率预设筛选：跟随全局=未设置；其余=已设为该档
+    if (pf !== 'all') {
+      const cur = m[a.pkg] || '';
+      if (pf === '__follow__') { if (cur) return false; }
+      else if (cur !== pf) return false;
     }
     switch (S.appFilter) {
       case 'sys':   return a.sys === '1';
@@ -965,7 +984,6 @@ function appfreqFiltered() {
     }
   });
 }
-
 // 图标 + 名称 + 包名 + 标签 的通用片段（分应用频率 / 线程页共用）
 //   图标懒加载：先画字母头像，IntersectionObserver 滚到可见才拉 ksu://icon，失败回退字母。
 //   首屏不再等所有图标，列表秒开。
@@ -1134,10 +1152,9 @@ async function viewThread() {
           '<span class="selcount" id="apps-selcount">已选 0</span>' +
           '<button class="btn btn-xs ghost" data-act="appselall">全选</button>' +
           '<button class="btn btn-xs ghost" data-act="appselclear">清空</button>' +
-          '<select class="f sel-tpl" id="apps-tpl">' +
-            TPL_OPTS.map(o => '<option value="' + o[0] + '">' + o[1] + '</option>').join('') +
-          '</select>' +
-          '<button class="btn btn-xs primary" data-act="appbatch">套用</button>' +
+        '</div>' +
+        '<div class="tplrow">' +
+          TPL_OPTS.map(o => '<button class="btn btn-xs tplbtn" data-act="appbatch" data-tpl="' + o[0] + '">' + o[1] + '</button>').join('') +
         '</div>' +
       '</div>' +
       '<div class="card"><div class="appwin" id="apps-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div></div>' +
@@ -1394,10 +1411,7 @@ const ACTIONS = {
     if (el) { el.classList.add('on'); const bd = el.querySelector('.freqmode-body'); if (bd) bd.style.maxHeight = (bd.scrollHeight + 40) + 'px'; }
   },
   // —— 线程分配：角色档套用 / 全选 / 清空（置顶工具条，与分应用频率页一致）——
-  appbatch: async () => {
-    const sel = document.getElementById('apps-tpl');
-    await batchApply(sel ? sel.value : '');
-  },
+  appbatch: async (b) => { await batchApply(b && b.dataset ? b.dataset.tpl : ''); },
   appselall: () => { currentPkgs().forEach(a => S.sel.add(a.pkg)); renderApps(); },
   appselclear: () => { S.sel.clear(); renderApps(); },
   loadmore: () => { S.showCount += 40; renderApps(); },
@@ -1430,9 +1444,8 @@ const ACTIONS = {
     renderAppFreq();
   },
   freqselclear: () => { if (S.selSet) S.selSet.clear(); renderAppFreq(); },
-  freqbatch: async () => {
-    const tpl = document.getElementById('appfreq-tpl');
-    const md = tpl ? tpl.value : '';
+  freqbatch: async (b) => {
+    const md = b && b.dataset ? b.dataset.tpl : '';
     if (!S.selSet || !S.selSet.size) { showToast('请先勾选应用'); return; }
     const pkgs = Array.from(S.selSet);
     if (md === '__follow__') {
@@ -1448,11 +1461,6 @@ const ACTIONS = {
     S.selSet.clear();
     await loadAppFreq(); await Api.ensureguard(); renderAppFreq();
     showToast('✅ 已为 ' + pkgs.length + ' 个应用套用「' + cn + '」');
-  },
-  appfreqpowdefault: async () => {
-    const r = await busy('设置省电默认…', () => Api.run('powersave_default'));
-    showToast(/OK/.test(r) ? '✅ 已把省电档设为默认并下发' : ('失败：' + (r || '').slice(0, 70)));
-    await viewFreq();
   }
 };
 // 分应用频率页勾选联动（只在 appfreq 窗口内生效，避免与线程页共用 app-sel 造成串扰）
@@ -1530,9 +1538,12 @@ document.addEventListener('click', async (e) => {
 });
 
 document.addEventListener('change', async (e) => {
-  // 线程页「按预设筛选」下拉
+  // 两页「按预设筛选」下拉
   if (e.target.id === 'app-tplfilter') {
     S.appTplFilter = e.target.value; S.showCount = 40; renderApps(); return;
+  }
+  if (e.target.id === 'appfreq-presetfilter') {
+    S.appPresetFilter = e.target.value; S.appShow = 40; renderAppFreq(); return;
   }
   const sel = e.target.closest('[data-sel]');
   if (sel && sel.closest('#apps-card')) {

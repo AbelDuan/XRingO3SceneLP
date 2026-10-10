@@ -107,6 +107,42 @@ scur(){ cat "/sys/devices/system/cpu/cpu$1/cpufreq/scaling_cur_freq" 2>/dev/null
 hwmax(){ cat "/sys/devices/system/cpu/cpu$1/cpufreq/cpuinfo_max_freq" 2>/dev/null; }
 tempof(){ cat "/sys/class/thermal/thermal_zone$1/temp" 2>/dev/null; }
 
+# 批量读三簇（L/M/P）频率 + 温度，一次 awk 读完所有节点。
+#   ⚠ 每个 `cat` 都是 20~25ms 的 fork；原来 status 要 17 次 cat ≈ 400ms，
+#     切到 CPU 频率页明显卡。批量读后只剩 1 个 awk。
+#   输出与逐 cat 完全一致（不存在 / 无权限的节点输出空串）。
+_sysfs_dump() {
+    awk 'function g(f){ if((getline v < f)>0){close(f);return v} close(f); return "" }
+         BEGIN{
+    b="/sys/devices/system/cpu/cpu"
+    split("L 0 M 4 P 8", C, " ")
+    for(i=1;i<=6;i+=2){ cl=C[i]; c=C[i+1]
+        printf "QMAX_%s=%s\n", cl, g(b c "/qos/max_freq")
+        printf "QMIN_%s=%s\n", cl, g(b c "/qos/min_freq")
+        printf "SCMAX_%s=%s\n", cl, g(b c "/cpufreq/scaling_max_freq")
+        printf "SCUR_%s=%s\n", cl, g(b c "/cpufreq/scaling_cur_freq")
+        printf "HWMAX_%s=%s\n", cl, g(b c "/cpufreq/cpuinfo_max_freq")
+    }
+    printf "TEMP_CPU0=%s\n", g("/sys/class/thermal/thermal_zone9/temp")
+    printf "TEMP_CPU8=%s\n", g("/sys/class/thermal/thermal_zone1/temp")
+    }' 2>/dev/null
+}
+
+# 批量读「档位/上限」类节点（freqview 用）：一次 awk 替代 12 次 cat fork。
+_sysfs_dump_steps() {
+    awk 'function g(f){ if((getline v < f)>0){close(f);return v} close(f); return "" }
+         BEGIN{
+    b="/sys/devices/system/cpu/cpu"
+    split("L 0 M 4 P 8", C, " ")
+    for(i=1;i<=6;i+=2){ cl=C[i]; c=C[i+1]
+        printf "STEPS_%s=%s\n", cl, g(b c "/cpufreq/scaling_available_frequencies")
+        printf "HWMAX_%s=%s\n", cl, g(b c "/cpufreq/cpuinfo_max_freq")
+        printf "QMAX_%s=%s\n",  cl, g(b c "/qos/max_freq")
+        printf "QMIN_%s=%s\n",  cl, g(b c "/qos/min_freq")
+    }
+    }' 2>/dev/null
+}
+
 cmd_status() {
     echo "VER=$(grep -m1 '^version=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2-)"
     echo "MODNAME=$(grep -m1 '^name=' "$MODDIR/module.prop" 2>/dev/null | cut -d= -f2-)"
@@ -116,16 +152,15 @@ cmd_status() {
     pgrep -f "O3/guard\.sh" >/dev/null 2>&1 && echo "DAEMON=1" || echo "DAEMON=0"
     # 调度守护
     pgrep -f scene-daemon >/dev/null 2>&1 && echo "SCENE_DAEMON=1" || echo "SCENE_DAEMON=0"
-    # 三簇频率（v18：QoS 由本模块下发，scaling_max 不受我们控制）
-    local c l
-    for pair in "L 0" "M 4" "P 8"; do
-        set -- $pair; l=$1; c=$2
-        echo "QMAX_${l}=$(qmax $c)"; echo "QMIN_${l}=$(qmin $c)"; echo "SCMAX_${l}=$(scmax $c)"; echo "SCUR_${l}=$(scur $c)"; echo "HWMAX_${l}=$(hwmax $c)"
+    # 三簇频率 + 温度：一次 awk 批量读（原来 17 次 cat fork ≈ 400ms，切页卡顿主因）
+    local _sf _pinned=0 _v _k
+    _sf=$(_sysfs_dump)
+    printf '%s\n' "$_sf"
+    for _k in L M P; do
+        _v=$(printf '%s\n' "$_sf" | sed -n "s/^QMIN_${_k}=//p")
+        [ -n "$_v" ] && [ "$_v" = "$(printf '%s\n' "$_sf" | sed -n "s/^QMAX_${_k}=//p")" ] && _pinned=$((_pinned+1))
     done
-    local pinned=0
-    for c in 0 4 8; do local a b; a=$(qmax $c); b=$(qmin $c); [ -n "$a" ] && [ -n "$b" ] && [ "$a" = "$b" ] && pinned=$((pinned+1)); done
-    echo "FREQ_PINNED=${pinned}"
-    echo "TEMP_CPU0=$(tempof 9)"; echo "TEMP_CPU8=$(tempof 1)"
+    echo "FREQ_PINNED=${_pinned}"
     # 当前模式
     local cm; cm=$(active_mode); echo "MODE=${cm}"; echo "MODE_CN=$(mode_name_cn "$cm")"; echo "MODE_LIST=${MODE_LIST}"
     local m cn af inf
@@ -204,24 +239,26 @@ cmd_freqview() {
         f=$(mode_freq "$m" active)
         echo "TIER_${m}=${f}"
     done
-    echo "HWMAX_L=$(hwmax 0)"; echo "HWMAX_M=$(hwmax 4)"; echo "HWMAX_P=$(hwmax 8)"
     echo "STOCKMIN_L=$(stock_min_of 0)"; echo "STOCKMIN_M=$(stock_min_of 4)"; echo "STOCKMIN_P=$(stock_min_of 8)"
     # ★ 可用频率表：O3 某些内核不暴露 scaling_available_frequencies（返回空），
     #   导致前端 min/max 下拉退化成「仅当前值」——点开后最低/最高都一样、无法选档。
     #   这里逐簇读取，空了就退回相邻有值的簇 / 内置档位（DEFAULT_TIERS 同款），
     #   保证下拉里始终有「多档可选」。
-    local sL sM sP
-    sL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)
-    sM=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)
-    sP=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null)
-    [ -z "$sL" ] && { sL=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sL" ] && sL="417792 556800 835200 1113600 1497600 1939200 2246400 3148800"; }
-    [ -z "$sM" ] && { sM=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sM" ] && sM="$sL"; }
-    [ -z "$sP" ] && { sP=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sP" ] && sP="$sL"; }
+    #   ⚠ v18.2.8：STEPS/HWMAX/QMAX/QMIN 全部并入 _sysfs_dump 一次 awk 读完
+    #   （原来 3 次读 STEPS + 3 次 hwmax + 6 次 qos ≈ 12 个 fork ≈ 300ms，
+    #     是切到频率页「卡一下」的主要原因）。
+    local _sf sL sM sP
+    _sf=$(_sysfs_dump_steps)
+    sL=$(printf '%s\n' "$_sf" | sed -n 's/^STEPS_L=//p')
+    sM=$(printf '%s\n' "$_sf" | sed -n 's/^STEPS_M=//p')
+    sP=$(printf '%s\n' "$_sf" | sed -n 's/^STEPS_P=//p')
+    [ -z "$sL" ] && sL="417792 556800 835200 1113600 1497600 1939200 2246400 3148800"
+    [ -z "$sM" ] && sM="$sL"
+    [ -z "$sP" ] && sP="$sL"
     echo "STEPS_L=$sL"
     echo "STEPS_M=$sM"
     echo "STEPS_P=$sP"
-    echo "QMAX_L=$(qmax 0)"; echo "QMAX_M=$(qmax 4)"; echo "QMAX_P=$(qmax 8)"
-    echo "QMIN_L=$(qmin 0)"; echo "QMIN_M=$(qmin 4)"; echo "QMIN_P=$(qmin 8)"
+    printf '%s\n' "$_sf" | grep -E "^(HWMAX|QMAX|QMIN)_"
 }
 
 # ---------- 频率档位：写入 tiers 文件（仅落地，不应用）----------
