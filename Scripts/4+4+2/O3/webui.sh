@@ -477,28 +477,43 @@ cmd_ensureguard() {
 }
 
 # 应用元信息兜底（当 WebUI 桥没有 getPackagesInfo 时）：
-#   输出 PKG=<pkg>\t<label>\t<sys(1/0)>。label 用兄弟模块自带 aapt 解析 APK 的
-#   application-label；没有 aapt / 解析失败则回退包名。系统/第三方以 pm path 落在
-#   /system|/vendor|/product|/system_ext 判定。
+#   输出 PKG=<pkg>\t<label>\t<sys(1/0)>。label 用兄弟模块自带 aapt 解析 APK：
+#     优先中文 application-label-zh-CN（再 zh-*），最后才用默认 application-label
+#     ——修「应用名全是英文」。结果写进 pkg_labels.tsv 缓存，只对未命中的包跑 aapt
+#     ——修「加载太慢」（首次只解析可见切片，之后命中缓存近乎瞬时）。
+#   系统/第三方以 pm path 落在 /system|/vendor|/product|/system_ext 判定。
 PKGINFO_AAPT=""
 for _pa in /data/adb/modules/Hyper_MagicWindow/common/utils/aapt /data/adb/modules/*/common/utils/aapt; do
     [ -x "$_pa" ] && { PKGINFO_AAPT="$_pa"; break; }
 done
+PKG_LABEL_CACHE="${WEBUI_DIR}/pkg_labels.tsv"
+_cmd_pkginfo_one() {   # $1=pkg；输出该包 label（含缓存写回）
+    local pkg="$1" apk label sys=0 l bad
+    apk=$(pm path "$pkg" 2>/dev/null | head -1 | sed 's/package://')
+    case "$apk" in /system/*|/vendor/*|/product/*|/system_ext/*|/odm/*) sys=1 ;; esac
+    label="$pkg"
+    if [ -n "$PKGINFO_AAPT" ] && [ -n "$apk" ]; then
+        bad=$("$PKGINFO_AAPT" d badging "$apk" 2>/dev/null)
+        # ① 简体中文 ② 其它中文变体 ③ 默认（多为英文）
+        l=$(printf '%s\n' "$bad" | grep -m1 "^application-label-zh-CN:'" | sed "s/^[^:]*:'//;s/'$//")
+        [ -z "$l" ] && l=$(printf '%s\n' "$bad" | grep -m1 -E "^application-label-zh(-[A-Za-z-]+)?'" | sed "s/^[^:]*:'//;s/'$//")
+        [ -z "$l" ] && l=$(printf '%s\n' "$bad" | grep -m1 "^application-label:'" | sed "s/^[^:]*:'//;s/'$//")
+        [ -n "$l" ] && label="$l"
+    fi
+    printf '%s\t%s\t%s\n' "$pkg" "$label" "$sys" >> "$PKG_LABEL_CACHE" 2>/dev/null
+    echo "$label	$sys"
+}
 cmd_pkginfo() {
     local pkgs="$1"; [ -n "$pkgs" ] || { echo "ERR 缺少包名列表"; return 1; }
+    mkdir -p "$WEBUI_DIR" 2>/dev/null
+    [ -f "$PKG_LABEL_CACHE" ] || : > "$PKG_LABEL_CACHE"
     echo "$pkgs" | while IFS= read -r pkg; do
         [ -z "$pkg" ] && continue
-        local apk label sys=0
-        apk=$(pm path "$pkg" 2>/dev/null | head -1 | sed 's/package://')
-        case "$apk" in
-            /system/*|/vendor/*|/product/*|/system_ext/*|/odm/*) sys=1 ;;
-        esac
-        label="$pkg"
-        if [ -n "$PKGINFO_AAPT" ] && [ -n "$apk" ]; then
-            local l; l=$("$PKGINFO_AAPT" d badging "$apk" 2>/dev/null | grep -m1 "^application-label:" | sed "s/^application-label:'//;s/'$//")
-            [ -n "$l" ] && label="$l"
-        fi
-        echo "PKG=${pkg}	${label}	${sys}"
+        # 命中缓存 → 直接回（跳过 aapt，瞬时）
+        local hit; hit=$(awk -F'\t' -v P="$pkg" '$1==P{print $2"\t"$3; exit}' "$PKG_LABEL_CACHE" 2>/dev/null)
+        if [ -n "$hit" ]; then echo "PKG=${pkg}	${hit}"; continue; fi
+        # 未命中 → aapt 解析（zh 优先）并写回缓存
+        echo "PKG=${pkg}	$(_cmd_pkginfo_one "$pkg")"
     done
 }
 
@@ -568,8 +583,48 @@ EOF
 # ============================================================
 cmd_aether() {
     sh "$AETHER_CTL" status 2>&1
+    emit_topo
     sh "$AETHER_CTL" featlist 2>&1
     sh "$AETHER_CTL" rules 2>&1
+}
+
+# 真实 CPU 拓扑：从 /sys cpufreq policy 读出各簇核区间，按 cpuinfo_max_freq 由低到高
+#   排成 小核(E) → 中核(P1) → 大核(HP)。aether 的 detect_topo 有时返回空，这里兜底，
+#   保证 WebUI「拓扑」行显示真实簇区间（如 0-3）而不是一排横杠。
+_topo_fmt_cpus() {   # "0 1 2 3" -> "0-3"；"8 9" -> "8-9"；非连续则逗号分段
+    local in="$1" out="" start="" prev="" c
+    for c in $in; do
+        [ -z "$start" ] && { start=$c; prev=$c; continue; }
+        if [ "$c" -eq $((prev+1)) ] 2>/dev/null; then prev=$c; continue; fi
+        if [ "$start" = "$prev" ]; then out="${out:+$out,}$start"; else out="${out:+$out,}$start-$prev"; fi
+        start=$c; prev=$c
+    done
+    [ -n "$start" ] || { echo ""; return; }
+    if [ "$start" = "$prev" ]; then out="${out:+$out,}$start"; else out="${out:+$out,}$start-$prev"; fi
+    echo "$out"
+}
+emit_topo() {
+    local p cpus mx lines="" i=0
+    for p in /sys/devices/system/cpu/cpufreq/policy*; do
+        [ -d "$p" ] || continue
+        cpus=$(_topo_fmt_cpus "$(cat "$p/related_cpus" 2>/dev/null)")
+        mx=$(cat "$p/cpuinfo_max_freq" 2>/dev/null || echo 0)
+        [ -z "$cpus" ] && continue
+        lines="${lines}${mx} ${cpus}
+"
+        i=$((i+1))
+    done
+    [ "$i" -eq 0 ] && return 0
+    # 按 max_freq 升序（小→大），取前 3 簇分别作为 E / P1 / HP
+    local sorted; sorted=$(printf '%s' "$lines" | sort -n | cut -d' ' -f2)
+    local e p1 hp
+    e=$(printf '%s\n' "$sorted" | sed -n '1p')
+    p1=$(printf '%s\n' "$sorted" | sed -n '2p')
+    hp=$(printf '%s\n' "$sorted" | sed -n '3p')
+    [ -z "$p1" ] && p1="$e"
+    [ -z "$hp" ] && hp="${p1:-$e}"
+    echo "TOPO_E=$e"; echo "TOPO_P1=$p1"; echo "TOPO_HP=$hp"
+    echo "TOPO_CLUSTERS=$i"
 }
 cmd_aetherswitch() {
     case "$1" in
