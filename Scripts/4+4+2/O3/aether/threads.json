@@ -1283,7 +1283,7 @@
         "com.tencent.mm:appbrand1"
       ],
       "cpuset": {
-        "other": "{all_core}"
+        "other": "{e_core},{p_core}"
       }
     },
     {
@@ -1398,7 +1398,7 @@
             "com.miui.home",
             "binder*"
           ],
-          "{hp_core}": [
+          "{p_core}": [
             "RenderThread"
           ]
         }
@@ -1866,9 +1866,9 @@
         "com.tencent.mm:appbrand0"
       ],
       "cpuset": {
-        "other": "{all_core}",
+        "other": "{e_core},{p_core}",
         "comm": {
-          "{hp_core}": [
+          "{p_core}": [
             "*Re"
           ],
           "1-7": [
@@ -2560,7 +2560,7 @@
             "taobao.idlefish",
             "1.raster"
           ],
-          "{hp_core}": [
+          "{p_core}": [
             "*.idlefish",
             "*.ui",
             "*.raster"
@@ -2585,7 +2585,7 @@
             "sankuai.meituan",
             "TTE-keyAgreemen"
           ],
-          "{hp_core}": [
+          "{p_core}": [
             "*.meituan"
           ]
         }
@@ -3284,7 +3284,7 @@
           "{e_core}": [
             "Heap*"
           ],
-          "{hp_core}": [
+          "{p_core}": [
             "*.ui",
             "*.raster"
           ]
@@ -5514,7 +5514,7 @@
       "cpuset": {
         "other": "{e_core},{p_core}",
         "comm": {
-          "{hp_core}": [
+          "{p_core}": [
             "me.ele"
           ],
           "{p_core}": [
@@ -5945,7 +5945,7 @@
             "om.xhey.xcamera",
             "Algorithm-"
           ],
-          "{hp_core}": [
+          "{p_core}": [
             "RxCachedThreadS"
           ]
         }

@@ -114,28 +114,34 @@ cmd_deploy() {
   if [ ! -s "${TARGET}/gamelist" ] && [ -f "$GAME" ]; then
     cp -f "$GAME" "${TARGET}/gamelist" 2>/dev/null
   fi
-  # ① 固化「艇长基准」：首装时把设备现有配置（或模板）记成 base；之后所有部署都基于
-  #    base + 用户自定义覆盖，绝不直接用模板回灌覆盖设备配置（保留艇长实时调校）。
-  if [ ! -s "$BASE" ]; then
-    if [ -s "$CFG" ]; then
-      cp -f "$CFG" "$BASE" 2>/dev/null
-      echo "OK 已记录艇长基准配置（首次捕获，rules=$(grep -c '\"friendly\"' "$BASE" 2>/dev/null)）"
+  # ① 「艇长基准」= 模板按真机拓扑展开（**只含艇长规则，绝不含用户自定义**）。
+  #    用户自定义一律只存在 OVR 层，由 ② 合并进 CFG。
+  #
+  #  ⚠ v18.3.2 修复「自定义规则滚雪球」：旧逻辑首次会把**当时的 CFG** 记成 BASE，
+  #    而 CFG 里已含 `自定义·xxx` 条目 → 这些条目混进 BASE；此后每次 deploy 又把
+  #    OVR 规则插一遍 → CFG 里同一应用出现多条重复规则（实测微信 2 条：旧的 game
+  #    在前、新的 balance 在后，引擎按先命中的旧规则执行 ⇒ 改了档位永远不生效）。
+  #    现在 BASE 只从模板生成；若检测到 BASE 含自定义规则，直接从模板重建（幂等）。
+  _build_base_from_tpl() {
+    [ -f "$TPL" ] || return 1
+    detect_topo
+    if grep -q '{[a-z_]*_core}' "$TPL" 2>/dev/null; then
+      sed -e "s/{e_core}/$E_CORE/g"    -e "s/{p1_core}/$P1_CORE/g" \
+          -e "s/{p2_core}/$P2_CORE/g"  -e "s/{p_core}/$P_CORE/g"  \
+          -e "s/{hp_core}/$HP_CORE/g"  -e "s/{all_core}/$ALL_CORE/g" \
+          "$TPL" > "$BASE" 2>/dev/null
+      [ -s "$BASE" ] || cp -f "$TPL" "$BASE" 2>/dev/null
     else
-      if [ ! -f "$TPL" ]; then echo "ERR 找不到模板: $TPL"; return 1; fi
-      detect_topo
-      if grep -q '{[a-z_]*_core}' "$TPL" 2>/dev/null; then
-        sed -e "s/{e_core}/$E_CORE/g"    -e "s/{p1_core}/$P1_CORE/g" \
-            -e "s/{p2_core}/$P2_CORE/g"  -e "s/{p_core}/$P_CORE/g"  \
-            -e "s/{hp_core}/$HP_CORE/g"  -e "s/{all_core}/$ALL_CORE/g" \
-            "$TPL" > "$BASE" 2>/dev/null
-        [ -s "$BASE" ] || { cp -f "$TPL" "$BASE" 2>/dev/null; }
-      else
-        cp -f "$TPL" "$BASE" 2>/dev/null
-      fi
-      chmod 0666 "$BASE" 2>/dev/null; chown 0:0 "$BASE" 2>/dev/null
-      echo "OK 已按拓扑从模板生成基准配置（首装，e=$E_CORE p1=$P1_CORE p2=$P2_CORE hp=$HP_CORE all=$ALL_CORE）"
+      cp -f "$TPL" "$BASE" 2>/dev/null
     fi
     chmod 0666 "$BASE" 2>/dev/null; chown 0:0 "$BASE" 2>/dev/null
+  }
+  if [ ! -s "$BASE" ]; then
+    _build_base_from_tpl || { echo "ERR 找不到模板: $TPL"; return 1; }
+    echo "OK 已按拓扑从模板生成艇长基准（e=$E_CORE p1=$P1_CORE p2=$P2_CORE hp=$HP_CORE all=$ALL_CORE）"
+  elif grep -q '"friendly": *"自定义·' "$BASE" 2>/dev/null; then
+    _build_base_from_tpl
+    echo "OK 艇长基准含残留自定义规则 → 已从模板重建（修复重复规则）"
   fi
   # ② 合并 base + 用户自定义覆盖 → 设备 CFG（Aether 真正读取的文件）
   merge_overrides
