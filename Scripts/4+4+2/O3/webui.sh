@@ -38,6 +38,11 @@ TMPD="/data/local/tmp/_wui"
 SCHEME=$(active_scheme); [ -z "$SCHEME" ] && SCHEME="sweet_bal"
 MODCFG="${MODDIR}/Config/4+4+2/O3/${SCHEME}"
 AETHER_CTL="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
+# ★ 本模块专属的 aether-optext 二进制完整路径（用于「是否运行中」判定与启停）。
+#   设备上存在另一个同名 KSU 模块 aether-optext（/data/adb/modules/aether-optext/aether-optext），
+#   其进程 cmdline 也含 "aether-optext"。若用 pgrep -f "aether-optext" 会误判那个兄弟模块的进程，
+#   导致本模块「线程引擎启用后仍显示未运行 / 误判运行中」。必须按本模块自己的路径来匹配。
+AETHER_BIN_PATH="$MODDIR/Scripts/4+4+2/O3/aether/aether-optext"
 AETHER_CFG="/sdcard/Android/Aether/threads.json"
 PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"
 
@@ -126,10 +131,14 @@ cmd_status() {
     done
     echo "KSU_UPDATE_MARK=$([ -e "$MODDIR/update" ] && echo 1 || echo 0)"
     # —— 艇长线程引擎 ——
+    #   ⚠ 必须按本模块自己的二进制路径判定「是否运行中」：设备上存在另一个同名
+    #      KSU 模块 aether-optext，其进程 cmdline 也含 aether-optext，用裸露
+    #      pgrep -f "aether-optext" 会误命中它 →「启用后仍显示未运行 / 误判运行中」。
     echo "AETHER_ON=$(sh "$AETHER_CTL" ison 2>/dev/null)"
-    if pgrep -f "aether-optext" >/dev/null 2>&1; then echo "AETHER_RUNNING=1"; echo "AETHER_PID=$(pgrep -f 'aether-optext' | tr '\n' ',' | sed 's/,$//')"; else echo "AETHER_RUNNING=0"; echo "AETHER_PID="; fi
+    local _apids; _apids=$(pgrep -f "$AETHER_BIN_PATH" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    if [ -n "$_apids" ]; then echo "AETHER_RUNNING=1"; echo "AETHER_PID=$_apids"; else echo "AETHER_RUNNING=0"; echo "AETHER_PID="; fi
     echo "AETHER_RULES=$(grep -c '\"friendly\"' "$AETHER_CFG" 2>/dev/null)"
-    echo "AETHER_BIN=$([ -x "$MODDIR/Scripts/4+4+2/O3/aether/aether-optext" ] && echo 1 || echo 0)"
+    echo "AETHER_BIN=$([ -x "$AETHER_BIN_PATH" ] && echo 1 || echo 0)"
     echo "AETHER_CFG_BYTES=$(wc -c < "$AETHER_CFG" 2>/dev/null | tr -d ' ')"
 }
 
@@ -193,9 +202,20 @@ cmd_freqview() {
     done
     echo "HWMAX_L=$(hwmax 0)"; echo "HWMAX_M=$(hwmax 4)"; echo "HWMAX_P=$(hwmax 8)"
     echo "STOCKMIN_L=$(stock_min_of 0)"; echo "STOCKMIN_M=$(stock_min_of 4)"; echo "STOCKMIN_P=$(stock_min_of 8)"
-    echo "STEPS_L=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)"
-    echo "STEPS_M=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)"
-    echo "STEPS_P=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null)"
+    # ★ 可用频率表：O3 某些内核不暴露 scaling_available_frequencies（返回空），
+    #   导致前端 min/max 下拉退化成「仅当前值」——点开后最低/最高都一样、无法选档。
+    #   这里逐簇读取，空了就退回相邻有值的簇 / 内置档位（DEFAULT_TIERS 同款），
+    #   保证下拉里始终有「多档可选」。
+    local sL sM sP
+    sL=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)
+    sM=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)
+    sP=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null)
+    [ -z "$sL" ] && { sL=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sL" ] && sL="417792 556800 835200 1113600 1497600 1939200 2246400 3148800"; }
+    [ -z "$sM" ] && { sM=$(cat /sys/devices/system/cpu/cpu8/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sM" ] && sM="$sL"; }
+    [ -z "$sP" ] && { sP=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null); [ -z "$sP" ] && sP="$sL"; }
+    echo "STEPS_L=$sL"
+    echo "STEPS_M=$sM"
+    echo "STEPS_P=$sP"
     echo "QMAX_L=$(qmax 0)"; echo "QMAX_M=$(qmax 4)"; echo "QMAX_P=$(qmax 8)"
     echo "QMIN_L=$(qmin 0)"; echo "QMIN_M=$(qmin 4)"; echo "QMIN_P=$(qmin 8)"
 }
@@ -275,17 +295,35 @@ cmd_appfreq() {
     echo "AF_N=$(awk -F"\t" 'NF>=2 && $1!="" && $1!~/^#/' "$APP_FREQ_FILE" 2>/dev/null | wc -l | tr -d ' ')"
 }
 
-# 列出设备上的应用（复用艇长的 app 枚举；失败则退回 pm list packages）
+# 列出设备上的应用（供「分应用频率 / 线程」的搜索添加用）
+#   ⚠ v18.2.x 修正：原版只走 aether_ctl apps，若它因任何原因返回空（如 cmd 不可用、
+#      线程引擎未启用等）就会「读不出有界面的 app」。改为：
+#        1) aether_ctl apps 可用且非空 → 直接用它（含 系统/第三方 标记 + 艇长配置状态）；
+#        2) 否则退回「完整 UI 应用清单」(cmd package query-activities)；
+#        3) 再不行退回 pm list packages（含第三方，标 sys=0）。
+#      三档兜底保证搜索框始终能列出本机应用。
 cmd_appfreqapps() {
     local ctl="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
     local out=""
     [ -f "$ctl" ] && out=$(sh "$ctl" apps 2>/dev/null)
-    if [ -z "$out" ] && has pm; then
+    if [ -n "$out" ]; then
+        printf '%s\n' "$out"
+        return 0
+    fi
+    # 兜底 2：完整启动器应用清单
+    if has cmd; then
+        out=$(cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER 2>/dev/null \
+              | sed -n 's#^[[:space:]]*\([^/][^/]*\)/.*#APP=\1|0#p' | sort -u)
+        [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
+    fi
+    # 兜底 3：全部包（第三方优先标 0）
+    if has pm; then
         out=$(pm list packages 2>/dev/null | sed 's/^package://' | while IFS= read -r p; do
             [ -n "$p" ] && printf 'APP=%s|0\n' "$p"
         done)
+        [ -n "$out" ] && { printf '%s\n' "$out"; return 0; }
     fi
-    printf '%s\n' "$out"
+    echo ""
 }
 
 cmd_appfreqset() {

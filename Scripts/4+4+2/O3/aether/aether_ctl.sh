@@ -247,6 +247,12 @@ cmd_apps() {
   local lp="${TMPD}/launch.txt" sp="${TMPD}/sys.txt"
   cmd package query-activities --brief -a android.intent.action.MAIN -c android.intent.category.LAUNCHER 2>/dev/null \
     | sed -n 's#^[[:space:]]*\([^/][^/]*\)/.*#\1#p' | sort -u > "$lp"
+  # ★ 兜底：launcher 查询无结果（某些 ROM / 权限下会返回空）时，退回 pm 全包清单，
+  #   避免线程页「读不出有界面应用」。注意：$lp/$sp 必须是**纯包名**（与正常路径一致，
+  #   awk 里据此判定系统/第三方），不要加 APP= 前缀。第三方(pm -3)进 $lp、系统(pm -s)进 $sp。
+  if [ ! -s "$lp" ]; then
+    pm list packages -3 2>/dev/null | sed 's/^package://' | sort -u > "$lp"
+  fi
   pm list packages -s 2>/dev/null | sed 's/^package://' | sort -u > "$sp"
   # 四份输入各包一行哨兵（# 开头），保证空文件也能正确计数（mawk/toybox 没有 ARGIND）
   local ovrf="${TMPD}/ovr.txt" aprf="${TMPD}/apr.txt" spf="${TMPD}/sp.txt" lpf="${TMPD}/lp.txt"
@@ -350,7 +356,8 @@ cmd_start() {
   [ -f "$ONF" ] || { echo "SKIP aether 未启用（$ONF 不存在）"; return 0; }
   [ -x "$BIN" ] || { echo "ERR 二进制缺失或不可执行: $BIN"; return 1; }
   [ -f "$CFG" ] || cmd_deploy >/dev/null 2>&1
-  pkill -f "aether-optext" 2>/dev/null; sleep 1
+  # 只停掉「本模块」的 aether-optext（按完整路径匹配），不要误杀同名兄弟模块
+  pkill -f "$BIN" 2>/dev/null; sleep 1
   # ★ 关键：常驻 native 进程必须**完全脱离**调用方的进程树与 stdio 管道。
   #   旧写法 `nohup $BIN ... &` 只是让 SIGHUP 不杀它，但它仍是 action 脚本的
   #   子进程、且**继承了 stdin（KSU action 的输出管道）**。KSU 的 action 运行器
@@ -367,9 +374,9 @@ cmd_start() {
 }
 
 cmd_stop() {
-  pkill -f "aether-optext" 2>/dev/null
+  pkill -f "$BIN" 2>/dev/null
   sleep 1
-  pgrep -f "aether-optext" >/dev/null 2>&1 && echo "WARN 仍有进程残留" || echo "OK 已停止"
+  pgrep -f "$BIN" >/dev/null 2>&1 && echo "WARN 仍有进程残留" || echo "OK 已停止"
 }
 
 cmd_restart() { cmd_stop >/dev/null 2>&1; cmd_start; }
@@ -378,8 +385,12 @@ cmd_ison() { [ -f "$ONF" ] && echo on || echo off; }
 
 cmd_status() {
   echo "ON=$(cmd_ison)"
-  if pgrep -f "aether-optext" >/dev/null 2>&1; then
-    echo "RUNNING=1"; echo "PID=$(pgrep -f 'aether-optext' | tr '\n' ',' | sed 's/,$//')"
+  # ⚠ 必须按本模块自己的二进制路径判定「是否运行中」：设备上存在另一个同名 KSU 模块
+  #   aether-optext（/data/adb/modules/aether-optext/aether-optext），其进程 cmdline
+  #   也含 aether-optext，用裸露 pgrep -f "aether-optext" 会误命中它 →「启用后仍显示未运行 / 误判运行中」。
+  local _p; _p=$(pgrep -f "$BIN" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  if [ -n "$_p" ]; then
+    echo "RUNNING=1"; echo "PID=$_p"
   else
     echo "RUNNING=0"; echo "PID="
   fi

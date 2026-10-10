@@ -271,6 +271,30 @@ textarea.f { resize: vertical; line-height: 1.5; }
 .app-sel { width: 18px; height: 18px; flex: none; accent-color: var(--accent); }
 .app-row.sel { background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
 
+/* ---------- 应用列表「窗口」：固定高度可滚动 + 筛选条 ---------- */
+.apptoolbar { padding: 10px 15px 4px; }
+.apptoolbar .f { margin-bottom: 8px; }
+/* 筛选 chips：横向滚动，不换行 */
+.chiprow {
+  display: flex; gap: 7px; overflow-x: auto; scrollbar-width: none;
+  padding: 2px 0 6px; -webkit-overflow-scrolling: touch;
+}
+.chiprow::-webkit-scrollbar { display: none; }
+.fchip {
+  flex: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 500;
+  padding: 5px 12px; border-radius: 99px; background: var(--chip-bg); color: var(--sub);
+  white-space: nowrap; transition: background .15s, color .15s;
+}
+.fchip.on { background: var(--accent); color: #fff; }
+/* 可滚动窗口：约 5-7 行高度，内部滑动加载 */
+.appwin {
+  max-height: 332px; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain;
+}
+.appwin .row { padding: 11px 15px; }
+.appwin .empty { padding: 22px 16px; }
+.winmore { padding: 11px 16px; text-align: center; color: var(--sub); font-size: 12.5px; }
+.winmore.loading { color: var(--accent); }
+
 /* ---------- Toast ---------- */
 #toast {
   position: fixed; left: 50%; bottom: calc(72px + env(safe-area-inset-bottom, 0px));
@@ -702,21 +726,31 @@ function collectTier(m) {
 
 /* ============================================================
    6) 视图：分应用频率（给特定应用单独指定一个频率档，前台时生效）
+   ------------------------------------------------------------
+   v18.2.x：列表改为「窗口」——固定高度可滚动 + 搜索 + 筛选 chips
+   （全部 / 系统 / 第三方 / 已配置 / 未配置），避免一屏铺满几百个应用。
    ============================================================ */
 const APP_MODE_OPTS = [['', '跟随全局'], ['powersave', '省电'], ['balance', '流畅'], ['performance', '性能'], ['fast', '极速']];
+const APPFREQ_FILTERS = [
+  ['all', '全部'], ['sys', '系统'], ['third', '第三方'], ['set', '已配置'], ['unset', '未配置']
+];
 
 async function viewAppFreq() {
   const v = document.getElementById('view');
-  S.appShow = 30;
+  S.appShow = 40;
+  S.appFilter = 'all';
+  S.appSearch = '';
   v.innerHTML =
     '<div class="group">' +
       '<div class="g-title rowhead">分应用频率 <span class="pill" id="appfreq-count"></span></div>' +
-      '<div class="g-foot" style="padding-bottom:8px">给特定应用单独指定一个频率档；该应用在前台时用它，切走即回到全局模式。<b>只有已配置的应用才会列出</b>，在下面搜索添加。</div>' +
-      '<div class="card" style="padding:12px 15px 4px">' +
-        '<input class="f" id="appfreq-search" placeholder="搜索并添加应用（包名关键字）…">' +
-        '<div id="appfreq-hits"></div>' +
+      '<div class="g-foot" style="padding-bottom:8px">给特定应用单独指定一个频率档；该应用在前台时用它，切走即回到全局模式。下方窗口可<b>滑动 / 搜索 / 按筛选</b>找应用。</div>' +
+      '<div class="card apptoolbar">' +
+        '<input class="f" id="appfreq-search" placeholder="搜索应用（包名关键字）…">' +
+        '<div class="chiprow" id="appfreq-filters">' +
+          APPFREQ_FILTERS.map(f => '<button class="fchip' + (f[0] === 'all' ? ' on' : '') + '" data-flt="' + f[0] + '">' + f[1] + '</button>').join('') +
+        '</div>' +
       '</div>' +
-      '<div class="card" id="appfreq-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
+      '<div class="card"><div class="appwin" id="appfreq-win"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div></div>' +
     '</div>' +
     '<div class="group"><div class="btn-grid"><button class="btn" data-act="reload">刷新</button></div></div>';
 
@@ -726,55 +760,72 @@ async function viewAppFreq() {
 }
 
 async function loadAppFreq() {
-  try { S.appfreq = await Api.appfreq(); } catch (e) { S.appfreq = {}; }
+  try {
+    // 后端 cmd_appfreq 返回形如：AF_<pkg>=<mode> 行 + 一行 AF_N=<数量>。
+    // 这里解析成 { pkg: mode } 对象，供 renderAppFreq 判定「已配置 / 当前档」。
+    const t = await Api.appfreq();
+    const m = {};
+    String(t).split('\n').forEach(l => {
+      if (l.indexOf('AF_') === 0 && l.indexOf('=') > 3) {
+        const i = l.indexOf('=');
+        m[l.slice(3, i)] = l.slice(i + 1).trim();
+      }
+    });
+    S.appfreq = m;
+  } catch (e) { S.appfreq = {}; }
 }
 async function loadAppList() {
   if (S.appList) return;
   try { S.appList = parseAppList(await Api.appfreqapps()); } catch (e) { S.appList = []; }
 }
 function parseAppList(text) {
+  // 与线程页一致：APP=pkg|sys(0/1)；附 applied=1 表示该应用已设分应用频率
   return String(text || '').split('\n').filter(l => l.indexOf('APP=') === 0)
     .map(l => { const f = l.slice(4).split('|'); return { pkg: f[0] || '', sys: f[1] || '0' }; })
     .filter(a => a.pkg);
 }
 
-function renderAppFreq() {
-  const card = document.getElementById('appfreq-card'); if (!card) return;
+function appfreqFiltered() {
   const m = S.appfreq || {};
-  const pkgs = Object.keys(m).sort();
-  const cnt = document.getElementById('appfreq-count');
-  if (cnt) { cnt.textContent = pkgs.length + ' 个'; cnt.className = 'pill'; }
-  if (!pkgs.length) {
-    card.innerHTML = '<div class="empty">还没有分应用频率配置<br>在上面搜索框输入包名即可添加</div>';
-  } else {
-    const list = pkgs.slice(0, S.appShow);
-    card.innerHTML = list.map(p => {
-      const cur = m[p] || '';
-      const opts = APP_MODE_OPTS.map(o => '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
-      return '<div class="row" style="padding:11px 15px;gap:10px">' +
-        '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p) + '</div></div>' +
-        '<select class="f" data-appfreq="' + esc(p) + '" style="width:auto;flex:none;min-width:92px">' + opts + '</select>' +
-        '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p) + '">移除</button>' +
-      '</div>';
-    }).join('');
-    if (pkgs.length > list.length) {
-      card.innerHTML += '<div class="empty" data-act="appfreqmore" style="cursor:pointer">加载更多（已显示 ' + list.length + '/' + pkgs.length + '）</div>';
+  const kw = (S.appSearch || '').trim().toLowerCase();
+  return (S.appList || []).filter(a => {
+    if (kw && a.pkg.toLowerCase().indexOf(kw) < 0) return false;
+    switch (S.appFilter) {
+      case 'sys':   return a.sys === '1';
+      case 'third': return a.sys !== '1';
+      case 'set':   return !!m[a.pkg];
+      case 'unset': return !m[a.pkg];
+      default:      return true;
     }
-  }
-  renderAppFreqHits();
+  });
 }
 
-function renderAppFreqHits() {
-  const box = document.getElementById('appfreq-hits'); if (!box) return;
-  const kw = (S.appSearch || '').trim().toLowerCase();
-  if (kw.length < 2) { box.innerHTML = ''; return; }
-  const hits = (S.appList || []).filter(a => a.pkg.toLowerCase().indexOf(kw) >= 0).slice(0, 12);
-  if (!hits.length) { box.innerHTML = '<div class="empty" style="padding:8px 0">没有匹配的应用</div>'; return; }
-  box.innerHTML = hits.map(a =>
-    '<div class="row" style="padding:9px 0;gap:8px">' +
-      '<div class="r-main"><div class="r-t mono" style="font-size:12px">' + esc(a.pkg) + '</div></div>' +
-      '<button class="btn btn-xs primary" data-act="appfreqadd" data-pkg="' + esc(a.pkg) + '">添加</button>' +
-    '</div>').join('');
+function renderAppFreq() {
+  const win = document.getElementById('appfreq-win'); if (!win) return;
+  const m = S.appfreq || {};
+  const all = appfreqFiltered();
+  const cnt = document.getElementById('appfreq-count');
+  if (cnt) { cnt.textContent = all.length + ' 个'; cnt.className = 'pill'; }
+  const list = all.slice(0, S.appShow);
+  if (!list.length) {
+    win.innerHTML = '<div class="empty">没有匹配的应用<br>换个筛选或搜索词试试</div>';
+    return;
+  }
+  win.innerHTML = list.map(p => {
+    const cur = m[p.pkg] || '';
+    const opts = APP_MODE_OPTS.map(o => '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
+    const badge = p.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
+    return '<div class="row" style="display:flex;align-items:center;gap:10px">' +
+      '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p.pkg) + ' ' + badge + '</div></div>' +
+      '<select class="f" data-appfreq="' + esc(p.pkg) + '" style="width:auto;flex:none;min-width:92px">' + opts + '</select>' +
+      (cur ? '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p.pkg) + '">移除</button>'
+           : '<button class="btn btn-xs primary" data-act="appfreqadd" data-pkg="' + esc(p.pkg) + '">添加</button>') +
+    '</div>';
+  }).join('');
+  if (all.length > list.length) {
+    win.innerHTML += '<div class="winmore" data-act="appfreqmore">加载更多（已显示 ' + list.length + '/' + all.length + '）</div>';
+  }
+  bindAppwinScroll('appfreq-win');
 }
 
 /* ============================================================
@@ -796,6 +847,8 @@ const TPL_OPTS = [
 async function viewThread() {
   const v = document.getElementById('view');
   S.showCount = 40;
+  S.appfilter = 'all';
+  S.appsearch = '';
   v.innerHTML =
     '<div class="group">' +
       '<div class="card" id="aether-card">' +
@@ -811,9 +864,12 @@ async function viewThread() {
     '</div>' +
     '<div class="group">' +
       '<div class="g-title rowhead">应用线程档位 <span class="pill" id="apps-count"></span></div>' +
-      '<div class="g-foot" style="padding-bottom:8px">按<b>角色档</b>下发：主线程 / 重线程 / 按线程名路由分别落到不同簇，<b>不是把整个应用压到一个簇</b>。</div>' +
-      '<div class="card" style="padding:12px 15px 4px">' +
+      '<div class="g-foot" style="padding-bottom:8px">按<b>角色档</b>下发：主线程 / 重线程 / 按线程名路由分别落到不同簇，<b>不是把整个应用压到一个簇</b>。下方窗口可<b>滑动 / 搜索 / 按筛选</b>找应用。</div>' +
+      '<div class="card apptoolbar">' +
         '<input class="f" id="app-search" placeholder="搜索包名…">' +
+        '<div class="chiprow" id="app-filters">' +
+          APPFREQ_FILTERS.map(f => '<button class="fchip' + (f[0] === 'all' ? ' on' : '') + '" data-flt="' + f[0] + '">' + f[1] + '</button>').join('') +
+        '</div>' +
         '<div class="selbar">' +
           '<span id="selcount" class="pill accent">已选 0</span>' +
           '<button class="btn btn-xs ghost" data-act="selall">全选当前</button>' +
@@ -825,7 +881,7 @@ async function viewThread() {
           '<button class="btn btn-xs ghost" data-act="batch" data-cl="auto">跟随艇长</button>' +
         '</div>' +
       '</div>' +
-      '<div class="card" id="apps-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div>' +
+      '<div class="card"><div class="appwin" id="apps-card"><div class="row"><div class="r-main"><div class="r-t">加载中…</div></div></div></div></div>' +
     '</div>';
 
   await refreshAether();
@@ -865,7 +921,12 @@ function currentPkgs() {
   const kw = S.appsearch;
   return S.apps.filter(a => {
     const st = appStatusOf(a);
-    if (S.appfilter !== 'all' && st !== S.appfilter) return false;
+    switch (S.appfilter) {
+      case 'sys':   if (a.sys !== '1') return false; break;
+      case 'third': if (a.sys === '1') return false; break;
+      case 'set':   if (st === 'none') return false; break;
+      case 'unset': if (st !== 'none') return false; break;
+    }
     if (kw && a.pkg.toLowerCase().indexOf(kw) < 0) return false;
     return true;
   });
@@ -877,7 +938,7 @@ function renderApps() {
   const cnt = document.getElementById('apps-count');
   if (cnt) { cnt.textContent = all.length + ' 个'; cnt.className = 'pill'; }
   const list = all.slice(0, S.showCount);
-  if (!list.length) { card.innerHTML = '<div class="empty">没有匹配的应用</div>'; return; }
+  if (!list.length) { card.innerHTML = '<div class="empty">没有匹配的应用<br>换个筛选或搜索词试试</div>'; return; }
   card.innerHTML = list.map(a => {
     const badge = a.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
     let statusPill, selVal, extra = '';
@@ -901,8 +962,9 @@ function renderApps() {
     '</div>';
   }).join('');
   if (all.length > list.length) {
-    card.innerHTML += '<div class="empty" data-act="loadmore" style="cursor:pointer">加载更多（已显示 ' + list.length + '/' + all.length + '）</div>';
+    card.innerHTML += '<div class="winmore" data-act="loadmore">加载更多（已显示 ' + list.length + '/' + all.length + '）</div>';
   }
+  bindAppwinScroll('apps-card');
   updateSelCount();
 }
 
@@ -1036,7 +1098,7 @@ const ACTIONS = {
     showToast(/OK/.test(r) ? ('已移除 ' + pkg + ' 的分应用频率') : ('失败：' + (r || '').slice(0, 60)));
     await loadAppFreq(); renderAppFreq();
   },
-  appfreqmore: () => { S.appShow += 30; renderAppFreq(); }
+  appfreqmore: () => { S.appShow += 40; renderAppFreq(); }
 };
 
 // 内置默认频率档位（与 util.sh mode_freq 一致），用于「恢复默认」
@@ -1082,6 +1144,21 @@ document.addEventListener('click', async (e) => {
   const act = e.target.closest('[data-act]');
   if (act) { const fn = ACTIONS[act.dataset.act]; if (fn) { await fn(act); return; } }
   if (e.target.closest('[data-scheme]')) return;
+  // 分应用频率 / 线程页 的筛选 chips
+  const flt = e.target.closest('[data-flt]');
+  if (flt) {
+    const key = flt.dataset.flt;
+    if (flt.closest('#appfreq-filters')) {
+      S.appFilter = key; S.appShow = 40;
+      document.querySelectorAll('#appfreq-filters .fchip').forEach(c => c.classList.toggle('on', c === flt));
+      renderAppFreq();
+    } else if (flt.closest('#app-filters')) {
+      S.appfilter = key; S.showCount = 40;
+      document.querySelectorAll('#app-filters .fchip').forEach(c => c.classList.toggle('on', c === flt));
+      renderApps();
+    }
+    return;
+  }
   const tab = e.target.closest('[data-tab]');
   if (tab) { S.tab = tab.dataset.tab; render(); return; }
 });
@@ -1115,12 +1192,26 @@ document.addEventListener('change', async (e) => {
 
 document.addEventListener('input', (e) => {
   if (e.target.id === 'app-search') { S.appsearch = e.target.value.trim().toLowerCase(); renderApps(); }
-  if (e.target.id === 'appfreq-search') { S.appSearch = e.target.value.trim().toLowerCase(); renderAppFreqHits(); }
+  if (e.target.id === 'appfreq-search') { S.appSearch = e.target.value.trim().toLowerCase(); S.appShow = 40; renderAppFreq(); }
 });
 
 window.addEventListener('scroll', () => {
   const h = document.querySelector('header'); if (h) h.classList.toggle('scrolled', window.scrollY > 8);
 }, { passive: true });
+
+// 应用列表窗口：滚动到底自动加载更多（无限滚动）。
+// ⚠ 嵌套 .appwin 的 scroll 事件不会冒泡到 document，必须直接绑到该元素上。
+function bindAppwinScroll(id, moreAct) {
+  const win = document.getElementById(id); if (!win) return;
+  if (win._winBound) return;            // 视图内元素稳定，只绑一次
+  win._winBound = true;
+  win.addEventListener('scroll', () => {
+    if (win.scrollTop + win.clientHeight >= win.scrollHeight - 48) {
+      const more = win.querySelector('.winmore');
+      if (more && !more.classList.contains('loading')) { more.classList.add('loading'); more.click(); }
+    }
+  }, { passive: true });
+}
 
 (async function boot() {
   const mode = await Bridge.probe();
