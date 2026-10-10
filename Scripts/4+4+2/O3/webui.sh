@@ -41,8 +41,12 @@ AETHER_CTL="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
 # ★ 本模块专属的 aether-optext 二进制完整路径（用于「是否运行中」判定与启停）。
 #   设备上存在另一个同名 KSU 模块 aether-optext（/data/adb/modules/aether-optext/aether-optext），
 #   其进程 cmdline 也含 "aether-optext"。若用 pgrep -f "aether-optext" 会误判那个兄弟模块的进程，
-#   导致本模块「线程引擎启用后仍显示未运行 / 误判运行中」。必须按本模块自己的路径来匹配。
+#   导致本模块「线程引擎启用后仍显示未运行 / 误判运行中」。
+#   ⚠ 双重坑：本模块路径含 "4+4+2"，「+」是正则元字符，pgrep -f 必须转义，否则匹配不到本模块进程。
 AETHER_BIN_PATH="$MODDIR/Scripts/4+4+2/O3/aether/aether-optext"
+# 转义后的正则（供 pgrep -f / pkill -f 精确匹配本模块进程）
+AETHER_BIN_RE="$AETHER_BIN_PATH"
+AETHER_BIN_RE=$(printf '%s' "$AETHER_BIN_RE" | sed 's/[][\.*+?(){}|^$]/\\&/g')
 AETHER_CFG="/sdcard/Android/Aether/threads.json"
 PY="$(command -v python3 2>/dev/null || command -v python 2>/dev/null)"
 
@@ -135,7 +139,7 @@ cmd_status() {
     #      KSU 模块 aether-optext，其进程 cmdline 也含 aether-optext，用裸露
     #      pgrep -f "aether-optext" 会误命中它 →「启用后仍显示未运行 / 误判运行中」。
     echo "AETHER_ON=$(sh "$AETHER_CTL" ison 2>/dev/null)"
-    local _apids; _apids=$(pgrep -f "$AETHER_BIN_PATH" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+    local _apids; _apids=$(pgrep -f "$AETHER_BIN_RE" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
     if [ -n "$_apids" ]; then echo "AETHER_RUNNING=1"; echo "AETHER_PID=$_apids"; else echo "AETHER_RUNNING=0"; echo "AETHER_PID="; fi
     echo "AETHER_RULES=$(grep -c '\"friendly\"' "$AETHER_CFG" 2>/dev/null)"
     echo "AETHER_BIN=$([ -x "$AETHER_BIN_PATH" ] && echo 1 || echo 0)"

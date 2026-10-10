@@ -35,6 +35,14 @@ mkdir -p "$STATE_DIR" "$TMPD" 2>/dev/null
 
 has(){ command -v "$1" >/dev/null 2>&1; }
 
+# ★ 转义 pgrep/pkill -f 的正则元字符。
+#   二进制路径里含 "4+4+2"，其中的「+」会被 pgrep -f 当成「前导字符量词」，
+#   导致 pgrep -f ".../4+4+2/.../aether-optext" 永远匹配不到本模块进程 → RUNNING 误报 0、
+#   pkill 也停不掉本模块引擎。这里把 [][\.*+?(){}|^$] 全部转义成字面量。
+re_escape(){ printf '%s' "$1" | sed 's/[][\.*+?(){}|^$]/\\&/g'; }
+# 取本模块二进制路径（已转义，可直接喂给 pgrep -f / pkill -f）
+BIN_RE="$(re_escape "$BIN")"
+
 # ---------- 拓扑检测（复用艇长 customize.sh 的 cpufreq 分组逻辑）----------
 detect_topo() {
   eval "$(for policy in /sys/devices/system/cpu/cpufreq/policy[0-9]*; do
@@ -356,8 +364,18 @@ cmd_start() {
   [ -f "$ONF" ] || { echo "SKIP aether 未启用（$ONF 不存在）"; return 0; }
   [ -x "$BIN" ] || { echo "ERR 二进制缺失或不可执行: $BIN"; return 1; }
   [ -f "$CFG" ] || cmd_deploy >/dev/null 2>&1
-  # 只停掉「本模块」的 aether-optext（按完整路径匹配），不要误杀同名兄弟模块
-  pkill -f "$BIN" 2>/dev/null; sleep 1
+  # 只停掉「本模块」的 aether-optext（按完整路径匹配，已 regex 转义），不要误杀同名兄弟模块
+  pkill -f "$BIN_RE" 2>/dev/null; sleep 1
+  # ★ 同配置抢占：设备若存在另一个同名 KSU 模块 aether-optext，它很可能也读着
+  #   /sdcard/Android/Aether/threads.json —— 两份引擎抢同一份配置会互殴。
+  #   本模块启用时，必须把「非本模块路径、但读同一份 -c CFG」的 aether-optext 也停掉，
+  #   由本模块独占该配置。命中条件：cmdline 含本模块 CFG 路径且**不是**本模块二进制。
+  for pid in $(pgrep -f "aether-optext -c $CFG" 2>/dev/null); do
+    c=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+    case "$c" in *"$BIN"*) continue ;; esac   # 本模块自己的，跳过
+    kill "$pid" 2>/dev/null && echo "已让出同配置竞争引擎 pid $pid"
+  done
+  sleep 1
   # ★ 关键：常驻 native 进程必须**完全脱离**调用方的进程树与 stdio 管道。
   #   旧写法 `nohup $BIN ... &` 只是让 SIGHUP 不杀它，但它仍是 action 脚本的
   #   子进程、且**继承了 stdin（KSU action 的输出管道）**。KSU 的 action 运行器
@@ -374,9 +392,9 @@ cmd_start() {
 }
 
 cmd_stop() {
-  pkill -f "$BIN" 2>/dev/null
+  pkill -f "$BIN_RE" 2>/dev/null
   sleep 1
-  pgrep -f "$BIN" >/dev/null 2>&1 && echo "WARN 仍有进程残留" || echo "OK 已停止"
+  pgrep -f "$BIN_RE" >/dev/null 2>&1 && echo "WARN 仍有进程残留" || echo "OK 已停止"
 }
 
 cmd_restart() { cmd_stop >/dev/null 2>&1; cmd_start; }
@@ -387,8 +405,9 @@ cmd_status() {
   echo "ON=$(cmd_ison)"
   # ⚠ 必须按本模块自己的二进制路径判定「是否运行中」：设备上存在另一个同名 KSU 模块
   #   aether-optext（/data/adb/modules/aether-optext/aether-optext），其进程 cmdline
-  #   也含 aether-optext，用裸露 pgrep -f "aether-optext" 会误命中它 →「启用后仍显示未运行 / 误判运行中」。
-  local _p; _p=$(pgrep -f "$BIN" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
+  #   也含 aether-optext；且本模块路径含 "4+4+2"，「+」是正则元字符，pgrep -f 必须转义。
+  #   用 BIN_RE（已转义完整路径）精确命中本模块进程，杜绝误判 / 漏判。
+  local _p; _p=$(pgrep -f "$BIN_RE" 2>/dev/null | tr '\n' ',' | sed 's/,$//')
   if [ -n "$_p" ]; then
     echo "RUNNING=1"; echo "PID=$_p"
   else
