@@ -22,14 +22,14 @@ done
 SCENE_PKG="com.omarea.vtools"
 SCENE_DIR="/data/data/${SCENE_PKG}/files"
 MODDIR="${MODDIR:-${0%/*}}"
-[ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/SceneO3Tuner"
+[ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/O3CPUSet"
 
-# ⚠ 用 ${VAR:-默认} 而不是硬赋值：单元测试要在沙盒里跑迁移/落盘逻辑，
+# ⚠ 用 ${VAR:-默认} 而不是硬赋值：单元测试要在沙盒里跑落盘逻辑，
 #   硬赋值会让测试**静默地**去操作真机路径（本测试套件踩过：沙盒参数不生效，
 #   测试"通过"其实是假阳性）。生产路径不变，只是允许外部覆盖。
-STATE_DIR="${STATE_DIR:-/data/adb/SceneO3Tuner}"
+STATE_DIR="${STATE_DIR:-/data/adb/O3CPUSet}"
 ACTIVE_FILE="${STATE_DIR}/active_scheme"
-LOG_FILE="${STATE_DIR}/sceneo3.log"
+LOG_FILE="${STATE_DIR}/o3cpuset.log"
 mkdir -p "$STATE_DIR" 2>/dev/null
 
 # WebUI 后端与公共库共用的临时目录。
@@ -811,14 +811,11 @@ scheme_name_cn() {
 # ============================================================
 
 # ============================================================
-#  游戏（Scene 标记）+ 模板
-#  实时读 Scene 的 games.xml，输出「游戏 → 模式」与模板分配，
-#  供前端「游戏」页渲染：频率跟随 Scene 对单应用的设置，
-#  线程由 GAME_TPL_FILE / GAME_ASSIGN_FILE 模板驱动（语义占位符，
-#  方案与 Aether_OptExt 一致：{e_core}/{p_core}/{hp_core} + 线程名 comm 规则）。
+#  安装后自愈：合并 modules_update 暂存副本
+#  （KSU 就地安装会留一份待更新副本；这里负责合并进在服目录）
 # ============================================================
 selfheal_pending_update() {
-  local NVBASE="/data/adb" ID="SceneO3Tuner"
+  local NVBASE="/data/adb" ID="O3CPUSet"
   local UPD="${NVBASE}/modules_update/${ID}" FIN="${NVBASE}/modules/${ID}"
   [ -d "$UPD" ] || return 0
   [ -f "$UPD/module.prop" ] || return 0
@@ -840,10 +837,9 @@ selfheal_pending_update() {
     chmod 0755 "$FIN/service.sh" "$FIN/action.sh" "$FIN/uninstall.sh" 2>/dev/null
     chmod 0755 "$FIN"/lib/*.sh "$FIN"/Scripts/*/*/*.sh \
                "$FIN"/Config/*/*/*.sh "$FIN"/Config/*/*/*/*.sh 2>/dev/null
-    # ⚠ 上面只匹配 *.sh；事件驱动辅助是**编译好的 ELF（无 .sh 后缀）**，
-    #   合并后若丢了可执行位，service.sh 会起不来它 —— 而且是静默失败
-    #   （`[ -x ... ]` 判 false 直接跳过），排查起来很费劲。显式补一次。
-    chmod 0755 "$FIN/Scripts/4+4+2/O3/pinwatch" 2>/dev/null
+    # ⚠ 舰长引擎是**编译好的 ELF（无 .sh 后缀）**，合并后若丢了可执行位，
+    #   service.sh 会起不来它 —— 而且是静默失败（`[ -x ... ]` 判 false 直接跳过）。
+    chmod 0755 "$FIN/Scripts/4+4+2/O3/aether/aether-optext" 2>/dev/null
     return 0
   fi
 

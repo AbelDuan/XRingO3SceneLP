@@ -34,9 +34,13 @@ cd / || cd /data
 # 「QoS 遗留值只清一次」的标记（见主循环里亮/息屏切换那段的原因说明）
 QOS_CLEARED="${STATE_DIR}/qos_cleared"
 
-# 线程配置：v18.2.9 起本守护只保证「配置存在」，生成与落核全归舰长引擎。
+# 线程配置：v18.2.9 起本守护只保证「配置存在」+「引擎在跑」，生成与落核全归舰长引擎。
 AETHER_CTL="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
 AETHER_THREADS="/sdcard/Android/Aether/threads.json"
+ONF="${STATE_DIR}/aether.on"
+# 本模块二进制路径（pgrep -f 的完整路径已 regex 转义；「+」是元字符）
+AETHER_BIN="$MODDIR/Scripts/4+4+2/O3/aether/aether-optext"
+AETHER_BIN_RE="$(printf '%s' "$AETHER_BIN" | sed 's/[.[\*^$()+?{}|]/\\&/g')"
 
 log "🛡 守护启动（亮屏 ${INTERVAL}s / 息屏 $((INTERVAL*6))s；频率兜底 + 线程配置保活，线程落核归舰长引擎）"
 
@@ -227,7 +231,7 @@ while :; do
         fi
 
         # ---- 3) 确保舰长的线程配置存在（规则生成 + 覆盖合并都归 aether_ctl）----
-        #   v18.2.9：本守护**不再**生成/落核线程 —— 只负责「配置在不在」。
+        #   v18.3.1：本守护**不再**生成/落核线程 —— 只负责「配置在不在」。
         #   · threads.json 丢失/为空 → 让 aether_ctl deploy 重新生成
         #   · 用户改了自定义分配 → WebUI 调 aetherset 时已即时 deploy，此处无需轮询
         if [ ! -s "$AETHER_THREADS" ]; then
@@ -238,6 +242,18 @@ while :; do
         # （相机档位看护、超大核 8-9 cpuset 限制、camera_freq_guard 拉起 —— 均已移除。
         #   前者根因在 v12 从源头修掉；后两者随老落核链路（bigcore_guard.sh）一并删除，
         #   线程与 cpuset 现在完全由舰长引擎自行管理。）
+    fi
+
+    # ---- 引擎看护（每轮，不限于 WORK）----
+    #   ⚠ v18.3.1 新增：线程完全交舰长后，**引擎是否活着**就成了唯一的线程保障。
+    #   此前守护只查「threads.json 在不在」，引擎崩了/没起来一律无人察觉 ——
+    #   实测强杀引擎后守护连等 3 轮都不会自愈，线程分配静默失效。
+    #   这里每轮用一次 pgrep（≈30ms）比对，掉了就用 aether_ctl start 拉起（幂等）。
+    if [ -f "$ONF" ] && [ -x "$AETHER_CTL" ]; then
+        if ! pgrep -f "$AETHER_BIN_RE" >/dev/null 2>&1; then
+            sh "$AETHER_CTL" start >/dev/null 2>&1
+            log_quiet "🔄 舰长引擎未运行 → 已自动拉起（守护看护）"
+        fi
     fi
 
     sleep "$INTERVAL"
