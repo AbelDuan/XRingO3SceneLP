@@ -815,11 +815,11 @@ function renderAppFreq() {
     const cur = m[p.pkg] || '';
     const opts = APP_MODE_OPTS.map(o => '<option value="' + o[0] + '"' + (cur === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('');
     const badge = p.sys === '1' ? '<span class="pill">系统</span>' : '<span class="pill accent">第三方</span>';
+    const cfg = cur ? '<span class="pill ok">已设</span>' : '';
     return '<div class="row" style="display:flex;align-items:center;gap:10px">' +
-      '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p.pkg) + ' ' + badge + '</div></div>' +
-      '<select class="f" data-appfreq="' + esc(p.pkg) + '" style="width:auto;flex:none;min-width:92px">' + opts + '</select>' +
-      (cur ? '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p.pkg) + '">移除</button>'
-           : '<button class="btn btn-xs primary" data-act="appfreqadd" data-pkg="' + esc(p.pkg) + '">添加</button>') +
+      '<div class="r-main"><div class="r-t mono" style="font-size:12.5px">' + esc(p.pkg) + ' ' + badge + ' ' + cfg + '</div></div>' +
+      '<select class="f" data-appfreq="' + esc(p.pkg) + '" style="width:auto;flex:none;min-width:96px">' + opts + '</select>' +
+      (cur ? '<button class="btn btn-xs ghost" data-act="appfreqdel" data-pkg="' + esc(p.pkg) + '">移除</button>' : '') +
     '</div>';
   }).join('');
   if (all.length > list.length) {
