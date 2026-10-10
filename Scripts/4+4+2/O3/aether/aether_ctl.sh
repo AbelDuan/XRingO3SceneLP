@@ -176,22 +176,59 @@ merge_overrides() {
       printf '\n    }'
     } >> "$full"
   done < "$OVR"
-  # 插入点：**最后一行只含 `]`（可有前导空格）**——兼容两种格式：
-  #   艇长 Config 模板结尾是「  ]」，设备/二进制规范化后是「]」。
-  #   旧写法硬匹配 /^  \]$/ 在后者上永不命中（覆盖静默失效），这里改为
-  #   「记住最后一个 ^[[:space:]]*]$ 的行号，在其前插入」。
+  # ⚠ 去重：OVR 里出现的包，BASE 中同名（packages 命中）的条目必须剔除，
+  #    否则会出现「艇长已配 + 用户自定义」两条同包规则并列 → Aether 行为打架。
+  #    做法：单趟读 BASE，跟踪每个 friendly 块的 packages；块结束若命中 OVR 包则丢弃。
+  local ovrpk="${TMPD}/aether_ovr_pkgs.txt"
+  : > "$ovrpk"
+  while IFS='	' read -r pkg role || [ -n "$pkg" ]; do
+    [ -z "$pkg" ] && continue
+    [ "${pkg#\#}" != "$pkg" ] && continue
+    printf '%s\n' "$pkg" >> "$ovrpk"
+  done < "$OVR"
+  local base_filtered="${TMPD}/aether_base_filtered.json"
+  awk -v ovr="$ovrpk" '
+    BEGIN { while ((getline l < ovr) > 0) { gsub(/\r/,"",l); if (l ~ /\./) ovrp[l]=1 } }
+    function flush_block(){
+      if (inb == 0) return
+      hit=0
+      n=split(bpkgs,arr,SUBSEP)
+      for(k=1;k<=n;k++){ if(arr[k] in ovrp){ hit=1; break } }
+      if (hit == 0) { for(j=0;j<bc;j++) print buf[j] }
+      inb=0; bc=0; bpkgs=""
+    }
+    /^[[:space:]]*[{][[:space:]]*$/ { inb=1; bc=0; bpkgs=""; buf[bc++]=$0; next }
+    inb && /"friendly"/ { buf[bc++]=$0; next }
+    inb && /"packages"[[:space:]]*:[[:space:]]*\[/ { inpkg=1; buf[bc++]=$0; next }
+    inb && inpkg {
+      line=$0
+      while (match(line, /"[a-zA-Z][a-zA-Z0-9._]*"/)) {
+        p=substr(line,RSTART,RLENGTH); p=substr(p,2,length(p)-2)
+        if (p ~ /\./) bpkgs=(bpkgs==""?p:bpkgs SUBSEP p)
+        line=substr(line,RSTART+RLENGTH)
+      }
+      buf[bc++]=$0
+      if ($0 ~ /\]/) inpkg=0
+      next
+    }
+    inb && /"cpuset"/ { buf[bc++]=$0; next }
+    inb && /^[[:space:]]*\}/ { buf[bc++]=$0; flush_block(); next }
+    inb { buf[bc++]=$0; next }
+    { print }
+  ' "$BASE" > "$base_filtered" 2>/dev/null
+  [ -s "$base_filtered" ] || cp -f "$BASE" "$base_filtered" 2>/dev/null
+  # 把去重后的 BASE 与 OVR 规则拼接：找到最后一个 ^[[:space:]]*]$ 行，其前插入 OVR 规则
   awk -v full="$full" '
     { lines[NR] = $0 }
     /^[[:space:]]*\][[:space:]]*$/ { last = NR }
     END {
       if (last == 0) { for (i = 1; i <= NR; i++) print lines[i]; exit }
       for (i = 1; i < last; i++) print lines[i]
-      # 给已有规则补逗号，再接覆盖规则
       printf ",\n"
       while ((getline l < full) > 0) print l
       print lines[last]
     }
-  ' "$BASE" > "$CFG" 2>/dev/null
+  ' "$base_filtered" > "$CFG" 2>/dev/null
   [ -s "$CFG" ] || cp -f "$BASE" "$CFG" 2>/dev/null
   chmod 0666 "$CFG" 2>/dev/null; chown 0:0 "$CFG" 2>/dev/null
 }
@@ -217,6 +254,11 @@ tpl_cpuset() {
       # 中低负载 0-7 由系统分配，高负载线程由 load_aware 上探 4-9
       printf '{"main_thread":"%s","heaviest_thread":"RenderThread;GameThread;UnityMain","heaviest_cores":"%s","heavy_thread":"RenderThread;RHIThread;UnityGfx","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread"]},"other":"%s"}' \
         "$P1" "$HP" "$P1" "$E" "$P1" "$E,$P1" ;;
+    none)
+      # 不接管：主线程与所有其余线程都放开到全部核心（0-9），交由系统调度器默认分配。
+      # 仅设 main_thread/other，中间层不约束，等效「按系统自带线程」执行。
+      [ -z "$ALL" ] && ALL="${E}"
+      printf '{"main_thread":"%s","other":"%s"}' "$ALL" "$ALL" ;;
     game)
       # 游戏：主线程/最重线程上大核，渲染与任务线程走中核，音频/IO 留小核
       printf '{"main_thread":"%s,%s","heaviest_thread":"UnityMain;GameThread;UEGameThread;Thread-;Main","heaviest_cores":"%s","heavy_thread":"UnityGfx;RHIThread;RenderThread","heavy_cores":"%s","comm":{"%s":["Audio","AudioTrack","FMOD","Http","Socket","Download","GC","Pool","TAsync"],"%s":["RenderThread","Job.","Loading.","TaskGraph","NativeThread","Background","RHIThread","UnityGfx"]},"other":"%s"}' \
@@ -293,12 +335,12 @@ cmd_set() {
   case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) echo "ERR 包名含非法字符"; return 1 ;; esac
   role=$(printf '%s' "$role" | tr -d ' \r')
   case "$role" in
-    powersave|balance|performance|fast|game) ;;
+    powersave|balance|performance|fast|game|none) ;;
     # 旧核位 → 等价角色
     0-3)       role=powersave ;;
     4-7|0-7)   role=performance ;;
     8-9|4-9)   role=fast ;;
-    *) echo "ERR 非法角色档: $role（可用 powersave/balance/performance/fast/game）"; return 1 ;;
+    *) echo "ERR 非法角色档: $role（可用 powersave/balance/performance/fast/game/none）"; return 1 ;;
   esac
   mkdir -p "$STATE_DIR"
   [ -f "$OVR" ] && awk -F'\t' -v p="$pkg" '$1!=p' "$OVR" > "${OVR}.tmp" 2>/dev/null && mv -f "${OVR}.tmp" "$OVR" 2>/dev/null
@@ -333,7 +375,7 @@ cmd_setbatch() {
     [ -z "$pkg" ] && { bad=$((bad+1)); continue; }
     case "$pkg" in */*|*'<'*|*'>'*|*'"'*|*' '*|*\`*) bad=$((bad+1)); continue ;; esac
     case "$cl" in
-      powersave|balance|performance|fast|game) keep=$((keep+1)) ;;
+      powersave|balance|performance|fast|game|none) keep=$((keep+1)) ;;
       # 旧核位 → 等价角色（老前端 / 历史数据兼容）
       0-3)                     cl=powersave;   keep=$((keep+1)) ;;
       4-7|0-7)                 cl=performance; keep=$((keep+1)) ;;

@@ -1,4 +1,4 @@
-
+﻿
 /* ============================================================
    玄戒O3 · Abel 调度工具箱 —— WebUI 前端（两大块：CPU频率 / 线程分配）
      ① CPU频率：选方案 + 选全局模式 → 同步到 Scene（含启用，不再是自定义模式）
@@ -691,8 +691,9 @@ const TPL_OPTS = [
   ['powersave', '省电（轻载）'],
   ['balance', '流畅（日用）'],
   ['performance', '性能（重载）'],
-  ['fast', '极速（全核）'],
-  ['game', '游戏（分线程路由）']
+  ['fast', '极速（重线全核）'],
+  ['game', '游戏（专用线程路由）'],
+  ['none', '不接管（系统默认 0-9）']
 ];
 
 async function viewThread() {
@@ -711,6 +712,7 @@ async function viewThread() {
         '<div class="kv-row"><span class="k">运行状态</span><span class="v" id="aether-run">—</span></div>' +
         '<div class="kv-row"><span class="k">规则数</span><span class="v" id="aether-rules">—</span></div>' +
         '<div class="kv-row"><span class="k">拓扑</span><span class="v mono" id="aether-topo">—</span></div>' +
+        '<div class="kv-row feat-block"><span class="k">艇长特性</span><span class="v" id="aether-feats">—</span></div>' +
       '</div>' +
     '</div>' +
     '<div class="group">' +
@@ -767,6 +769,40 @@ function renderAetherCard(m) {
     if (hp) parts.push('大核 ' + hp);
     topo.textContent = parts.length ? (parts.join(' · ') + '（' + (m.TOPO_CLUSTERS || 3) + '簇）') : '—';
   }
+  // 艇长特性开关（来自 cmd_aether 的 FEAT_<k>=<v> 逐条输出）
+  const featsEl = document.getElementById('aether-feats');
+  if (featsEl) {
+    const FEAT_META = {
+      'ebpf': ['eBPF 加速', '用 eBPF 做线程分类，更省 CPU'],
+      'auto-for-none': ['不接管应用自动调度', 'none 角色的应用交给系统默认'],
+      'foreground': ['前台优先', '仅前台应用生效线程策略'],
+      'load_aware': ['负载感知', '按实时负载把线程上探到更大核'],
+      'render_guard': ['渲染守护', '保护 RenderThread 不被压到小核'],
+      'min_cpus': ['最小在线核数', '各簇保活的最小核心数']
+    };
+    const map = {};
+    Object.keys(m).forEach(k => { if (k.indexOf('FEAT_') === 0) map[k.slice(5)] = m[k]; });
+    const keys = Object.keys(FEAT_META).filter(k => k in map);
+    if (!keys.length) { featsEl.innerHTML = '<span class="pill">无</span>'; }
+    else {
+      featsEl.innerHTML = keys.map(k => {
+        const [cn, tip] = FEAT_META[k];
+        const val = map[k];
+        const isBool = (val === 'true' || val === 'false');
+        if (isBool) {
+          return '<label class="sw sw-sm" title="' + tip + '"><input type="checkbox" data-feat="' + k + '"' + (val === 'true' ? ' checked' : '') + '><i></i><span>' + cn + '</span></label>';
+        }
+        return '<span class="feat-kv" title="' + tip + '">' + cn + '：<b>' + esc(val) + '</b></span>';
+      }).join('');
+    }
+  }
+}
+
+// 切换艇长特性开关
+async function toggleAetherFeat(k, v) {
+  const r = await Api.aetherfeat(k, v);
+  if (!/OK/.test(r)) { showToast('特性 ' + k + ' 设置失败：' + (r || '').slice(0, 40)); return false; }
+  return true;
 }
 
 async function loadApps() {
@@ -1088,6 +1124,14 @@ document.addEventListener('change', async (e) => {
     await loadAppFreq(); renderAppFreq();
     return;
   }
+  const feat = e.target.closest('[data-feat]');
+  if (feat) {
+    const k = feat.dataset.feat; const v = feat.checked ? 'true' : 'false';
+    const ok = await toggleAetherFeat(k, v);
+    if (!ok) { feat.checked = !feat.checked; }
+    else { const m = S.aether || {}; m.AETHER_FEATS = (m.AETHER_FEATS || '').replace(new RegExp('(^|;)' + k + ':[^;]*'), '$1' + k + ':' + v); }
+    return;
+  }
 });
 
 document.addEventListener('input', (e) => {
@@ -1121,3 +1165,4 @@ function bindAppwinScroll(id, moreAct) {
   if (ver) ver.textContent = (S.status.VER || '17.12').replace(/^\S+\s/, '').trim() || '17.12';
   render();
 })();
+

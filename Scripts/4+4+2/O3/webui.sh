@@ -635,8 +635,8 @@ cmd_aetherswitch() {
     echo "OK 艇长线程引擎已${1}（免重启生效）"
 }
 cmd_aetherfeat() {
-    sh "$AETHER_CTL" feat "$2" "$3" 2>&1
-    [ -n "$3" ] && sh "$AETHER_CTL" restart >/dev/null 2>&1
+    sh "$AETHER_CTL" feat "$1" "$2" 2>&1
+    [ -n "$2" ] && sh "$AETHER_CTL" restart >/dev/null 2>&1
 }
 cmd_aetherrules() { sh "$AETHER_CTL" rules 2>&1; }
 cmd_aetherraw() { [ -f "$AETHER_CFG" ] || { echo ""; return; }; $B64BIN "$AETHER_CFG" 2>/dev/null | tr -d '\n'; }
