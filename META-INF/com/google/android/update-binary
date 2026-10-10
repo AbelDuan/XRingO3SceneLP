@@ -48,7 +48,7 @@ fi
 if ! command -v set_perm >/dev/null 2>&1; then
   set_perm() { chown "$2:$3" "$1"; chmod "$4" "$1"; [ -z "$5" ] || chcon "$5" "$1"; }
 fi
-: ${MODPATH:=/data/adb/modules/SceneO3Tuner}
+: ${MODPATH:=/data/adb/modules/O3CPUSet}
 : ${NVBASE:=/data/adb}
 
 ui_print " "

@@ -2,8 +2,8 @@
 # ============================================================
 #  频率接管器 apply_freq.sh   （v18 · 模块自有 QoS）
 # ------------------------------------------------------------
-#  【v18 变更：频率完全由本模块定义，不再交回 Scene】
-#    v3 把频率交回 Scene；v18 收回 —— Scene 在玄戒 O3 上本就不适配
+#  【v18 变更：频率完全由本模块定义，不再交回 调度App】
+#    v3 把频率交回 调度App；v18 收回 —— 调度App 在玄戒 O3 上本就不适配
 #    （硬编码 SoC 白名单没有 xring，配置源显示「未知」、开关无法启用），
 #    所以频率必须由模块自己下发。
 #
@@ -17,7 +17,7 @@
 #    apply_freq.sh --mode <m>   → 指定模式(powersave|balance|performance|fast)
 #    apply_freq.sh --restore    → 恢复 stock（放开上限、下限回最低）
 # ============================================================
-MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+MODDIR="${MODDIR:-/data/adb/modules/O3CPUSet}"
 . "$MODDIR/lib/util.sh"
 
 MODE=""

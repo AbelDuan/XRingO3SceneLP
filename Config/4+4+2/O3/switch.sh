@@ -1,14 +1,14 @@
 #!/system/bin/sh
 # ============================================================
-#  Scene「自定义命令」入口 —— 在 Scene 里点一下即可切换方案
+#  调度App「自定义命令」入口 —— 在 调度App 里点一下即可切换方案
 #    · 不带参数：切到下一档（极致能效 → 日常均衡 → 性能甜点 → 满画质游戏 → 回到第一档）
 #    · 带参数：switch.sh sweet_eco|sweet_bal|sweet_perf|sweet_hq
-#  说明：Scene 的自定义命令不方便按键交互，所以做成「点一次切一档」。
+#  说明：调度App 的自定义命令不方便按键交互，所以做成「点一次切一档」。
 #
 #  ⚠ 早期版本还支持 switch.sh lock / unlock。锁定机制已废除（见 action.sh
 #    头部说明），入口一并删除 —— 留着只会让人以为配置会被云端替换。
 # ============================================================
-MODDIR="/data/adb/modules/SceneO3Tuner"
+MODDIR="/data/adb/modules/O3CPUSet"
 . "$MODDIR/lib/util.sh"
 
 LIST="sweet_eco sweet_bal sweet_perf sweet_hq"

@@ -6,7 +6,7 @@ test_build_stamp.py —— 模块包里的日期必须跟着**构建日**走
 背景（用户 2026-09-18 反馈）：刷进手机后模块页显示的版本仍是「16.22 (2026-09-18)」，
 看着像日期被写死了。真实情况：
 
-  · `dist/SceneO3Tuner-v<ver>-<date>.zip` 的**文件名**一直是 `time.strftime` 现算的
+  · `dist/O3CPUSet-v<ver>-<date>.zip` 的**文件名**一直是 `time.strftime` 现算的
     （没问题）；
   · 但 `module.prop` 的 `version=` / `versionCode=` 是**仓库源码里手写的**，
     KernelSU 模块页读的是这两行 —— 所以显示日期永远停在写代码那天。

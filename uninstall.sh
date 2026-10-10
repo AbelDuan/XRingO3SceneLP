@@ -19,7 +19,7 @@ uninstall_module() {
     # 顺手清掉旧版遗留的锁定标记（机制已废除）
     rm -f "${STATE_DIR}/unlocked" "${STATE_DIR}/locked" "${STATE_DIR}/qos_cleared" "${STATE_DIR}/src.mark" 2>/dev/null
 
-    # v18：不再触碰 Scene 目录（配置本就由模块自持）。
+    # v18：不再触碰 调度App 目录（配置本就由模块自持）。
 
     # 先把线程从我们的 cgroup 组树里放出来（否则组会残留到下次开机）
     if [ -x "$MODDIR/Scripts/4+4+2/O3/pin_cgroup.sh" ]; then

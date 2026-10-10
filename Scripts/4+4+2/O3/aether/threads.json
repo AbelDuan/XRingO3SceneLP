@@ -1425,13 +1425,8 @@
         "com.android.camera"
       ],
       "cpuset": {
-        "other": "{e_core}",
-        "comm": {
-          "{e_core}": [
-            "*.camera",
-            "RenderThread"
-          ]
-        }
+        "main_thread": "{all_core}",
+        "other": "{all_core}"
       }
     },
     {

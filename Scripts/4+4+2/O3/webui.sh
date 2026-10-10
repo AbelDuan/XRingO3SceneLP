@@ -6,7 +6,7 @@
 #  文件写入走 base64 分块（wbegin → wappend ×N → wcommit）。
 #
 #  子命令
-#   —— 频率（交给 Scene）——
+#   —— 频率（交给 调度App）——
 #    status           状态（K=V）
 #    read <id>        读文件到 stdout（id: profile/model/...）
 #    wbegin/wappend/wcommit <id>  分块写（profile 等）
@@ -15,9 +15,9 @@
 #    scheme <name> | restore   切换 / 恢复频率方案
 #    schemes          列出可选频率方案
 #    mode | modeset   读模式阶梯 / 切换全局模式
-#    profilepush/backup/restore/list  调度配置 传递/备份/恢复/列出
+#    modeset          切换全局模式
 #    freqs            三簇可用频率档位
-#    appmodes/setappmode  应用→模式（Scene 频率档位）
+#    appmodes/setappmode  应用→模式（调度App 频率档位）
 #    fasxres          统一 FAS 调速器为 xres
 #    ksufix/live/apply/log/daemonlog/launchables/apps  维护类
 #   —— 线程（艇长 Aether）——
@@ -28,10 +28,10 @@
 #    aetherraw        读艇长配置（base64）
 #    aetherrawset <b64>  写艇长配置（JSON 校验 + 重载）
 # ============================================================
-MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+MODDIR="${MODDIR:-/data/adb/modules/O3CPUSet}"
 . "$MODDIR/lib/util.sh"
 
-STATE_DIR="/data/adb/SceneO3Tuner"
+STATE_DIR="/data/adb/O3CPUSet"
 WEB_DIR="${STATE_DIR}/webui"
 BKDIR="${STATE_DIR}/backups"
 TMPD="/data/local/tmp/_wui"
@@ -94,7 +94,7 @@ B64BIN="base64"; { [ -x /system/bin/base64 ] && B64BIN=/system/bin/base64; } 2>/
 if ! command -v "$B64BIN" >/dev/null 2>&1; then [ -x "$BB" ] && B64BIN="$BB base64"; fi
 cmd_b64len() { local p; p=$(path_of "$1"); [ -f "$p" ] || { echo 0; return; }; $B64BIN "$p" 2>/dev/null | tr -d '\n' | wc -c | tr -d ' '; }
 cmd_b64() { local p; p=$(path_of "$1"); [ -f "$p" ] || return 0; local s="${2:-1}" n="${3:-40000}"; $B64BIN "$p" 2>/dev/null | tr -d '\n' | cut -c "${s}-$(( s + n - 1 ))"; }
-cmd_conf() { echo "ERR v18 起不再读取 Scene features 配置"; return 1; }
+cmd_conf() { echo "ERR v18 起不再读取 调度App features 配置"; return 1; }
 
 # ============================================================
 #  状态
@@ -151,7 +151,7 @@ cmd_status() {
     echo "DEBUG=${SET_DEBUG:-1}"
     pgrep -f "O3/guard\.sh" >/dev/null 2>&1 && echo "DAEMON=1" || echo "DAEMON=0"
     # 调度守护
-    pgrep -f scene-daemon >/dev/null 2>&1 && echo "SCENE_DAEMON=1" || echo "SCENE_DAEMON=0"
+    pgrep -f scene-daemon >/dev/null 2>&1 && echo "app_DAEMON=1" || echo "app_DAEMON=0"
     # 三簇频率 + 温度：一次 awk 批量读（原来 17 次 cat fork ≈ 400ms，切页卡顿主因）
     local _sf _pinned=0 _v _k
     _sf=$(_sysfs_dump)
@@ -203,15 +203,15 @@ cmd_schemes() {
 cmd_scheme(){ sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" "$1"; }
 cmd_restore(){ sh "$MODDIR/Scripts/4+4+2/O3/set_scheme.sh" restore; }
 cmd_apply() {
-    # v18：不再与 Scene 无障碍服务交互。改为「立即应用模块配置」：
+    # v18：不再与外部调度App 无障碍服务交互。改为「立即应用模块配置」：
     #   · 按当前全局模式下发 PM QoS 频率；
-    #   · 重建线程分配并让艇长引擎重载。
+    #   · 让舰长引擎按最新配置重载（线程配置由 aether_ctl deploy 自持）。
     log "webui: 应用模块配置（频率 + 线程）"
     local m; m=$(active_mode)
     sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "$m" >/dev/null 2>&1
-    gen_threads >/dev/null 2>&1
+    [ -x "$AETHER_CTL" ] && sh "$AETHER_CTL" deploy >/dev/null 2>&1
     [ -f "$STATE_DIR/aether.on" ] && [ -x "$AETHER_CTL" ] && sh "$AETHER_CTL" restart >/dev/null 2>&1
-    echo "OK 已应用模块配置（频率[${m}] + 线程已重建）"
+    echo "OK 已应用模块配置（频率[${m}] + 舰长线程已重载）"
 }
 
 cmd_mode() {
@@ -221,7 +221,7 @@ cmd_mode() {
         cn=$(mode_name_cn "$m"); af=$(mode_freq "$m" active); inf=$(mode_freq "$m" inactive)
         echo "MODE_${m}=${cn}|${af}|${inf}"
     done
-    # v18：频率由模块 QoS 接管，无 Scene profile.json 预设校验；频率表恒为模块自带
+    # v18：频率由模块 QoS 接管，无 调度App profile.json 预设校验；频率表恒为模块自带
     echo "PRESET_OK=1"
 }
 cmd_modeset() {
@@ -413,10 +413,6 @@ cmd_appfreqbatch() {
     echo "OK 批量设置完成"
 }
 
-cmd_profilebackup() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" backup; }
-cmd_profilerestore() { shift; sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" restore "$1"; }
-cmd_profilelist() { sh "$MODDIR/Scripts/4+4+2/O3/profile_sync.sh" list; }
-
 cmd_freqs() {
     echo "FREQS_L=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null)"
     echo "FREQS_M=$(cat /sys/devices/system/cpu/cpu4/cpufreq/scaling_available_frequencies 2>/dev/null)"
@@ -425,15 +421,20 @@ cmd_freqs() {
 }
 
 cmd_appmodes() {
+    # v18.2.9：直接按月自持的 assign 表输出（game_assign 优先、app_assign 兜底），
+    # 原来依赖的 app_pkg_modes 已随老线程链路移除。
     echo "DEFAULT=$(active_mode)"
-    local pm="${TMPD}/pkgmode.txt"; scene_pkg_modes > "$pm"
+    local pm="${TMPD}/pkgmode.txt"
+    : > "$pm"
+    [ -s "$GAME_ASSIGN_FILE" ] && awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/{print $1"\t"$2}' "$GAME_ASSIGN_FILE" >> "$pm" 2>/dev/null
+    [ -s "$APP_ASSIGN_FILE" ]  && awk -F'\t' 'NF>=2 && $1!="" && $1!~/^#/{print $1"\t"$2}' "$APP_ASSIGN_FILE"  >> "$pm" 2>/dev/null
     local md n
     for md in $MODE_LIST; do n=$(awk -F'\t' -v m="$md" '$2==m' "$pm" 2>/dev/null | wc -l | tr -d ' '); echo "COUNT_${md}=${n:-0}"; done
     echo "TOTAL=$(wc -l < "$pm" 2>/dev/null | tr -d ' ')"
     awk -F'\t' 'NF==2 && $2!="" { print "A_"$1"="$2 }' "$pm"
 }
 cmd_setappmode() {
-    # v18：写入模块自有的 app_assign.tsv（pkg<TAB>mode），Scene 不再参与
+    # v18：写入模块自有的 app_assign.tsv（pkg<TAB>mode），调度App 不再参与
     local pkg="$1" mode="$2"
     [ -z "$pkg" ] || [ -z "$mode" ] && { echo "ERR 用法: setappmode <包名> <powersave|balance|performance|fast>"; return 1; }
     mode_valid "$mode" || { echo "ERR 非法模式: $mode"; return 1; }
@@ -449,12 +450,12 @@ cmd_setappmode() {
     fi
     [ -s "$tmp" ] || { rm -f "$tmp"; echo "ERR 生成 app_assign.tsv 失败"; return 1; }
     cp -f "$tmp" "$f" 2>/dev/null; chmod 0666 "$f" 2>/dev/null; rm -f "$tmp"
-    gen_threads >/dev/null 2>&1
-    echo "OK 已把 ${pkg} 设为模块模式「${mode}」"
+    # 线程不再由这里联动重建（v18.2.9：线程完全归舰长，档位由 WebUI 线程页单独设置）
+    echo "OK 已把 ${pkg} 设为模块频率档「${mode}」"
 }
 
 cmd_fasxres() {
-    echo "ERR v18 起调速器不再写入 Scene features/fas.conf；O3 的 FAS 由内核 schedutil/xres 直接管理，无需模块干预"
+    echo "ERR v18 起调速器不再写入 调度App features/fas.conf；O3 的 FAS 由内核 schedutil/xres 直接管理，无需模块干预"
     return 1
 }
 
@@ -474,7 +475,7 @@ cmd_apps() {
 cmd_ksufix() {
     if selfheal_pending_update; then
         [ -e "$MODDIR/update" ] && rm -f "$MODDIR/update"
-        if [ -d /data/adb/modules_update/SceneO3Tuner ]; then echo "OK 已合并待更新副本 + 清标记 + 重拉服务"; else echo "OK 已清孤儿 update 标记"; fi
+        if [ -d /data/adb/modules_update/O3CPUSet ]; then echo "OK 已合并待更新副本 + 清标记 + 重拉服务"; else echo "OK 已清孤儿 update 标记"; fi
     else echo "ERR 待更新副本校验不通过，已保留副本未删除"; fi
 }
 
@@ -731,9 +732,7 @@ case "$1" in
   schemes)       cmd_schemes ;;
   scheme)        cmd_scheme "$2" ;;
   restore)       cmd_restore ;;
-  profilebackup) cmd_profilebackup ;;
-  profilerestore) cmd_profilerestore "$@" ;;
-  profilelist)   cmd_profilelist ;;
+  # （profilebackup/restore/list 已随 profile_sync.sh 一并移除：v18 模块自持，不再向外部 App 灌配置）
   mode)          cmd_mode ;;
   modeset)       cmd_modeset "$2" ;;
   freqs)         cmd_freqs ;;

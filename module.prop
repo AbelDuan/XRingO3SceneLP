@@ -1,7 +1,7 @@
-id=SceneO3Tuner
-name=玄戒O3 · Abel 调度工具箱
-version=18.2.8 (2026-10-10)
-versionCode=2026101012
+id=O3CPUSet
+name=O3 CPU Set
+version=18.3.0 (2026-10-10)
+versionCode=2026101013
 author=Abel Duan
-description=玄戒O3 调度工具箱（模块自有 · 不依赖Scene）· ①CPU频率：模块PM QoS接管（全局+按app模式）②线程分配：艇长Aether引擎③调度器：方案powercfg
+description=玄戒O3 调度工具箱（模块自有）· ①CPU频率：模块PM QoS接管（全局+按app模式）②线程分配：Aether 线程引擎③调度器：方案 powercfg
 action=action.sh

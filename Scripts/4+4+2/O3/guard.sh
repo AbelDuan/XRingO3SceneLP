@@ -3,15 +3,15 @@
 #  调度守护 guard.sh  (原 lock_guard.sh，2026-09-15 更名)
 #
 #  【为什么改名】「配置锁定」功能已按用户要求整体删除（历史上 chattr +i 会让
-#    Scene 自己存不下配置：点小齿轮改特性、切模式都会 ENOTSUP 失败，
+#    调度App 自己存不下配置：点小齿轮改特性、切模式都会 ENOTSUP 失败，
 #    现象就是「改了没反应」）。这个脚本从来就不是锁，而是**同步 + 落核**守护，
 #    名字里的 lock 会误导，故更名。
 #
 #  【职责】
-#    1) Scene 数据目录必须可进入（缺 x 会让 Scene 卡在启动 splash）
-#    2) Scene 配置必须可写（清掉历史残留的 chattr 标志，Scene 才存得下设置）
-#    3) Scene 的「应用→模式」表 / 游戏名单 / 模板分配一变 → 重建 threads.json
-#    4) 把模板真正落到线程亲和性（Scene 自己不会应用 threads.json，见 enforce_threads.sh）
+#    1) 调度App 数据目录必须可进入（缺 x 会让 调度App 卡在启动 splash）
+#    2) 调度App 配置必须可写（清掉历史残留的 chattr 标志，调度App 才存得下设置）
+#    3) 调度App 的「应用→模式」表 / 游戏名单 / 模板分配一变 → 重建 threads.json
+#    4) 把模板真正落到线程亲和性（调度App 自己不会应用 threads.json，见 enforce_threads.sh）
 #
 #  【功耗设计】（2026-09-15 二次治理，实测数据见 README §6）
 #    · 亮屏：每 5s 一轮。但「廉价 tick」只在**亮屏**时查前台（dumpsys 约 32ms）；
@@ -23,7 +23,7 @@
 #
 #  用法: guard.sh [interval_sec]       默认 5s
 # ============================================================
-MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+MODDIR="${MODDIR:-/data/adb/modules/O3CPUSet}"
 . "$MODDIR/lib/util.sh"
 
 INTERVAL="${1:-5}"
@@ -34,11 +34,15 @@ cd / || cd /data
 # 「QoS 遗留值只清一次」的标记（见主循环里亮/息屏切换那段的原因说明）
 QOS_CLEARED="${STATE_DIR}/qos_cleared"
 
-log "🛡 守护启动（亮屏 ${INTERVAL}s / 息屏 $((INTERVAL*6))s；同步线程分配 + 落核，不锁定配置）"
+# 线程配置：v18.2.9 起本守护只保证「配置存在」，生成与落核全归舰长引擎。
+AETHER_CTL="$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh"
+AETHER_THREADS="/sdcard/Android/Aether/threads.json"
+
+log "🛡 守护启动（亮屏 ${INTERVAL}s / 息屏 $((INTERVAL*6))s；频率兜底 + 线程配置保活，线程落核归舰长引擎）"
 
 # ── 单例保护 ───────────────────────────────────────────────
 #  service.sh 可能在开机 / `ksud services` 重跑时多次执行，若每次都拉起一个 guard，
-#  会出现多实例抢写 Scene 配置、互相打架。这里用 pidfile 去重：已有存活实例就退出。
+#  会出现多实例抢写 调度App 配置、互相打架。这里用 pidfile 去重：已有存活实例就退出。
 #  ⚠ 2026-10-10 修正：旧写法只 `kill -0 $old`，但 pid 会被**回收复用**（实测 pid 21378
 #    被 com.tencent.wework:push 复用）→ `kill -0` 仍成功 → 守护误判「自己还活着」并立即
 #    退出，导致守护实际从未运行（WebUI 一直显示「未运行」）。改为校验 /proc/$old/cmdline
@@ -75,31 +79,11 @@ screen_on() {
 }
 
 # ============================================================
-#  省 fork 的两个判据（本机 fork 一次 10~40ms，是亮屏功耗的主因）
+#  省 fork 的判据（本机 fork 一次 10~40ms，是亮屏功耗的主因）
 # ============================================================
 
-# 输入（模板 / 分配 / Scene 模式表 / 游戏名单 / 开关）里有没有比「上次重建标记」更新的
-#   —— 用内建 `-nt`，0 子进程；旧写法是 7 次 md5sum（约 70~150ms）
-SRC_MARK="${STATE_DIR}/src.mark"
-src_changed() {
-    [ -f "$SRC_MARK" ] || return 0
-    local f
-    for f in "$GAME_ASSIGN_FILE" "$GAME_TPL_FILE" \
-             "$APP_ASSIGN_FILE" "$APP_TPL_FILE" "${WEBUI_DIR}/settings.conf"; do
-        [ -f "$f" ] && [ "$f" -nt "$SRC_MARK" ] && return 0
-    done
-    return 1
-}
-
-# 某个包是否在落核目标表里（纯内建 read，0 子进程）
-pkg_in_targets() {
-    [ -s "$TMPD/t.targets" ] || return 1
-    local line pre="$1|"
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in "$pre"*) return 0 ;; esac
-    done < "$TMPD/t.targets"
-    return 1
-}
+# （src_changed / pkg_in_targets / SRC_MARK 已随老线程落核链路移除：
+#   v18.2.9 起线程完全归舰长引擎，守护不再需要「输入变了没」「包在不在目标表」）
 
 # 当前焦点窗口的包名（约 45ms，权威且稳定）。
 #
@@ -159,7 +143,6 @@ while :; do
         # 模块要没了：顺手把独立的线程引擎（aether-optext）也停掉，
         # 否则它仍持有二进制文件、挡住卸载目录释放。
         pkill -f "O3/aether/aether-optext" 2>/dev/null
-        pkill -f "O3/pinwatch" 2>/dev/null
         exit 0
     fi
     on=$(screen_on)
@@ -209,17 +192,12 @@ while :; do
         if [ $(( (ROUND - 1) % 6 )) -eq 0 ]; then WORK=1; else WORK=0; fi
     fi
 
-    # ==== 超大核 8-9 限制（v17 · 自有 cpuset 组，无每轮打架）====
-    #  · bigcore_guard.sh 自建 /dev/cpuset/SceneO3Tuner/nobig（cpus=0-7），
-    #    由 enforce_threads.sh 把**受管进程**迁进去；top-app/foreground 完全不碰
-    #    → 不再与 scene-daemon（每 3~4s 回写 0-9）互相打架（v16 常驻高占用/卡顿根因）。
-    #  · 本调用只是**幂等维护** nobig 组（读 2 文件、按需写 2 次，≈0 fork），
-    #    不再扫 15 个系统组、不再每轮写后备文件。每轮跑很便宜。
-    #  · 极速档（要上 8-9）的逐应用放行在 enforce_threads 里按目标核位判定，
-    #    本脚本无需感知前台档位。
-    if [ "$on" = "1" ]; then
-        sh "$MODDIR/Scripts/4+4+2/O3/bigcore_guard.sh" quiet >/dev/null 2>&1
-    fi
+    # ==== 线程核心分配：**完全由舰长引擎（aether-optext）负责** ====
+    #  v18.2.9 起本守护不再做任何线程落核：老的 enforce_threads / pin_cgroup /
+    #  load_aware / bigcore_guard / pinwatch 全链路已移除。
+    #  · 规则源：aether/threads.json（模板）+ 用户自定义 → aether_ctl.sh deploy
+    #  · 落核方：aether-optext（eBPF + 负载模型），守护不介入、不抢 cgroup 命名空间
+    #  这里只保证「配置文件存在」，其余交给引擎自身。
 
     if [ "$WORK" = "1" ]; then
 
@@ -227,7 +205,7 @@ while :; do
         log_quiet "▶ work 第 $ROUND 轮 · 前台=${FG:-（息屏/无）}"
 
         # ---- 1) 频率兜底：每 WORK 轮把「全局模式」频率重新下发 ----
-        #  v18：频率完全由本模块 PM QoS 接管（不再交给 Scene）。
+        #  v18：频率完全由本模块 PM QoS 接管（不再交给 调度App）。
         #  这里做兜底，防止被 thermal / 其它进程改掉；前台变化时再由 ② 做更精细的按-app 覆盖。
         current_mode_read 2>/dev/null
         if ! apply_mode_freq "${CUR_MODE:-balance}" >/dev/null 2>&1; then
@@ -248,74 +226,18 @@ while :; do
             fi
         fi
 
-        # ---- 3) 输入变了才会重建线程分配（0 子进程判据）----
-        CHANGED=0
-        if src_changed; then
-            CHANGED=1
-            if out=$(gen_threads 2>&1); then
-                touch "$SRC_MARK" 2>/dev/null
-                log "🔁 配置变化 → 已重建线程分配（默认模式=${CUR_MODE:-balance}）"
-            else
-                log_quiet "⚠ 重建线程分配失败（下轮重试）：$out"
-            fi
-        fi
-
-        # ---- 4) threads.json 丢了/空了 → 重建 ----
+        # ---- 3) 确保舰长的线程配置存在（规则生成 + 覆盖合并都归 aether_ctl）----
+        #   v18.2.9：本守护**不再**生成/落核线程 —— 只负责「配置在不在」。
+        #   · threads.json 丢失/为空 → 让 aether_ctl deploy 重新生成
+        #   · 用户改了自定义分配 → WebUI 调 aetherset 时已即时 deploy，此处无需轮询
         if [ ! -s "$AETHER_THREADS" ]; then
-            gen_threads >/dev/null 2>&1
-            touch "$SRC_MARK" 2>/dev/null
-            CHANGED=1
+            sh "$AETHER_CTL" deploy >/dev/null 2>&1
+            log_quiet "🔁 threads.json 缺失 → 已让舰长重新部署配置"
         fi
 
-        # ---- 5) 把「模板分配」真正落到线程亲和性 ----
-        # ⚠ 必须由我们落核：Scene **不会**应用 threads.json 里的规则（实测冷启动 60s
-        #   主线程/工作线程仍是 0-9）。
-        # ⚠⚠ 这里加了「要不要跑」的闸门：落核脚本本身约 300ms（本机一个子进程 10~40ms），
-        #    而绝大多数前台应用根本没配模板 —— 那种情况下跑它纯属白烧电。
-        #    只在「输入变了」或「新前台在目标表里」时才跑；应用切到后台的情形由
-        #    每 24 轮（120s）的兜底覆盖（而且后台组预算只有 0-3，内核本来就会夹住）。
-        if [ "$CHANGED" = "1" ] || pkg_in_targets "$FG"; then
-            sh "$MODDIR/Scripts/4+4+2/O3/enforce_threads.sh" >/dev/null 2>&1
-        fi
-
-        # ---- 5.1) 事件驱动增量落核（v16.19）----
-        #   pinwatch 常驻进程已把「哪些进程新开了线程」写进事件文件；这里消费它，
-        #   只对涉及的包做精确落核。无事件时开销≈读一个行数，可以每轮跑。
-        if [ -x "$MODDIR/Scripts/4+4+2/O3/pinwatch.sh" ]; then
-            sh "$MODDIR/Scripts/4+4+2/O3/pinwatch.sh" >/dev/null 2>&1
-        fi
-
-        # ---- 6) 相机档位看护：**已移除（v12，2026-09-17）** ----
-        #   它原本是 v7 的 workaround，修的是「Scene 的 _Camera.json 里 @cpu_freq
-        #   签名错（5 参数）导致相机态 min==max 区间塌缩」。当时的做法是模块
-        #   自己把档位写回 sysfs —— 但那与「CPU 频率交回 Scene」的约定是矛盾的。
-        #
-        #   现在根因已经在源头修掉：
-        #     · 新的 _Camera.json 里**一个 @cpu_freq 都没有**，全部改引用
-        #       profile.json 的 fast_active（合法 4 参数签名）→ 塌缩的成因结构性消失；
-        #     · 相机固定走 fast 档 + 关掉 Scene 的「日用 app 辅助调速器」，
-        #       实测打开相机 cpu0 稳定 1.5~2.9GHz（修前是 557056 单点锁死）。
-        #   继续留着这段的坏处很实在：camera_freq_load() 在新结构下读不到档位，
-        #   会退回内置兜底表，于是**每次打开相机都往 sysfs 写 3 个节点**
-        #   （日志里那串「📷 相机档位校正」），等于模块还在抢频率。
-        #
-        #   camera_freq_guard.sh / apply_freq.sh 仍保留在原位，仅作**手动应急工具**，
-        #   开机与守护都不再拉起。
-
-        # ---- 6.5) 系统 cpuset 组不使用超大核 8-9（v16.11）----
-        #   用户实测：桌面 / 切换应用时会看到 0-9、4-9 —— 来源不是本模块的落核
-        #   （模块从不把线程放 8-9），而是系统自己的 cpuset 组：
-        #     · top-app/cpus       出厂常见 0-9
-        #     · foreground/boost   常见就是大核簇（4-9）
-        #     · top-app/{main,render,other}  Scene「核心分配」按 v8 的 threads.json 写的
-        #   bigcore_guard.sh 把这些组的 cpus 收到 0-7；父组一旦收到 0-7，
-        #   外部再想给子组写 0-9 会被内核直接拒 → 从根上堵住。
-        #
-        #   ⚠ 重申频率（v16.25 修正）：已移到**亮屏每轮**（在 WORK 块之前，见那里）。
-
-        # ---- 7) 频率：**不再由本模块处理** ----
-        #   CPU 调频权限已交回 Scene（profile.json 的 <mode>_active/inactive @cpu_freq）。
-        #   原来这里每当前台一变就跑一次 apply_freq.sh -f "$FG"，已移除。
+        # （相机档位看护、超大核 8-9 cpuset 限制、camera_freq_guard 拉起 —— 均已移除。
+        #   前者根因在 v12 从源头修掉；后两者随老落核链路（bigcore_guard.sh）一并删除，
+        #   线程与 cpuset 现在完全由舰长引擎自行管理。）
     fi
 
     sleep "$INTERVAL"

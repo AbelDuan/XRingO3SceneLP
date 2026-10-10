@@ -1,10 +1,10 @@
 # XRingO3SceneLP · 玄戒 O3 调度工具箱
 
 > 面向 **小米玄戒 O3（`xring_o3_asic`，10 核 4+4+2）** 的 KernelSU 模块，
-> 用来给 [Scene](https://github.com/omarea/Scene)（`com.omarea.vtools`）**补上它在本机没做到的两件事**：
+> 用来给 [调度App](https://github.com/omarea/调度App)（`com.omarea.vtools`）**补上它在本机没做到的两件事**：
 > 线程绑核的**真正落地**，以及相机频率区间的**不塌缩**。
 >
-> 顺带把调频权限**交还**给 Scene —— 模块只做 Scene 做不到的部分。
+> 顺带把调频权限**交还**给 调度App —— 模块只做 调度App 做不到的部分。
 
 [![Platform](https://img.shields.io/badge/platform-xring__o3__asic-blue)]()
 [![Framework](https://img.shields.io/badge/framework-KernelSU%20%2F%20SukiSU-green)]()
@@ -21,7 +21,7 @@
   - [3.1 线程绑核为什么必须自己做](#31-线程绑核为什么必须自己做)
   - [3.2 cgroup 预算是硬上限（最关键的一条）](#32-cgroup-预算是硬上限最关键的一条)
   - [3.3 目标怎么解析：三级优先级](#33-目标怎么解析三级优先级)
-  - [3.4 频率：模块不写，交回 Scene](#34-频率模块不写交回-scene)
+  - [3.4 频率：模块不写，交回 调度App](#34-频率模块不写交回-调度App)
   - [3.5 相机频率守护：三层根因](#35-相机频率守护三层根因)
 - [4. 目录结构](#4-目录结构)
 - [5. WebUI](#5-webui)
@@ -39,17 +39,17 @@
 
 ## 1. 这个模块解决什么问题
 
-在玄戒 O3 上装 Scene，会遇到两件事 Scene 自己做不了：
+在玄戒 O3 上装 调度App，会遇到两件事 调度App 自己做不了：
 
-### 问题一：Scene 不执行 `threads.json`
+### 问题一：调度App 不执行 `threads.json`
 
-Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。但在本机实测：
+调度App 里有「单应用核心分配」，它会写出一份 `threads.json`。但在本机实测：
 
 > 把 `com.tencent.mm` 设成「轻量·省电 (0-3)」→ 写 `threads.json`
 > （`app_cpuset` 与 `cpuset/comm` 两种形状都试过）→ 重启 `scene-daemon` → 冷启动微信
 > → **60 秒内主线程与工作线程的 `Cpus_allowed_list` 仍然是 `0-9`**。
 
-用户看到的「先跑 `4-9`、过一阵才变 `0-3`」其实是 **Scene 自己对「前台/后台」的默认策略**，
+用户看到的「先跑 `4-9`、过一阵才变 `0-3`」其实是 **调度App 自己对「前台/后台」的默认策略**，
 不是我们规则的延迟生效。
 
 → **所以线程绑核由本模块自己做**。
@@ -74,14 +74,14 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 
 | 功能 | 实现位置 | 说明 |
 |---|---|---|
-| **线程绑核（核心）** | `Scripts/…/enforce_threads.sh` + `pin_cgroup.sh` | **v12 起改为 cgroup 分组落核**：整进程写进 `/dev/cpuset/SceneO3Tuner/<pkg>/{c0-3,c4-7}`，**新线程自动继承**，不必轮询追；幂等重跑 39ms（逐线程 `taskset` 要 226~244ms，只能当回退路径） |
-| **三级目标解析** | `lib/util.sh` | 游戏名单 → Scene 模式映射 → 手动模板 |
+| **线程绑核（核心）** | `Scripts/…/enforce_threads.sh` + `pin_cgroup.sh` | **v12 起改为 cgroup 分组落核**：整进程写进 `/dev/cpuset/O3CPUSet/<pkg>/{c0-3,c4-7}`，**新线程自动继承**，不必轮询追；幂等重跑 39ms（逐线程 `taskset` 要 226~244ms，只能当回退路径） |
+| **三级目标解析** | `lib/util.sh` | 游戏名单 → 调度App 模式映射 → 手动模板 |
 | **档位（v10+）** | `lib/util.sh` `seed_app_templates()` | 档位与模式同名：**省电 / 均衡 / 性能 / 系统接管**（4 档，`fast` = 不绑核）；**默认不预设任何分配** |
-| **从 Scene 导入档位** | `lib/util.sh` `import_scene_assign()` | 一次性导入，之后不再实时跟随（避免 Scene 一改就把你的分配冲掉） |
-| **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 Scene、存档、回滚；推送前后字节级保存 `manifest.json` |
+| **从 调度App 导入档位** | `lib/util.sh` `import_app_assign()` | 一次性导入，之后不再实时跟随（避免 调度App 一改就把你的分配冲掉） |
+| **调度配置传递 / 备份 / 恢复** | `Scripts/…/profile_sync.sh` | 灌配置进 调度App、存档、回滚；推送前后字节级保存 `manifest.json` |
 | **升级即覆盖（v15）** | `customize.sh` + `lib/util.sh` `SYNC_SKIP` | 升级时**直接覆盖** `profile.json`/`powercfg.sh`/`features/*.conf` 等模块设计文件，只保留 `threads*.json`（应用/游戏的线程表）；覆盖前自动备份 |
 | **装完不用重启（v15.1 / v16.1 / v16.2）** | `customize.sh` | KSU 把更新放到 `modules_update/` 等重启合并时，安装脚本**自己就地合并**并将内容立即可用；并清掉 `disable` 标记（KSU 的启用状态就是 `/data/adb/modules/<id>/disable`）。⚠ **`update` 标记是 installer.sh 在 `. customize.sh` 返回之后才写的**，所以脚本里删它没用 —— v16.2 改成**落一个独立脚本 + `setsid` 后台拉起**，等 `update` 标记出现后再把它合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（全程不重启）。装完自动 `ksud services` 把守护拉起来 |
-| **Scene · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | Scene 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
+| **调度App · FAS 调速器一键设 xres（v15）** | `webui.sh fasxres` + 游戏页按钮 | 调度App 的 FAS 调速器候选是它 APK 硬编码的，机器上选不到 `xres` → 直接写 `features/fas.conf` 的三个 `governor_*`，然后重启 scene-daemon |
 | **应用页只显示有前台界面的应用（v16）** | `webui.sh launchables` + `manualApps()` | 按 `MAIN/LAUNCHER` 取「启动器能点开」的包（本机 487 → 169），避免把没有界面的系统服务也拉进来绑核；已配过档位的包仍显示；标题行有「含无界面」开关 |
 | **调度守护** | `Scripts/…/guard.sh` | 目录权限、配置可写性、threads 重建、落核 |
 | **WebUI** | `webroot/index.html` | 单文件，KernelSU 桥接，5 个页签 |
@@ -91,7 +91,7 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 
 > ⚠️ **v7.0 时代的两个相机条目已删除**（下表保留只是为了对照历史）：
 > 「相机频率守护 `camera_freq_guard.sh`」与「相机档位看护」在 **v7 之后被移除** ——
-> 新结构下（频率交回 Scene、`_Camera.json` 用 `["@limiter","NONE"]` 豁免）
+> 新结构下（频率交回 调度App、`_Camera.json` 用 `["@limiter","NONE"]` 豁免）
 > 守护读不到 `@cpu_freq` 会退回兜底表，**每次开相机反而写 3 个频率节点**，与设计矛盾。
 > 现在的相机策略见 [§3.5](#35-相机频率守护三层根因)（已改写）与更新日志。
 
@@ -102,7 +102,7 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 ### 3.1 线程绑核为什么必须自己做
 
 见 [§1 问题一](#1-这个模块解决什么问题)。模块的做法是**不用 `threads.json` 驱动执行** ——
-它照样生成 `threads.json`（让 Scene 侧数据自洽），但真正下发的是自己的落核器。
+它照样生成 `threads.json`（让 调度App 侧数据自洽），但真正下发的是自己的落核器。
 
 ### 3.2 cgroup 预算是硬上限（最关键的一条）
 
@@ -113,7 +113,7 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 /dev/cpuset/background       cpus = 0-3
 /dev/cpuset/foreground       cpus = 0-9
 /dev/cpuset/top-app          cpus = 0-9
-/dev/cpuset/top-app/0-5      ← Scene 就是靠建这种子组做「应用核心分配」
+/dev/cpuset/top-app/0-5      ← 调度App 就是靠建这种子组做「应用核心分配」
 ```
 
 `sched_setaffinity` **只能在预算之内收窄**。对 `background` 组里的进程
@@ -131,13 +131,13 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 ### 3.3 目标怎么解析：三级优先级
 
 ```text
-① Scene 游戏名单里的包
+① 调度App 游戏名单里的包
       → 游戏页手动分配的模板
-      （名单唯一权威来源 = Scene 的 games.xml 里 value="true" 的项，
+      （名单唯一权威来源 = 调度App 的 games.xml 里 value="true" 的项，
         不能只看 game_assign.tsv 有没有这个包 —— 曾出现历史脏数据
         把几百个普通应用塞进去，会让整条映射失效）
 
-② 在 Scene 里单独设过模式的包
+② 在 调度App 里单独设过模式的包
       → 「模式同步线程」开关开启时，按模式自动映射：
             省电 powersave   → light  （轻量·省电）
             均衡 balance     → smooth （流畅日常）
@@ -158,25 +158,25 @@ Scene 里有「单应用核心分配」，它会写出一份 `threads.json`。�
 if (t == "") { delete pick[p]; continue }   # ← 错：把包整个删掉
 ```
 
-结果是：**凡在 Scene 里被设成 `fast` 的包，哪怕你在 WebUI 里手动给它套了模板，
+结果是：**凡在 调度App 里被设成 `fast` 的包，哪怕你在 WebUI 里手动给它套了模板，
 也会被从目标表里彻底抹掉** —— 界面照常显示「已套高性能」，实际一条 `taskset` 都没发。
 
 实测受害者：`com.android.camera`、`me.weishu.kernelsu`、`com.miui.backup`、
 `com.miui.packageinstaller`、`com.android.updater`、`org.swiftapps.swiftbackup`、
 `com.xiaomi.aicr`、`io.timepod.updater`。
 
-**这就是「Scene 限制了对相机的调度」的真相。**
+**这就是「调度App 限制了对相机的调度」的真相。**
 
 修法：空映射时 `continue`（保留手动模板，回落 ③），与前端 `effTpl()` 语义对齐。
 
 > **一般化教训：前后端对同一个映射表的空值语义必须一致**，
 > 否则同一份数据两边算出不同结果。v4.9 只修了前端，后端漏了，于是 bug 又多活了一个版本。
 
-### 3.4 频率：模块不写，交回 Scene
+### 3.4 频率：模块不写，交回 调度App
 
-**本模块不写任何频率节点。** 频率由 Scene 自己的模式 preset
+**本模块不写任何频率节点。** 频率由 调度App 自己的模式 preset
 （`profile.json` 里 `<mode>_active` / `<mode>_inactive` 的 `@cpu_freq`）下发 ——
-那是 Scene 的正规通道，天然支持「按应用 / 按前后台」区分。
+那是 调度App 的正规通道，天然支持「按应用 / 按前后台」区分。
 
 #### 本机频率旋钮的实测粘性
 
@@ -187,7 +187,7 @@ if (t == "") { delete pick[p]; continue }   # ← 错：把包整个删掉
 | `scaling_max_freq` | ❌ | 写 `1968000` → 2s 后回 `556800` |
 | `scaling_min_freq` | ❌ | 写了立刻打回 |
 | `xres/*` | ✅ | 只调积极性，不能设硬上限 |
-| **Scene 自己** | ❌ | **完全不写频率**（默认 `balance`→`performance` + 重启 daemon，20s 后一个值都没变） |
+| **调度App 自己** | ❌ | **完全不写频率**（默认 `balance`→`performance` + 重启 daemon，20s 后一个值都没变） |
 
 模块里保留 `apply_freq.sh`，但它已经**退化成一个幂等的「遗留 QoS 清理器」**：
 只把 v2 时代留下的上下限还原成「不限频」，值本来就对就一个字节都不写。
@@ -208,7 +208,7 @@ if (t == "") { delete pick[p]; continue }   # ← 错：把包整个删掉
 ["@cpu_freq", "policy0", "min", "417792"]     ← 错：多了 "min" 字段，且用了 policy0
 ```
 
-Scene 解析这种错误格式时，会**把最后一个参数直接写进 `scaling_max_freq`**。
+调度App 解析这种错误格式时，会**把最后一个参数直接写进 `scaling_max_freq`**。
 `strace` 实锤：`write(46, "417792", 6)`，而 `fd46 = policy0/scaling_max_freq`。
 
 #### 写入顺序固定「先 min 后 max」
@@ -230,7 +230,7 @@ Scene 解析这种错误格式时，会**把最后一个参数直接写进 `scal
 
 #### 第一层：`@cpu_freq` 签名写错（模块自己带的 bug）
 
-见 [§3.4](#34-频率模块不写交回-scene)。三个方案包的 `_Camera.json` **都带这个错误**，
+见 [§3.4](#34-频率模块不写交回-调度App)。三个方案包的 `_Camera.json` **都带这个错误**，
 所以换方案包也修不好。
 
 #### 第二层：`@cpu_freq` 只落实 `max`，不落实 `min`
@@ -321,7 +321,7 @@ fi
 
 | 结果 | 含义 | 动作 |
 |---|---|---|
-| 一个字节都没写 | 上界已是硬件最高 → 写它的是 **Scene** 自己（Scene 写的策略上界比硬件最高低） | **不覆盖**（守「交回 Scene」约定） |
+| 一个字节都没写 | 上界已是硬件最高 → 写它的是 **调度App** 自己（调度App 写的策略上界比硬件最高低） | **不覆盖**（守「交回 调度App」约定） |
 | 写了 | 上界是**模块自己**留下的 | 写回相机档位 |
 
 **③ `camera_freq_guard.sh` 降为兜底，并做功耗治理**
@@ -332,7 +332,7 @@ fi
 | 息屏 | 睡 10 轮（10s） | 睡 40 轮（80s） |
 | **亮屏稳态 fork** | 每轮 `dumpsys`+`grep`+`sed` ≈ **3 个** | **0 个**（只内建 `read` 读 6 个节点） |
 | 「谁在写」判定 | 每轮 | 判一次后缓存 |
-| 判定为 Scene 接管后 | 仍每轮 fork 重判 | 直接睡，值对上自动解锁 |
+| 判定为 调度App 接管后 | 仍每轮 fork 重判 | 直接睡，值对上自动解锁 |
 | 写入策略 | 每轮单遍 | 一次校正内连写 3 遍（覆盖 ~2s 回写窗口）+ 5 轮冷静期 |
 
 > **本机 fork 一个子进程要 10~40ms**，是这类守护功耗的唯一大头
@@ -383,7 +383,7 @@ XRingO3SceneLP/
 │   └── index.html                       WebUI 单文件（约 127 KB）
 ├── lib/
 │   └── util.sh                          公共库（1600+ 行）
-│                                        路径常量 / 日志 / Scene pref / 频率预设缓存 /
+│                                        路径常量 / 日志 / 调度App pref / 频率预设缓存 /
 │                                        档位 helper / 规则生成 / 可写性修复
 ├── Scripts/4+4+2/O3/
 │   ├── webui.sh                         后端命令分发（前端唯一入口）
@@ -398,7 +398,7 @@ XRingO3SceneLP/
     ├── game_assign.tsv                  游戏 → 模板 分配
     ├── webui_model.seed.json            WebUI 种子数据
     └── 4+4+2/O3/
-        ├── switch.sh                    Scene「自定义命令」入口
+        ├── switch.sh                    调度App「自定义命令」入口
         ├── sweet_eco/                   省电方案包
         ├── sweet_bal/                   均衡方案包
         ├── sweet_perf/                  性能方案包
@@ -418,27 +418,27 @@ XRingO3SceneLP/
 
 | 路径 | 内容 |
 |---|---|
-| `/data/adb/SceneO3Tuner/webui/app_templates.tsv` | 应用线程模板库（可直编） |
-| `/data/adb/SceneO3Tuner/webui/app_assign.tsv` | 应用 → 模板 分配 |
-| `/data/adb/SceneO3Tuner/webui/game_templates.tsv` | 游戏线程模板库 |
-| `/data/adb/SceneO3Tuner/webui/game_assign.tsv` | 游戏 → 模板 分配 |
-| `/data/adb/SceneO3Tuner/webui/settings.conf` | `mode_sync=0|1`、`debug=0|1` |
-| `/data/adb/SceneO3Tuner/sceneo3.log` | 模块日志 |
-| `/data/adb/SceneO3Tuner/active_scheme` | 当前方案 |
-| `/data/adb/SceneO3Tuner/qos_cleared` | QoS 残留「只清一次」标记 |
-| `/data/adb/SceneO3Tuner/camera_freq_guard.off` | 存在则禁用相机守护 |
-| `/data/adb/SceneO3Tuner/backups/` | 调度配置备份（自动保留最近 3 份） |
+| `/data/adb/O3CPUSet/webui/app_templates.tsv` | 应用线程模板库（可直编） |
+| `/data/adb/O3CPUSet/webui/app_assign.tsv` | 应用 → 模板 分配 |
+| `/data/adb/O3CPUSet/webui/game_templates.tsv` | 游戏线程模板库 |
+| `/data/adb/O3CPUSet/webui/game_assign.tsv` | 游戏 → 模板 分配 |
+| `/data/adb/O3CPUSet/webui/settings.conf` | `mode_sync=0|1`、`debug=0|1` |
+| `/data/adb/O3CPUSet/o3cpuset.log` | 模块日志 |
+| `/data/adb/O3CPUSet/active_scheme` | 当前方案 |
+| `/data/adb/O3CPUSet/qos_cleared` | QoS 残留「只清一次」标记 |
+| `/data/adb/O3CPUSet/camera_freq_guard.off` | 存在则禁用相机守护 |
+| `/data/adb/O3CPUSet/backups/` | 调度配置备份（自动保留最近 3 份） |
 
 ### 后端命令一览
 
 `sh Scripts/4+4+2/O3/webui.sh <cmd>`
 
 ```text
-status                      模块状态（含 VER / SCENE_ID / SCENE_SOURCE / PROFILE_OK …）
+status                      模块状态（含 VER / app_ID / app_SOURCE / PROFILE_OK …）
 mode / modeset              读 / 改当前模式
 apps / apptpl / games       应用与游戏列表、模板
-appmodes                    读 Scene 的模式表（A_=生效模式 / OWN_=显式设过）
-syncmode / applymodes       按 Scene 模式同步线程分配
+appmodes                    读 调度App 的模式表（A_=生效模式 / OWN_=显式设过）
+syncmode / applymodes       按 调度App 模式同步线程分配
 enforce / enforcep <pkg…>   落核（全量 / 定向）
 freqapply / freqrestore     调 apply_freq.sh
 profilepush / profilebackup / profilerestore / profilelist
@@ -455,16 +455,16 @@ b64len / b64 / wbegin / wappend / wcommit     通用文件通道
 | 板块 | 内容 |
 |---|---|
 | **概览** | 功能状态、调度配置（传递 / 备份 / 恢复）、配置身份 |
-| **模式** | 4 档模式的**频率阶梯**（进/退前台各一组，读写 Scene 的真实 preset）、「频率跟随模式」开关 |
+| **模式** | 4 档模式的**频率阶梯**（进/退前台各一组，读写 调度App 的真实 preset）、「频率跟随模式」开关 |
 | **应用** | 模板卡（省电 / 均衡 / 性能 / 系统接管）、筛选、逐应用分配；**默认只显示有前台界面的应用**，标题行可切「含无界面」 |
-| **游戏** | 同应用页，数据源是 Scene 的游戏名单；**顶部多一张「Scene · FAS 调速器」卡 + 「设为 xres」按钮** |
+| **游戏** | 同应用页，数据源是 调度App 的游戏名单；**顶部多一张「调度App · FAS 调速器」卡 + 「设为 xres」按钮** |
 | **日志** | 查看 / 关闭模块日志 |
 
 ### 游戏页的「FAS 调速器 → 设为 xres」（v15）
 
-Scene 的「FAS 调速器」下拉候选是**它 APK 里硬编码的**（非联发科 = `{performance, conservative,
+调度App 的「FAS 调速器」下拉候选是**它 APK 里硬编码的**（非联发科 = `{performance, conservative,
 sugov_ext}` ∩ 内核 + `auto`）—— 本机支持的 `xres` **根本选不到**。但 `features/fas.conf` 里的
-`governor_little/middle/prime` 是自由的（Scene 不校验写入值），所以这个按钮直接写文件：
+`governor_little/middle/prime` 是自由的（调度App 不校验写入值），所以这个按钮直接写文件：
 
 ```
 读现三值 → awk 改写（缺键补上）→ 写完自检（行数不能变少 + 三条 governor_ 必须在）
@@ -490,16 +490,16 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 | 开关 | 位置 | 默认 | 作用 |
 |---|---|---|---|
-| **自动切换**（模式同步线程） | 应用页顶部 | 关 | Scene 里单独设过模式的 app 自动按模式绑核 |
-| **记录模块日志** | 日志页 | 关 | 守护写不写 `sceneo3.log` |
+| **自动切换**（模式同步线程） | 应用页顶部 | 关 | 调度App 里单独设过模式的 app 自动按模式绑核 |
+| **记录模块日志** | 日志页 | 关 | 守护写不写 `o3cpuset.log` |
 | 线程模板的具体数值 | 模式页 | — | 你改的就是生效值 |
 
-> **频率同步没有开关，因为模块不写频率** —— 频率完全由 Scene 下发（[§3.4](#34-频率模块不写交回-scene)）。
+> **频率同步没有开关，因为模块不写频率** —— 频率完全由 调度App 下发（[§3.4](#34-频率模块不写交回-调度App)）。
 
 ### 交互约定
 
 - 模板卡标题旁的 **ⓘ** → 展开该卡说明；标题行的 ⓘ → 展开全部
-- 应用/游戏行内的两个标签**可点**：点「Scene ××」改该应用在 Scene 的模式，
+- 应用/游戏行内的两个标签**可点**：点「调度App ××」改该应用在 调度App 的模式，
   点「模板」改线程模板
 - 单应用操作走**乐观更新**：先改本地状态 + 增量刷列表，再后台写盘（**不弹遮罩、不整页重绘**）
 
@@ -511,14 +511,14 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 - **机型**：玄戒 O3（`xring_o3_asic`），10 核 **4+4+2** 拓扑
 - **环境**：HyperOS + **KernelSU / SukiSU**（需要 root 上下文常驻守护）
-- **Scene**：需先装好 `com.omarea.vtools` 并**至少启动一次**
+- **调度App**：需先装好 `com.omarea.vtools` 并**至少启动一次**
 
 > 安装脚本会读 `/sys/devices/system/cpu/cpufreq/*/related_cpus` 判断拓扑。
 > 不是 `4+4+2` / `4+4+1` 会给出警告，**但不会阻止安装**（不保证生效）。
 
 ### 步骤
 
-1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `SceneO3Tuner-v16.18-20260918.zip`
+1. 管理器（KernelSU / SukiSU）→ 模块 → **从本地安装** `O3CPUSet-v16.18-20260918.zip`
 2. **装完即生效，不用重启** —— 安装脚本收尾会自己 `ksud services` 把守护拉起来
 3. 模块 → **「打开」** 进入 WebUI
 
@@ -528,7 +528,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 
 ### 四个方案怎么选（v16.3 起）
 
-按音量键菜单（或 `switch.sh`）循环切换，当前方案存在 `/data/adb/SceneO3Tuner/active_scheme`：
+按音量键菜单（或 `switch.sh`）循环切换，当前方案存在 `/data/adb/O3CPUSet/active_scheme`：
 
 | 方案 | 中文名 | 什么时候用 |
 |---|---|---|
@@ -540,7 +540,7 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 > `sweet_hq` 的非游戏部分与 `sweet_bal` **逐字节相同**，所以两档之间一点即可 A/B，
 > 差异全部来自游戏态调优。
 >
-> ⚠ 用 `sweet_hq` 时，**这两款游戏在 Scene 里要设为「性能模式」** ——
+> ⚠ 用 `sweet_hq` 时，**这两款游戏在 调度App 里要设为「性能模式」** ——
 > 本方案只改了性能模式这一档，设成均衡 / 省电不会生效。
 >
 > 判定是否该保留：同场景（同图、≥5 分钟）跑两轮，
@@ -578,11 +578,11 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 | **保留** | `threads.json`、`threads_games.json` | 应用 / 游戏的线程档位表；**真值**在模块状态目录的 `app_assign.tsv` / `game_assign.tsv`，模块里那两份只是打包当天的旧快照，拿去覆盖等于倒退 |
 
 - 清单只有**一处**定义：`lib/util.sh` 的 `SYNC_SKIP`（`sync_scheme` 与同步后自检都认它）。置空即恢复「全量覆盖」。
-- 覆盖前自动备份到 `/data/adb/SceneO3Tuner/backup/upgrade-<时间戳>/`；覆盖后**重启 scene-daemon**
+- 覆盖前自动备份到 `/data/adb/O3CPUSet/backup/upgrade-<时间戳>/`；覆盖后**重启 scene-daemon**
   （`features/*.conf` 里的键它只在启动时读一次）。
 - ⚠ `_Apps.json` / `_Games.json` 名字像「应用 / 游戏配置」，**其实是模块的设计**（分组的 模式 → preset /
   频率映射），而且 `_Games.json` 在三个方案包里各不相同（跟着 `fas.freq` 走）→ 必须跟方案一起换代。
-- 想**主动全量重灌**（Scene 重置 / 丢配置 / 手工改坏了）：WebUI 概览页 → **「传递调度」**
+- 想**主动全量重灌**（调度App 重置 / 丢配置 / 手工改坏了）：WebUI 概览页 → **「传递调度」**
   —— 它刻意**不设** `SYNC_SKIP`，属显式修复动作，会先自动备份。
 
 ---
@@ -596,13 +596,13 @@ cmd package query-activities --brief -a android.intent.action.MAIN -c android.in
 在 `adb shell` 里用 `nohup` / `setsid` 起的进程，**shell 退出时会被杀掉**（实测）。
 只有 `ksud services` 或开机流程起的能常驻。
 
-### 7.2 不要用 `am force-stop` 停 Scene
+### 7.2 不要用 `am force-stop` 停 调度App
 
-`force-stop` 会**连带掉无障碍服务 → Scene 直接失效**
+`force-stop` 会**连带掉无障碍服务 → 调度App 直接失效**
 （它靠 `com.omarea.vtools.AccessibilitySceneMode` 感知前台）。
 
 **正确做法**：只 `pkill -f scene-daemon` —— 它是后台调度进程，
-**4~8 秒内 Scene 会自动拉起并重读配置**，不碰 Scene 本身。
+**4~8 秒内 调度App 会自动拉起并重读配置**，不碰 调度App 本身。
 
 ### 7.3 `while read` 会静默丢掉「没有结尾换行」的最后一行
 
@@ -654,33 +654,33 @@ done
 同理，热路径上：用 `read -r v < "$f"` 而不是 `cat "$f"`；用 shell 内建的
 `[ ]` / `case` 而不是 `grep` / `awk` / `sed`。
 
-### 7.7 别用 `chattr +i` 锁 Scene 的配置
+### 7.7 别用 `chattr +i` 锁 调度App 的配置
 
-会让 Scene **自己存不下配置** —— 点小齿轮改特性、切模式都会 `ENOTSUP` 失败，
+会让 调度App **自己存不下配置** —— 点小齿轮改特性、切模式都会 `ENOTSUP` 失败，
 现象就是「**改了没反应**」。
 
-模块现在会主动**清掉历史残留的 chattr 标志**（`repair_scene_writable`）。
+模块现在会主动**清掉历史残留的 chattr 标志**（`repair_app_writable`）。
 
-### 7.8 Scene 需要你在它的 UI 里被「显式选中」一次
+### 7.8 调度App 需要你在它的 UI 里被「显式选中」一次
 
-Scene 用 `shared_prefs/global.xml` 的两个键决定「启用哪套配置」：
+调度App 用 `shared_prefs/global.xml` 的两个键决定「启用哪套配置」：
 
 | 键 | 可用值 | 说明 |
 |---|---|---|
-| `scene_profile_source` | **`SOURCE_SCENE_ONLINE`** ★ | 唯一「显示对 + 能启用」的值 |
-| | `SOURCE_SCENE_CUSTOM` | 能启用，但界面显示成「自定义」 |
+| `app_profile_source` | **`SOURCE_app_ONLINE`** ★ | 唯一「显示对 + 能启用」的值 |
+| | `SOURCE_app_CUSTOM` | 能启用，但界面显示成「自定义」 |
 | | `SOURCE_OUTSIDE` | 界面显示我们的身份却判为无效、`dynamic_control` 被按回 `false` ❌ |
-| `dynamic_control` | `true` | 「性能调节」总开关；`false` 时 Scene **完全不下发调度** |
+| `dynamic_control` | `true` | 「性能调节」总开关；`false` 时 调度App **完全不下发调度** |
 
-**正确操作**：Scene →「调节」页 → 点配置行（可能显示「未知」）→ 选「**自定义**」。
+**正确操作**：调度App →「调节」页 → 点配置行（可能显示「未知」）→ 选「**自定义**」。
 
-> ⚠️ 选「自定义」时 Scene 会把它自己的 `profile.json` 重置成 451B、
+> ⚠️ 选「自定义」时 调度App 会把它自己的 `profile.json` 重置成 451B、
 > `manifest.json` 写成 195B（`9.0 Customized`）。**选完请用 WebUI 的「传递调度」灌回我们的配置。**
 
 ### 7.9 `dynamic_control` 是 boolean，不能用字符串正则读
 
 值在 `value="..."` 属性里。用字符串式正则读会**永远读成空**，误报「性能调节未打开」。
-模块为此单独实现了 `scene_bool_get`。
+模块为此单独实现了 `app_bool_get`。
 
 ### 7.10 被 `overflow: hidden` 祖先包住的 `position: absolute` 会被静默裁切
 
@@ -700,7 +700,7 @@ WebUI 开发时的坑：模板说明面板原本 `position:absolute; top:41px`�
 ### 7.12 `lib/util.sh` 的 `MODDIR` 有回退
 
 ```sh
-[ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/SceneO3Tuner"
+[ -f "${MODDIR}/module.prop" ] || MODDIR="/data/adb/modules/O3CPUSet"
 ```
 
 **做离线测试时**：沙盒目录里**必须放一个 `module.prop` 占位**，
@@ -727,21 +727,21 @@ A：`background` 组的预算就是 `0-3`，系统已经把整个应用限住了
 A：前台切换的那一刻（下一个 5 秒 tick 内），或最多 60 秒兜底；
 也可点右上角刷新按钮，或在应用页点保存后立即生效。
 
-**Q：Scene 里切模式，线程会跟着变吗？**
+**Q：调度App 里切模式，线程会跟着变吗？**
 A：只有开了「模式同步线程」开关才会
 （省电→轻量 / 均衡→流畅 / 性能→高性能 / **极速→不覆盖，保留你手动套的模板**）。
 
 **Q：频率会跟着模式变吗？**
-A：会 —— **由 Scene 自己下发**。本模块不写频率节点（[§3.4](#34-频率模块不写交回-scene)）。
+A：会 —— **由 调度App 自己下发**。本模块不写频率节点（[§3.4](#34-频率模块不写交回-调度App)）。
 
 **Q：`threads.json` 还被写吗？**
-A：写，但只为让 Scene 侧的数据自洽 —— **Scene 不会执行它**。
+A：写，但只为让 调度App 侧的数据自洽 —— **调度App 不会执行它**。
 真正生效的是本模块的落核器。
 
 **Q：相机还是锁频怎么办？**
 
 > 先说结论：**现在（v14+）相机不再靠模块看护**，而是由 `_Camera.json` 固定走
-> `["@preset","fast_active"]` + `["@limiter","NONE"]`（豁免 Scene 的辅助调速器）。
+> `["@preset","fast_active"]` + `["@limiter","NONE"]`（豁免 调度App 的辅助调速器）。
 > 那个 `camera_freq_guard.sh` 已降级为**手动应急工具**，默认不开。
 
 按顺序检查：
@@ -764,14 +764,14 @@ A：默认**不开**。它只在「相机前台但频率区间塌缩」时写回
 正常情况下用不到。要用的话：
 
 ```sh
-touch /data/adb/SceneO3Tuner/camera_freq_guard.on    # 启用
-rm -f /data/adb/SceneO3Tuner/camera_freq_guard.on    # 停用
+touch /data/adb/O3CPUSet/camera_freq_guard.on    # 启用
+rm -f /data/adb/O3CPUSet/camera_freq_guard.on    # 停用
 ksud services                                        # 让 service.sh 重新判定
 ```
 
 > ⚠ 别用 `pkill -f camera_freq_guard` 了事 —— 那是上面 `service.sh` 自己做的事，
 > 而且**不能**用 `pkill -f scene-daemon`（那条命令的 `-f` 会匹配到你自己的 shell，等于自杀）。
-> 停 Scene 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，它 4~8 秒会自己拉起。
+> 停 调度App 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，它 4~8 秒会自己拉起。
 
 **Q：怎么恢复出厂频率？**
 A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_scheme.sh restore`。
@@ -780,9 +780,9 @@ A：音量键菜单选「恢复出厂频率」，或 `sh Scripts/4+4+2/O3/set_sc
 A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
 
 ```sh
-/data/adb/modules/SceneO3Tuner/disable     # 存在 = 模块被禁用（管理器里显示灰色）
-/data/adb/modules/SceneO3Tuner/remove      # 存在 = 标记为「重启后卸载」
-/data/adb/modules/SceneO3Tuner/update      # 存在 = 标记为「重启后合并更新」
+/data/adb/modules/O3CPUSet/disable     # 存在 = 模块被禁用（管理器里显示灰色）
+/data/adb/modules/O3CPUSet/remove      # 存在 = 标记为「重启后卸载」
+/data/adb/modules/O3CPUSet/update      # 存在 = 标记为「重启后合并更新」
 ```
 
 常见触发：① 管理器里误关；② **KSU 判定开机失败进入「安全模式」**（会把所有模块一起禁用，
@@ -816,9 +816,9 @@ A：KSU 的「启用 / 禁用」在磁盘上就是**一个标记文件**：
    > 被禁用的那一次开机里 `service.sh` 根本没执行过，所以这一步不能省 —— 否则模块「启用」了但守护是死的。
 4. 如果是 **`update` 卡死（开关灰 + 没按钮）**：直接 `su -c` 跑下面这句，等几秒刷新管理器即可，**不用重启**：
    ```sh
-   su -c "cp -af /data/adb/modules_update/SceneO3Tuner/. /data/adb/modules/SceneO3Tuner/ && rm -f /data/adb/modules/SceneO3Tuner/update /data/adb/modules/SceneO3Tuner/remove && rm -rf /data/adb/modules_update/SceneO3Tuner && /data/adb/ksu/bin/ksud services"
+   su -c "cp -af /data/adb/modules_update/O3CPUSet/. /data/adb/modules/O3CPUSet/ && rm -f /data/adb/modules/O3CPUSet/update /data/adb/modules/O3CPUSet/remove && rm -rf /data/adb/modules_update/O3CPUSet && /data/adb/ksu/bin/ksud services"
    ```
-   （用 MT 管理器手动做等价操作也行：把 `modules_update/SceneO3Tuner/` 整个覆盖进 `modules/SceneO3Tuner/`，删掉 `update`/`remove`，删掉 `modules_update/SceneO3Tuner/`。）
+   （用 MT 管理器手动做等价操作也行：把 `modules_update/O3CPUSet/` 整个覆盖进 `modules/O3CPUSet/`，删掉 `update`/`remove`，删掉 `modules_update/O3CPUSet/`。）
 5. 兜底：**重装本模块**（v16.2.2 起三路自愈：安装时就地合并 → 后台 `fix_pending.sh` 轮询 →
    **访问 WebUI / 按音量键即自愈**，并都会补跑 `ksud services`）。
 
@@ -858,7 +858,7 @@ for c in 0 4 8; do echo cpu$c pl=$(cat /sys/devices/system/cpu/cpu$c/cpufreq/xre
 
 # ★ 看落核（v12+ 是 cgroup 分组，不是逐线程 taskset）
 P=$(pidof com.tencent.mm); cat /proc/$P/cpuset
-ls /dev/cpuset/SceneO3Tuner/ 2>/dev/null
+ls /dev/cpuset/O3CPUSet/ 2>/dev/null
 
 # QoS 上下限（老节点的遗留值，只作参考）
 for c in 0 4 8; do
@@ -869,18 +869,18 @@ done
 strace -f -e trace=write -p "$(pidof scene-daemon)" 2>&1 | grep -i freq
 
 # 模块状态 / 日志
-sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh status
-sh /data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh audit
-tail -50 /data/adb/SceneO3Tuner/sceneo3.log
+sh /data/adb/modules/O3CPUSet/Scripts/4+4+2/O3/webui.sh status
+sh /data/adb/modules/O3CPUSet/Scripts/4+4+2/O3/webui.sh audit
+tail -50 /data/adb/O3CPUSet/o3cpuset.log
 
 # 后端命令可以直接在 shell 里试（WebUI 走的是同一套）
-W=/data/adb/modules/SceneO3Tuner/Scripts/4+4+2/O3/webui.sh
+W=/data/adb/modules/O3CPUSet/Scripts/4+4+2/O3/webui.sh
 sh $W launchables          # 列出「启动器能点开」的包（应用页过滤用的就是它）
-sh $W conf fas             # 读 Scene 的 FAS 调速器三值
+sh $W conf fas             # 读 调度App 的 FAS 调速器三值
 sh $W fasxres              # 一键设成 xres/xres/xres（写完自检 + 重启 scene-daemon）
 ```
 
-> ⚠ 停 Scene 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，**不要** `pkill -f scene-daemon`
+> ⚠ 停 调度App 的 daemon 永远用 `pidof scene-daemon` + `kill <pid>`，**不要** `pkill -f scene-daemon`
 > —— `-f` 会连你自己的 shell 一起匹配，等于自杀。daemon 被 kill 后 4~8 秒会自己拉起。
 
 ### 离线自检
@@ -912,11 +912,11 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | `tools/test_templates_v15.py` | v15 迁移：旧表→新值 / 用户自建行不动 / 幂等（有标记 & 新表两种）/ seed printf 逐字一致 / 单一来源一致 / v17.1 起 4-5 已彻底移除（内置默认也不再出现） | 19 断言 |
 | `tools/test_webui_render.py` | 把 index.html 的脚本抽到 Node + 最小 DOM 里跑**真实渲染函数**：五个视图都不得抛异常且返回非空 HTML；模式页核心集合区块真的渲染出来（≥8 个选择器）；静态断言禁止用 `esc` 当局部变量名 | 8 断言 |
 | `tools/test_sync_skip.sh` | **升级覆盖语义**（§6）：拿真实方案目录在沙盒里跑真 `sync_scheme`，逐文件断言「谁被覆盖 / 谁被保留」+ `verify_synced` 是否认这份清单 | 27 断言 |
-| `tools/build_module.py` | 产出 `dist/SceneO3Tuner-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，任一失败就中止打包 | — |
+| `tools/build_module.py` | 产出 `dist/O3CPUSet-v<版本>-<日期>.zip`（包根直接是 `module.prop`，不套一层目录）；加 `--check` 则**先跑上面全部离线测试**，任一失败就中止打包 | — |
 
 > ⚠ `test_sync_skip.sh` 是**唯一**能验证「升级时保留 `threads*.json`」的地方 ——
 > 这条语义是**静默生效**的，写错了在设备上只表现为「某些文件莫名回退」，很难发现。
-> 它在**两种布局**下都能跑：开发树（模块在 `module/SceneO3Tuner/`）与本仓库（模块 = 仓库根）。
+> 它在**两种布局**下都能跑：开发树（模块在 `module/O3CPUSet/`）与本仓库（模块 = 仓库根）。
 
 `test_camera_guard.py` 覆盖（`camera_freq_guard.sh` 已降为**手动应急工具**、默认不启用；本测试守它的写入逻辑）：
 
@@ -931,10 +931,10 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 ## 10. 版本历史
 
 | 版本 | 主要内容 |
-| **v17.2** | ★ **上机调试（lhasa 真机）三项修复**：<br>① **pinwatch 烧核** —— `pkg_of()` 用 `tr '\0' '\n' < /proc/$pid/cmdline` 读短命进程时，toybox `tr` **不把 -ESRCH 当输入结束** → 原地空转（实测 rchar 冻结 / syscr ≈500 万/秒 / state=R / **94% 单核**）；因为它在 `$( )` 里，`consume()` 永不返回 → 事件循环连同 `guard.sh` 一起僵死，**每命中一次永久烧掉一个核**。改成 `cat … | tr …`（cat 出错即关管道 → tr 读到 EOF）。<br>② **`--check` 打出来的包被污染** —— 本机产物 139 条目 vs 交接 84 条目，多出的 55 个全是**测试沙盒残留在仓库根**的文件（`.test_sync_skip/`、`_t_*/`）。`.gitignore` 已忽略它们（测试故意不 rmtree），但 `build_module.py` 的 `collect()` **不读 `.gitignore`**，而 `--check` 正是「先跑自检、再打包」→ 必然带沙盒。改为 `skip_dir()`/`skip()` 前缀判定（与 .gitignore 同口径）。<br>③ ★★ **「4-5 已彻底删除」其实没落到已有安装上** —— v16.26 只删了「可选核位白名单 / 内置默认 / 新装种子 / v15·v16 迁移」，但 `app_templates.tsv` / `game_templates.tsv` 是**模块状态目录里的活数据，安装从不覆盖**；已有安装里那两行是 v16.22 时代写下的**字面量 4-5**。真机实测（v17.1 刚刷入）：`t.targets` 232 个目标里 **158 个** heavy_cores=4-5 —— 即「纯负收益」的那套绑核**仍在 158 个应用上生效**。新增 `migrate_templates_v17`（只改内置行，用户自建行不动；heavy_cores 与 comm 两处；带 `tpl_v17` 标记 + `*.pre-v17` 备份），`service.sh` 调用。**修复后实测：4-5 目标 158 → 0，4-7 目标 34 → 192；Scene threads.json 的 4-5 → 0。**<br>新增测试：`tools/test_pack_hygiene.py`（11 断言）、`tools/test_templates_v17.py`（9 断言，含幂等/自建行/备份三条反向断言），均已接入 `--check` 闸门 → **11 套件全绿**。<br>另：上机复核了 v17.1 的两条 —— `mode_sched_row` 确为 9 列（`balance 流畅 0-3 4-7 0 12 10 4 0` 与交接逐字一致）、`sched_cores.conf` 列序确为 `mode<TAB>base<TAB>esc` 且写→读回生效（`performance 0-3 8-9` → `performance 性能 0-3 8-9 1 …`），白名单 5 个、`4-5` 写入被正确拒绝；「配置变化」日志刷屏经实验证实**不是 bug**（故意改新一个被监视文件后守护只重建一次、`scene.mark` 正常前移）|
-| **v17.1** | ★★ **修「核心集合不生效」+ 收敛合法集合 + 打通消费端**（用户报：WebUI「模式 → 核心集合」设了没反应，频率与预期不符）。<br>**① 根因 = `mode_sched_row()` 列序接反**：文件 `sched_cores.conf` 的列序是 `<mode>\t<base>\t<esc>`，但旧代码把**列1 当 esc、列2 当 hotok** 读 → 列1（base，如 `0-3`）被当成「升级目标」（设 4-7 也永远升不上去）、列2（esc）被 `case 0|1` 拒掉（hotok 永远保持默认）。修复后 `mode_sched_row` 输出 **9 列**（`模式 中文 base esc hotok int hot idle io`，新增第 3 列 base），lookup 列号与文件列序一一对齐（1=base 2=esc 3=hotok…）；`webui.sh` 的 `cmd_schedcores`/`cmd_setschedcores` 取 esc 由 `cut -f3` 改 **`-f4`**（9 列后 esc 在第 4 列）。<br>**② 彻底移除 `4-5`**（用户问「流畅档升到 4-5 有意义吗，没用就删」）：实测**每核独立 PLL**（同刻 `cpu4=988800 / cpu5=835200 / cpu6=988800 / cpu7=1142400`）**推翻** v16.22 的「4-7 同域共频」结论；且 `cpu4/core_ctl min_cpus=max_cpus=4` 把 4 颗中核锁死常在线 → 收到 4-5 既省不到漏电、也无法靠「少核共频拉高」，唯一效果是把可调度核数 4→2（重载 ≥3 线程排队）。合法清单从 6 个收敛成 **5 个**：`0-3 / 4-7 / 8-9 / 0-7 / 4-9`（`SCHED_CORES_VALID`、`sched_cores_valid`、WebUI `SC_OUT`、`sched_cores_default_esc` 四处同步）。<br>**③ 新增 `SBASE`（基线锚点，load_aware 第 13 参）**：空闲收缩的回落目标不再固定 `SE(e_core)`，改用该档的 **base** —— 这才是「WebUI 设基线」真正生效的地方（fast 档基线 0-7 的空闲线程不再被误收缩）。<br>**④ taskset 通路消费 `lw.hot`**（`enforce_threads.sh` 新增 6.5 段）：此前 `lw.hot` 只被 cgroup 分支消费，`PIN_MODE=taskset`（默认）下负载感知**形同虚设**；现补上 `trim/listof/maskof/affof/alive` 消费路径，并去掉了 4.5 节的 `PIN_MODE` 门。<br>**验证**：`test_sched_cores.py` **48 断言全绿**（含 `4-5` 必须 REJECT、后端正反列序往返）、`test_load_aware.py` 25（含新增 SBASE 回落两例）、`test_templates_v15/v16`、`lint_module.py`、`test_camera_guard.py`、`test_bigcore_guard.py` 25、`test_pin_mode.py` 8、`test_webui_render.py` 12、`test_sync_skip.sh` 27 全绿。<br>⚠⚠ **基线教训（重要）**：本工作区的旧源码树（`2026-09-14-11-42-32`）**落后于远端**，用它当基线曾把远端 v17 回退成 v16.25 → 已 force 回滚。**远端 `main` 才是 v17 架构的权威**（自有 cpuset 组 `/dev/cpuset/SceneO3Tuner`，完全不碰 top-app/foreground）；本次修复基于从 `8389dc0` 重新拉取的 v17 树重做 |
+| **v17.2** | ★ **上机调试（lhasa 真机）三项修复**：<br>① **pinwatch 烧核** —— `pkg_of()` 用 `tr '\0' '\n' < /proc/$pid/cmdline` 读短命进程时，toybox `tr` **不把 -ESRCH 当输入结束** → 原地空转（实测 rchar 冻结 / syscr ≈500 万/秒 / state=R / **94% 单核**）；因为它在 `$( )` 里，`consume()` 永不返回 → 事件循环连同 `guard.sh` 一起僵死，**每命中一次永久烧掉一个核**。改成 `cat … | tr …`（cat 出错即关管道 → tr 读到 EOF）。<br>② **`--check` 打出来的包被污染** —— 本机产物 139 条目 vs 交接 84 条目，多出的 55 个全是**测试沙盒残留在仓库根**的文件（`.test_sync_skip/`、`_t_*/`）。`.gitignore` 已忽略它们（测试故意不 rmtree），但 `build_module.py` 的 `collect()` **不读 `.gitignore`**，而 `--check` 正是「先跑自检、再打包」→ 必然带沙盒。改为 `skip_dir()`/`skip()` 前缀判定（与 .gitignore 同口径）。<br>③ ★★ **「4-5 已彻底删除」其实没落到已有安装上** —— v16.26 只删了「可选核位白名单 / 内置默认 / 新装种子 / v15·v16 迁移」，但 `app_templates.tsv` / `game_templates.tsv` 是**模块状态目录里的活数据，安装从不覆盖**；已有安装里那两行是 v16.22 时代写下的**字面量 4-5**。真机实测（v17.1 刚刷入）：`t.targets` 232 个目标里 **158 个** heavy_cores=4-5 —— 即「纯负收益」的那套绑核**仍在 158 个应用上生效**。新增 `migrate_templates_v17`（只改内置行，用户自建行不动；heavy_cores 与 comm 两处；带 `tpl_v17` 标记 + `*.pre-v17` 备份），`service.sh` 调用。**修复后实测：4-5 目标 158 → 0，4-7 目标 34 → 192；调度App threads.json 的 4-5 → 0。**<br>新增测试：`tools/test_pack_hygiene.py`（11 断言）、`tools/test_templates_v17.py`（9 断言，含幂等/自建行/备份三条反向断言），均已接入 `--check` 闸门 → **11 套件全绿**。<br>另：上机复核了 v17.1 的两条 —— `mode_sched_row` 确为 9 列（`balance 流畅 0-3 4-7 0 12 10 4 0` 与交接逐字一致）、`sched_cores.conf` 列序确为 `mode<TAB>base<TAB>esc` 且写→读回生效（`performance 0-3 8-9` → `performance 性能 0-3 8-9 1 …`），白名单 5 个、`4-5` 写入被正确拒绝；「配置变化」日志刷屏经实验证实**不是 bug**（故意改新一个被监视文件后守护只重建一次、`调度App.mark` 正常前移）|
+| **v17.1** | ★★ **修「核心集合不生效」+ 收敛合法集合 + 打通消费端**（用户报：WebUI「模式 → 核心集合」设了没反应，频率与预期不符）。<br>**① 根因 = `mode_sched_row()` 列序接反**：文件 `sched_cores.conf` 的列序是 `<mode>\t<base>\t<esc>`，但旧代码把**列1 当 esc、列2 当 hotok** 读 → 列1（base，如 `0-3`）被当成「升级目标」（设 4-7 也永远升不上去）、列2（esc）被 `case 0|1` 拒掉（hotok 永远保持默认）。修复后 `mode_sched_row` 输出 **9 列**（`模式 中文 base esc hotok int hot idle io`，新增第 3 列 base），lookup 列号与文件列序一一对齐（1=base 2=esc 3=hotok…）；`webui.sh` 的 `cmd_schedcores`/`cmd_setschedcores` 取 esc 由 `cut -f3` 改 **`-f4`**（9 列后 esc 在第 4 列）。<br>**② 彻底移除 `4-5`**（用户问「流畅档升到 4-5 有意义吗，没用就删」）：实测**每核独立 PLL**（同刻 `cpu4=988800 / cpu5=835200 / cpu6=988800 / cpu7=1142400`）**推翻** v16.22 的「4-7 同域共频」结论；且 `cpu4/core_ctl min_cpus=max_cpus=4` 把 4 颗中核锁死常在线 → 收到 4-5 既省不到漏电、也无法靠「少核共频拉高」，唯一效果是把可调度核数 4→2（重载 ≥3 线程排队）。合法清单从 6 个收敛成 **5 个**：`0-3 / 4-7 / 8-9 / 0-7 / 4-9`（`SCHED_CORES_VALID`、`sched_cores_valid`、WebUI `SC_OUT`、`sched_cores_default_esc` 四处同步）。<br>**③ 新增 `SBASE`（基线锚点，load_aware 第 13 参）**：空闲收缩的回落目标不再固定 `SE(e_core)`，改用该档的 **base** —— 这才是「WebUI 设基线」真正生效的地方（fast 档基线 0-7 的空闲线程不再被误收缩）。<br>**④ taskset 通路消费 `lw.hot`**（`enforce_threads.sh` 新增 6.5 段）：此前 `lw.hot` 只被 cgroup 分支消费，`PIN_MODE=taskset`（默认）下负载感知**形同虚设**；现补上 `trim/listof/maskof/affof/alive` 消费路径，并去掉了 4.5 节的 `PIN_MODE` 门。<br>**验证**：`test_sched_cores.py` **48 断言全绿**（含 `4-5` 必须 REJECT、后端正反列序往返）、`test_load_aware.py` 25（含新增 SBASE 回落两例）、`test_templates_v15/v16`、`lint_module.py`、`test_camera_guard.py`、`test_bigcore_guard.py` 25、`test_pin_mode.py` 8、`test_webui_render.py` 12、`test_sync_skip.sh` 27 全绿。<br>⚠⚠ **基线教训（重要）**：本工作区的旧源码树（`2026-09-14-11-42-32`）**落后于远端**，用它当基线曾把远端 v17 回退成 v16.25 → 已 force 回滚。**远端 `main` 才是 v17 架构的权威**（自有 cpuset 组 `/dev/cpuset/O3CPUSet`，完全不碰 top-app/foreground）；本次修复基于从 `8389dc0` 重新拉取的 v17 树重做 |
 | **v16.25** | ★ **修「切档不干脆」—— 8-9 封锁改为亮屏每轮重申**（v16.24 刷机后真机实测发现）。<br>**现象**：切到极速应用后 `top-app/cpus` 有时停在 `0-7`、反向切回非极速有时停在 `0-9`，要等一会儿才纠正。<br>**根因**：v16.24 的 `bigcore_guard.sh` 调用被包在守护的 `WORK=1` 块里，而 `WORK=1` 只在前台变化 / 每 24 轮（120 秒）成立。但 **MIUI（system_server 的 cpuset 控制器）会持续把 `top-app`/`foreground` 的 `cpus` 写回 0-9** —— bind 的后备文件正好就在它写的路径上（模块注释里记过这个"后备文件被外部改写"的竞态）。所以 MIUI 改写后，最长要 120 秒才靠兜底轮按回去。<br>**改法**：把重申调用从 `WORK` 块里挪到**亮屏 tick 层**（每轮，≤5 秒内纠正）。脚本内部读 `cpus` 全是 shell 内建、只在需要改时才写，所以值一致时几乎零开销；代价是每轮多一个 fork（本机 10~40ms / 5s ≈ 0.2~0.8% 单核）。<br>**验证**：`test_bigcore_guard.py` 新增第 [10] 节 —— 用 if/fi 配平取出 `WORK` 块的**块体**，断言重申调用落在块外（37 → 39 断言）；改前红、改后绿。<br>⚠ 同时说明一条**排除项**：v16.24 排查中"cpu8 满载只到 ~2GHz"的读数**全部无效** —— 本机 toybox 的 `taskset` 不支持 `-c`（`Unknown option 'c'`），我每一次"满载"其实都没跑起来（`/proc/stat` 的 cpu8 idle delta 证明它全程空闲）。判断档位不能用 `scaling_max_freq`（模块源码自己写着它是动态回读值），要看 cgroup 的 `cpus`/`effective_cpus` 与 QoS |
-| **v16.24** | ★★ **修「应用设成极速却拿不到大核」—— 8-9 封锁改为按「前台应用的档位」判定**（用户报：把应用设为极速、同步之后频率还是 2000 多）。<br>**根因**：`bigcore_guard.sh` 判「是不是极速档」用的是**全局模式 / 方案名**，而极速是**逐应用**设的。设备装的方案是 `sweet_hq`，兜底映射成 `performance` → `CUR_MODE≠fast` → 它继续用 bind-mount 把 `/dev/cpuset/top-app/cpus`、`/dev/cpuset/foreground/cpus` 钉在 **0-7**。**前台应用永远跑不到 cpu8-9**，而极速档的高频（cpu8 4358400）**只存在于 8-9 上** → 逐应用极速必然失效。真机证据：`top-app cpus=0-7 effective=0-7`；`bigcore.log` 反复 `冻结 …（锁定为 0-7）` / `重申 … 0-9 → 0-7（后备文件被外部改写）`；`active_scheme=sweet_hq`。这正是模块自己注释里警告过的那个坑（「极速档不能锁 8-9，否则高负载线程根本上不去」），只是触发条件从"全局模式"漏成了"方案名"。<br>**改法**：① `lib/util.sh` 新增 `scene_app_mode()` —— 按 `powercfg.xml` 解析**该包**的档位，没显式设过（或值为 `igoned/none/disabled`）才回落全局默认；沿用本文件零 fork 风格（写全局 `SCENE_APP_MODE`，不用 `$()`）。② `guard.sh` 在 work 轮解析前台应用档位，用 `FG_MODE=` 传给 `bigcore_guard.sh`。③ `bigcore_guard.sh` 的档位来源改为 **FG_MODE 优先**，Scene `state` 与方案名降为兜底（开机 `service.sh` 直接调用时仍走兜底）。④ 顺带把 `SCENE_PREFS_DIR` 从**硬赋值**改成 `${SCENE_PREFS_DIR:-…}` —— 与 `STATE_DIR` 同一个测试基建坑：硬赋值会让沙盒测试静默读真机路径。<br>**排除的两条**（都实测过，非本因）：Scene 的「辅助调速器」`limiter_apps=1` —— 关掉 + 重启 daemon，cpu8 上限**没变**；Scene 进程缓存旧 SharedPreferences —— `kill -9` 重启 Scene 主进程，上限**没变**。<br>`test_bigcore_guard.py` 新增第 [5b]（FG_MODE 优先级，含"方案=sweet_hq 也要解封"）与第 [9] 节（`scene_app_mode` 三态：显式/未设/非法值），并把第 [8] 节改成静态断言「档位来源必须先是 FG_MODE、方案名只能是兜底」，25 → **37 断言** |
+| **v16.24** | ★★ **修「应用设成极速却拿不到大核」—— 8-9 封锁改为按「前台应用的档位」判定**（用户报：把应用设为极速、同步之后频率还是 2000 多）。<br>**根因**：`bigcore_guard.sh` 判「是不是极速档」用的是**全局模式 / 方案名**，而极速是**逐应用**设的。设备装的方案是 `sweet_hq`，兜底映射成 `performance` → `CUR_MODE≠fast` → 它继续用 bind-mount 把 `/dev/cpuset/top-app/cpus`、`/dev/cpuset/foreground/cpus` 钉在 **0-7**。**前台应用永远跑不到 cpu8-9**，而极速档的高频（cpu8 4358400）**只存在于 8-9 上** → 逐应用极速必然失效。真机证据：`top-app cpus=0-7 effective=0-7`；`bigcore.log` 反复 `冻结 …（锁定为 0-7）` / `重申 … 0-9 → 0-7（后备文件被外部改写）`；`active_scheme=sweet_hq`。这正是模块自己注释里警告过的那个坑（「极速档不能锁 8-9，否则高负载线程根本上不去」），只是触发条件从"全局模式"漏成了"方案名"。<br>**改法**：① `lib/util.sh` 新增 `app_app_mode()` —— 按 `powercfg.xml` 解析**该包**的档位，没显式设过（或值为 `igoned/none/disabled`）才回落全局默认；沿用本文件零 fork 风格（写全局 `app_APP_MODE`，不用 `$()`）。② `guard.sh` 在 work 轮解析前台应用档位，用 `FG_MODE=` 传给 `bigcore_guard.sh`。③ `bigcore_guard.sh` 的档位来源改为 **FG_MODE 优先**，调度App `state` 与方案名降为兜底（开机 `service.sh` 直接调用时仍走兜底）。④ 顺带把 `app_PREFS_DIR` 从**硬赋值**改成 `${app_PREFS_DIR:-…}` —— 与 `STATE_DIR` 同一个测试基建坑：硬赋值会让沙盒测试静默读真机路径。<br>**排除的两条**（都实测过，非本因）：调度App 的「辅助调速器」`limiter_apps=1` —— 关掉 + 重启 daemon，cpu8 上限**没变**；调度App 进程缓存旧 SharedPreferences —— `kill -9` 重启 调度App 主进程，上限**没变**。<br>`test_bigcore_guard.py` 新增第 [5b]（FG_MODE 优先级，含"方案=sweet_hq 也要解封"）与第 [9] 节（`app_app_mode` 三态：显式/未设/非法值），并把第 [8] 节改成静态断言「档位来源必须先是 FG_MODE、方案名只能是兜底」，25 → **37 断言** |
 | **v16.23** | ★ **三处按用户反馈收尾**：<br>① **4-5 进「模式列表」** —— v16.22 把 4-5 做成流畅档的内置默认却**不在**可选白名单里，校验因此被迫分成两个口径（`sched_cores_valid` 管用户提交、`sched_cores_builtin_ok` 管内置默认）。用户要求「同步到模式列表」后，后端白名单与前端 `SC_OUT` 都是 `0-3 / 4-5 / 4-7 / 8-9 / 0-7 / 4-9`，`sched_cores_builtin_ok` **整块删除**（两个口径合一）；`test_sched_cores.py` 新增第 8 节，把「WebUI 下拉 == 后端白名单 == `SCHED_CORES_VALID`」逐项锁死。<br>② **模块日期跟随构建日** —— `module.prop` 的 `version=16.23 (2026-09-18)` 与 `versionCode=2026091823` 原来是**源码里手写**的，而 KernelSU 模块页读的正是这两行，所以显示日期永远停在写代码那天（zip 的**文件名**一直是 `time.strftime` 现算的，只有这两行不是）。现在 `build_module.py` 在**写 zip 时**按构建日重写 —— `stamp_module_prop()`：`version` 括号里的日期替换、`versionCode` 只换**前 8 位日期段**并保留末尾修订号；仓库源文件不回写。新增 `tools/test_build_stamp.py`（15 断言）。<br>③ **修「模式页下拉闪屏」** —— 模式页两张表（频率 min~max、核心集合基线/升级）原来用**原生 `<select>`**（`.fsel` 没做 `appearance:none`），Android WebView 点开会**先弹一个系统大窗、再变成列表**（用户报「闪出大半屏一个窗口」）。改成 `button` + 模块自己的底部选择器 `pickSheet`（应用页已在用）：频率格走 `pickmf`、核心集合走 `picksc`，选择结果先暂存（`S.model` / `S.scPicks`），点保存才下发；保存失败时保留暂存不静默回退。旧的 `data-mf` INPUT_HANDLER 分支与 `.modetbl .f` 死样式一并删除。`test_webui_render.py` 新增两节：**模式页 0 个原生 `<select>`** + 选择器回调真的写回状态（12 断言）|
 | **v16.22** | ★ **按用户要求重排流畅/性能核位**（依据本机实测：4-7 是**同一频率域**——`policy4 related_cpus=4-7` 四核共频；`cpu4/core_ctl min=max=4` 强制在线，不会自动下线空核）：<br>　· **流畅（均衡）**：轻线程 0-3（不变）；主线程/渲染线程 4-7 → **4-5**（2 核够日常偏重，省「少 2 核漏电」）<br>　· **性能**：轻线程 4-7 → **0-3**（原来整条都在 4-7，是最费电的一档）；主线程/渲染线程保持 4-7（4 核余量，给王者/金铲铲这类中低要求游戏）<br>　· 省电/极速两档不动。**自定义机制保持原样**：WebUI 仍是那 5 个选项、仍走 `sched_cores.conf`；`4-5` 只作为**内置默认**存在，不进用户可选白名单（校验因此分两个口径：`sched_cores_valid` 管用户提交、`sched_cores_builtin_ok` 管内置默认）。<br>新增 `migrate_templates_v15`（幂等，`$STATE_DIR/tpl_v15` 标记 + `backup/*.pre-v15` 备份）把已装设备的模板行整行重写成新值——顺带修好设备上残留的旧显示名（`均衡`→`流畅`）。核位默认值收敛到 **`sched_cores_default_base/esc` 单一来源**（`mode_sched_row` 与 webui.sh 的 `sched_cores_template_other` 都从这里取），避免两处漂移。<br>⚠ 顺带修一个**测试基建坑**：`STATE_DIR` 原来是**硬赋值**（`STATE_DIR="/data/adb/..."`），导致沙盒测试**静默地**去操作真机路径 —— 测试"通过"其实是假阳性。改成 `${STATE_DIR:-默认}` 后沙盒才真的隔离（生产路径不变）。<br>真机验证（16.21 → 16.22，未重启）：迁移前 `balance|均衡|{p1_core}` → 迁移后 `balance|流畅|4-5`、`performance|性能|{e_core}`；`SC_balance=流畅|0-3|4-5`、`SC_performance=性能|0-3|4-7`；threads.json 已重建；抽查 `tencent.mm:push allowed=0-3`。构建闸门 7 套件全绿 |
 | **v16.21** | ★ **修「模式页打不开」** —— v16.18 加核心集合编辑器时，把局部变量命名为 `esc`，**遮蔽了全局转义函数 `esc()`**；下一行 `esc(cn)` 变成"调用字符串"，`viewModes()` 抛 `TypeError: esc is not a function`，整个模式页白屏。`lint_module.py` 只做静态检查（语法/接线/data-act 覆盖），**抓不到这种运行时错误** —— 现在新增 **`tools/test_webui_render.py`**：把 index.html 的内联脚本抽到 Node + 最小 DOM 里，**真实调用五个视图函数**，断言都不抛异常且返回非空 HTML、模式页核心集合区块确实渲染（≥8 选择器），并静态禁止把 `esc` 当变量名。已做红-绿验证（把实现改回遮蔽写法 → 测试立刻复现 `esc is not a function`）。⚠ 写这个测试时也踩了个坑：Node 的 CommonJS 里顶层函数**不是 `globalThis` 属性**，必须按名字直接调用（用 `global[v]` 动态取会让五个视图全报 NOT_A_FUNCTION）|
@@ -942,26 +942,26 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | **v16.20** | ★ **pinwatch 目标表刷新策略修正** —— 实测发现 `pinwatch` 可能比守护更早启动，此时 `$TMPD/t.tids`（目标进程表）还没生成，内核侧过滤集合为空 → **一个事件都收不到**；而原来的 60s 刷新周期会让这个「空窗口」持续一分钟。改为**每 10s 刷新 + 表为空时下一轮立即重试**。同时把守护重启后 pinwatch 常驻进程的激活路径真机验证通过（守护 1 个 + pinwatch 常驻 1 个 + helper 在跑） |
 | **v16.19** | ★ **事件驱动落核（eBPF raw_tracepoint）** —— 补上 taskset 模式唯一的硬缺口：**新线程的亲和性不继承**（实测父线程绑 0-3、新建线程 `allowed=0-9`），过去要等守护 work 轮（前台变化才触发）或最长 **120s** 的兜底轮。现在 `Scripts/4+4+2/O3/pinwatch`（freestanding C，静态 aarch64，5.8KB）用 **eBPF raw_tracepoint 挂 `sched_process_fork`**：内核侧判断父进程是否在「目标进程表」里，命中就把事件写进 ringbuf；用户态 `pinwatch.sh` 消费事件、做频次闸门（同进程 3s 内只落一次），再对**涉及的包**跑一次 `enforce_threads.sh <pkg>` —— **策略仍全部在 shell**（四档语义/模板/负载感知零重复实现），eBPF 侧只回答「谁 fork 了」。接入：`service.sh` 起常驻循环、`guard.sh` 每个 work 轮消费一次（无事件时开销≈读一个行数）。关闭：`touch $STATE_DIR/pinwatch_off`；二进制缺失或内核不支持时自身静默退出，不影响主流程。<br>⚠ 开发记录（值得记的坑）：① `raw_tracepoint_open` **必须**用 `BPF_PROG_TYPE_RAW_TRACEPOINT(17)`，用 `TRACEPOINT(5)` 会 EINVAL；而 `perf_event_open`+`PERF_EVENT_IOC_SET_BPF` 那条在本机 `perf_event_paranoid=2` 下是 **EACCES**。② 本内核 `sched_process_fork` 的 tracepoint 布局是 `__data_loc`（`parent_pid@12`/`child_pid@20`），与老源码的固定数组（24/44）**完全不同**，照抄偏移必错。③ 事件文件必须 `O_APPEND`（启动时 `O_TRUNC` 会让消费者的「已读位置」失效 → 丢事件）。④ 已用 BTF 解析器验出 `task_struct` size=4736 / `pid@1816` / `tgid@1820`（备用：需要内核侧读 pid 时可直接用）。<br>⚠ 当前限制：payload 的 tid 字段目前**等于父 pid**（`bpf_get_current_pid_tgid()` 在 raw_tp 里返回的是父进程自己的 tid），所以落核以**包**为单位而非精确到 tid —— 效果一样（都是毫秒级、整包线程一起修正），代价是该包线程多扫一次。精确到 tid 需读 ctx 的 child `task_struct*` + `bpf_probe_read_kernel`（offset 已备），留待后续 |
 | **v16.18** | ★ **WebUI 可自定义四档核心集合** —— 「模式」页新增「模式 → 核心集合」编辑区，每档可选 **0-3 / 4-7 / 8-9 / 0-7 / 4-9** 五个集合里的：**基线**（中低负载线程落哪）与**高负载升级到**（占用率超阈值后并入哪，「不升级」= 忙线程也留在基线内）。落盘 `webui/sched_cores.conf`（`<mode>\t<base>\t<esc>`），`mode_sched_row()` 读它覆盖内置默认；同时把基线同步进该档模板的 `other`/`heaviest`（新线程靠模板落核），并立即重算一次落核。**设计上刻意保证「缺省不行为变化」**：没有该文件时四档调参一字不改（`test_sched_cores.py` 第 1 节专门守这条）。只接受那 5 个集合（拒绝 `0-9` 之类会打到超大核的值）；目标含 8/9 时自动置「允许上探」，不升级档自动清掉该标志；文件损坏/半截一律逐列回落默认，绝不产出畸形行。新增 `tools/test_sched_cores.py`（35 断言）。⚠ 开发中**真机测出一个字段串位 bug**（写侧修了读侧没修，UI 显示仍是反的），已修并把「读/写两侧列序」都写成静态断言锁住 |
-| **v16.17** | ★ **落核默认从 cgroup 分组改为逐线程 taskset** —— 真机 A/B（同 TMPD、各 4 轮稳态）：cgroup `459/488/528 ms` vs taskset `268/321/396 ms`，**taskset 快约 1.4~1.7 倍**。来源：① 值已正确时一条命令都不发（幂等短路）；② 不必每轮维护 96+ 个 cgroup 组目录、不做组迁移。本机实测单次 `taskset -p` 12ms、`fork+exec` 6ms（proot 下 fork 极贵）。⚠ **代价（实测）**：taskset 的亲和性**不继承**给新线程（父线程绑 0-3 后新建线程 `allowed=0-9`），而 cgroup 组的 `cpus` 会强制约束组内新线程 ⇒ 新线程最多等一轮才被绑上，`APL_TTL`(180s) 兜底自愈。切回 cgroup：`touch $STATE_DIR/pin_cgroup`（`pin_taskset` 旧标记已废弃）。另修一处遗留陷阱：从旧布局升级时 `/dev/cpuset/SceneO3Tuner` 下还留着组，**组内线程仍受组 cpus 硬约束**（cpuset 是硬约束、taskset 只在其上收窄）⇒ 切到 taskset 时一次性 `--unbind-all` 并清空（`$STATE_DIR/cg_unbound` 幂等）。新增 `tools/test_pin_mode.py`（8 断言，红-绿循环验过，其中一项是「离线套件必须干净通过」的元测试）。**同时清掉 3 项遗留失败**：`test_camera_guard.py` 里「从三个方案包 `_Camera.json` 读出正确档位」的断言 —— v12 已把 `@cpu_freq` 从 `_Camera.json` 彻底移除（改引用 `profile.json` 的 `fast_active`），那是「相机 min==max 塌缩」的**根因修复**，源头没了该断言永远为假。删掉它、并把「`_Camera.json` 已无 `@cpu_freq`」变成一条正向断言；其余 21 项（写入顺序 / 三簇覆盖 / 假 sysfs 实跑 / 回退表）原样保留。构建闸门随之收紧：不再给 `test_camera_guard.py` 豁免，**任一测试失败即中止打包** |
+| **v16.17** | ★ **落核默认从 cgroup 分组改为逐线程 taskset** —— 真机 A/B（同 TMPD、各 4 轮稳态）：cgroup `459/488/528 ms` vs taskset `268/321/396 ms`，**taskset 快约 1.4~1.7 倍**。来源：① 值已正确时一条命令都不发（幂等短路）；② 不必每轮维护 96+ 个 cgroup 组目录、不做组迁移。本机实测单次 `taskset -p` 12ms、`fork+exec` 6ms（proot 下 fork 极贵）。⚠ **代价（实测）**：taskset 的亲和性**不继承**给新线程（父线程绑 0-3 后新建线程 `allowed=0-9`），而 cgroup 组的 `cpus` 会强制约束组内新线程 ⇒ 新线程最多等一轮才被绑上，`APL_TTL`(180s) 兜底自愈。切回 cgroup：`touch $STATE_DIR/pin_cgroup`（`pin_taskset` 旧标记已废弃）。另修一处遗留陷阱：从旧布局升级时 `/dev/cpuset/O3CPUSet` 下还留着组，**组内线程仍受组 cpus 硬约束**（cpuset 是硬约束、taskset 只在其上收窄）⇒ 切到 taskset 时一次性 `--unbind-all` 并清空（`$STATE_DIR/cg_unbound` 幂等）。新增 `tools/test_pin_mode.py`（8 断言，红-绿循环验过，其中一项是「离线套件必须干净通过」的元测试）。**同时清掉 3 项遗留失败**：`test_camera_guard.py` 里「从三个方案包 `_Camera.json` 读出正确档位」的断言 —— v12 已把 `@cpu_freq` 从 `_Camera.json` 彻底移除（改引用 `profile.json` 的 `fast_active`），那是「相机 min==max 塌缩」的**根因修复**，源头没了该断言永远为假。删掉它、并把「`_Camera.json` 已无 `@cpu_freq`」变成一条正向断言；其余 21 项（写入顺序 / 三簇覆盖 / 假 sysfs 实跑 / 回退表）原样保留。构建闸门随之收紧：不再给 `test_camera_guard.py` 豁免，**任一测试失败即中止打包** |
 | **v16.16** | ★ **四档调度语义按用途重定义 + 修掉三个静默失效** —— 用户按实际用途重定义四档，`lib/util.sh` 新增 **`mode_sched_row()` 作为单一事实源**（「模式 → 升级目标/阈值/间隔」原来散在模板表、`load_aware` 调用参数、各自 `profile.json` 三处，改一档要动三个文件、极易互相矛盾 —— v16.9 的「越级」bug 就是这么来的）：<br>　· **省电** 0-3 小核，忙线程**不升级**（升级就白省电）<br>　· **流畅** 主/渲染 4-7、其余 0-3，忙线程只并 4-7<br>　· **性能** 其余线程也到 4-7，忙线程封顶 4-7（8-9 留给系统）<br>　· **极速** 中低负载线程 0-7 交系统分配（**不做空闲收缩**），只有**高负载线程**上探 **4-9**（中核 ∪ 超大核，内核按频率/热状态自选核）<br>显示名 均衡 → **流畅**（与 `mode_name_cn` 统一）。新增 **`migrate_templates_v14`**：把 fast 从 v13 的「整条 4-9」改为「0-7 基线 + 高负载 4-9」（整条 4-9 会让中低负载线程也落中核/大核）。<br>**三个静默失效**（都在真机/隔离测试里挖出来，且都被调用方的 `2>/dev/null` 吞掉）：<br>① awk `{ print x > F; done = 1 }` 是**语法错误** → 整个程序解析失败、主规则不执行、状态文件空白、**永不升核**；<br>② `lvl >= HOT` 在 `-v` 传参下走**字符串比较**（`lvl=7 >= HOT=9` 为假、`10 >= 12` 也为假，取决于字典序）→ 改 `+0` 强制数值化；<br>③ 冻结组**只读不写**：外部（scene-daemon）写的是 bind-mount 的**后备文件**，被改成 0-9 后守卫不重申意图值 → 「锁在 0-7」变成空话（真机 `top-app`/`foreground` 的 `eff` 实际是 0-9）；现在每轮把意图值写回后备文件（值一致时零写入）。<br>**`bigcore_guard` 按模式生效**：极速档解冻并停用 8-9 封锁（否则高负载线程上不去 4-9），其余档继续锁 0-7；只解冻一次（`bigcore.mode.fast` 标记）避免每轮反复 umount。<br>新增离线测试并登记进 `tools/`：**`test_load_aware.py`（23 断言）**、**`test_bigcore_guard.py`（25 断言）** —— 这两个文件在 v16.11/v16.12 的记账里被声称存在，实际**从未进过仓库**（本版勘误并补齐）。真机验证（16.15 → 16.16，**未重启**）：四档升级目标、8-9 封锁/解冻、v14 迁移幂等，均通过；`lint_module.py` 全过 |
 |---|---|
 | **v16.12** | ★ **揪出「谁在把 0-9 写回」并冻结父组 —— v16.11 的修复其实会被改回去** —— 真机发现跑完 v16.11 后 `top-app`/`foreground` **几秒内自己变回 0-9**。定位方法（可复用）：① 扫 `/proc/*/fd/*` 的 readlink 看谁打开着这些 `cpus` 文件（命中 `vendor.xring.hardware.perfflinger.service`）；② **`kill -STOP` 逐个隔离**（可 `-CONT` 恢复、进程不重启）——**冻结 `scene-daemon` 15 秒 → mtime 完全不动**、冻结 perfflinger → 写入照旧 ⇒ **真正持续重写父组的是 scene-daemon**（周期 3~4 秒，只写 `top-app`/`foreground`）。⚠ 同时**纠正 v16.11 的一处错误结论**：以为「父组收到 0-7 后子组写 0-9 会被内核拒（EINVAL）」——**实测是错的**，子组照样能写成 0-9。真正起作用的是 **`effective_cpus` = 与所有祖先取交集**：父组冻在 0-7 后，`main`/`render`/`other`/`trashy`/`boost` 即使写成 0-9，它们的 `effective_cpus` 全是 0-7，**top-app 里 14 个真实进程的 `Cpus_allowed_list` 全是 0-7** ⇒ **只冻父组就压住整棵子树**。`bigcore_guard.sh` 因此新增：`$STATE_DIR/bigcore.intent` 记「应有值」，下一轮**先做回退检测**（必须在裁剪之前，否则永远检测不到）→ 被改回就升级为 `mount --bind` 冻结；`PREFREEZE="top-app foreground"` 第一轮就冻。`restore` 解冻 + 原值写回，**不用重启**。⚠ **勘误（v16.16）**：本行原称「离线测试扩到 47 断言」，但那两个测试文件（`test_bigcore_guard.py` / `test_load_aware.py`）**从未进过仓库**，v16.16 才补齐并登记进 `tools/`。过程中抓到 3 个静默失败型 bug（`save_orig` 的 grep 判重被路径反斜杠破坏 → restore 用意图值覆盖出厂值；`freeze_cpus` 无条件写 → 破坏幂等；回退检测顺序反了 → 永不冻结） |
 
-| **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **Scene 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 Scene 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。⚠ **勘误（v16.16）**：本行原称「新增 `test_bigcore_guard.py` 25 断言」，但该文件**从未进过仓库**，v16.16 才补齐。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
+| **v16.11** | ★ **禁止系统 cpuset 组使用超大核 8-9** —— 用户反馈「桌面 / 切换应用时经常看到 **0-9** 和 **4-9**」。查清：这**不是模块落核造成的**（模块永远不会把线程放 8-9），而是**系统自己的 cpuset 组**——`top-app/cpus` 出厂常见 `0-9`、`foreground/boost/cpus` 常见就是大核簇 `4-9`，再加上 **调度App 的「核心分配」**按 `files/threads.json`（**我们方案包里那份 v8 遗留**，18 条规则：「极致性能」组 40 包 = `0-9`，13 个游戏组 = `main_thread 1-9 / heaviest 8-9`）写的 `top-app/{main,render,other}`。新增 **`bigcore_guard.sh`**：把这些组的 `cpus` 收到 **0-7**（只在确实含 8/9 时才写，读值全用内建 `read`＝0 fork）；**先子组后父组**（cpuset 要求 `child ⊆ parent`）—— ★ **父组一旦收到 0-7，外部再想给子组写 0-9 会被内核直接拒**，从根上堵住 调度App 的核心分配。原值存 `STATE_DIR/bigcore.saved`，`bigcore_guard.sh restore` 可完整还原（**不用重启**）；关闭 = `touch STATE_DIR/allow_bigcore`，冻结（bind-mount）= `touch STATE_DIR/bigcore_freeze`。同步把 `powercfg.sh` 的 kswapd 从 `8-9` 改到 `4-7`（否则子组占着 8-9，父组收不到 0-7 会 EINVAL）。调用点：`service.sh` 开机 + `guard.sh` 的 work 轮与每 60s 兜底。⚠ **勘误（v16.16）**：本行原称「新增 `test_bigcore_guard.py` 25 断言」，但该文件**从未进过仓库**，v16.16 才补齐。⚠ **代价**：**所有前台应用都用不到 8-9 了**（含重载游戏），这正是本次要求；想恢复用 `restore` 即可 |
 
 | **v16.10** | ★ **修 v16.9 的「越级」bug：负载升级默认不再上超大核** —— 用户实测反馈「应用设为均衡后打开线程显示 **4-9**」。根因是 v16.9 的升级规则写成「基集已含中核时再并 8-9」，而 **`performance` 档的 `other` 本来就是 4-7** → 条件恒真 → 所有忙线程被推上 8-9（真机 40 个目标里 31 个是 performance 档，所以「满屏 4-9」）。这与本项目结论冲突（**C1-Ultra 只在 >2.2GHz 才有能效优势**，而大核频窗 1.1~2.0GHz）。现在忙线程**只并入中核 `{p1_core}`**，升 8-9 改为可选开关 **`LW_HP`（默认 0 = 关）**；另外目标核位**等于基集时不写 hot 条目**（顺带省掉 perf 档应用每 25 秒一次的全线程扫描）。修复后：`powersave`/`balance`(other 0-3) 忙线程 → **0-7**；`performance`(other 4-7) → **无变化**。测试扩到 **22 断言**（新增「不越级」「`LW_HP=1` 才升」） |
 
-| **v16.9** | ★ **移植 Aether OptExt 的「负载感知」与「子进程匹配」**（修用户实测发现的真 bug）—— ① **子进程漏绑**：`enforce_threads.sh` 用的是**精确名匹配**，`com.tencent.mm:appbrand0` ≠ `com.tencent.mm`，真机实测微信 6 个进程里**只有主进程被绑**（5 个子进程共 518 线程全散在系统默认组、掩码 0-9）→ 现在 `ps` 里凡含 `:` 的名字会额外登记成主包的子进程，给主包配的档位**连带它所有子进程**一起生效（两趟处理保证显式子进程条目优先，去重靠 SEEN）。② **负载感知 `load_aware.sh`（新脚本）**：不再只靠名字猜，而是读 `/proc/{tid}/stat` 的 `utime+stime` **差分实测**每个线程的占用率（窗口 25 秒），>60% 升级、≤5% 收缩。★ **升级目标按玄戒 O3 实测调优，没有照搬艇长**：艇长把忙线程并入超大核 8-9，而本项目实测 C1-Ultra **只在 >2.2GHz 才有能效优势**、中核就能跑满 120fps、大核只承担 0.7%~1.7% 计算量 ⇒ **并入中核 4-7**，只有基集已含中核时才再并 8-9。③ 三条安全边界：主线程 / `heaviest_thread` / `heavy_thread` / `comm` 命中的线程**免疫**动态调整（对应艇长 `is_thread_rule` 语义）；hot 表以 **`pid:tid`** 为键（tid 会回收复用）；**有 hot 的进程不跳过缓存**（否则只生效一轮）。④ 关闭开关：`touch /data/adb/SceneO3Tuner/lw_off`。新增 `test_load_aware.py` **21 断言**（把源文件里的 awk 原样抽出来跑，含 2 个边界用例）。⚠ 过程中修掉两个 awk 真坑：核位串末位不加空格导致 `index` 恒不命中（会吐出 `4-9,9` 这种畸形表达式）、以及 `-v NF=` 覆盖 awk 内置变量导致状态文件静默写不出 |
+| **v16.9** | ★ **移植 Aether OptExt 的「负载感知」与「子进程匹配」**（修用户实测发现的真 bug）—— ① **子进程漏绑**：`enforce_threads.sh` 用的是**精确名匹配**，`com.tencent.mm:appbrand0` ≠ `com.tencent.mm`，真机实测微信 6 个进程里**只有主进程被绑**（5 个子进程共 518 线程全散在系统默认组、掩码 0-9）→ 现在 `ps` 里凡含 `:` 的名字会额外登记成主包的子进程，给主包配的档位**连带它所有子进程**一起生效（两趟处理保证显式子进程条目优先，去重靠 SEEN）。② **负载感知 `load_aware.sh`（新脚本）**：不再只靠名字猜，而是读 `/proc/{tid}/stat` 的 `utime+stime` **差分实测**每个线程的占用率（窗口 25 秒），>60% 升级、≤5% 收缩。★ **升级目标按玄戒 O3 实测调优，没有照搬艇长**：艇长把忙线程并入超大核 8-9，而本项目实测 C1-Ultra **只在 >2.2GHz 才有能效优势**、中核就能跑满 120fps、大核只承担 0.7%~1.7% 计算量 ⇒ **并入中核 4-7**，只有基集已含中核时才再并 8-9。③ 三条安全边界：主线程 / `heaviest_thread` / `heavy_thread` / `comm` 命中的线程**免疫**动态调整（对应艇长 `is_thread_rule` 语义）；hot 表以 **`pid:tid`** 为键（tid 会回收复用）；**有 hot 的进程不跳过缓存**（否则只生效一轮）。④ 关闭开关：`touch /data/adb/O3CPUSet/lw_off`。新增 `test_load_aware.py` **21 断言**（把源文件里的 awk 原样抽出来跑，含 2 个边界用例）。⚠ 过程中修掉两个 awk 真坑：核位串末位不加空格导致 `index` 恒不命中（会吐出 `4-9,9` 这种畸形表达式）、以及 `-v NF=` 覆盖 awk 内置变量导致状态文件静默写不出 |
 
-| **v16.8** | ★ **把设备当前运行态反向固化成模块基线，并顺手纠正一处固化错误** —— 按用户要求抓取设备上的 Scene 配置与模块数据对比后固化：① **`fas_engine=feas|fas|fas_lite` → `fas`** 与 **`refresh_rate.conf enable=1 → 0`**（这两项是你通过 Scene UI 改的，此前只存在于设备 Scene 侧，**刷模块会被方案包覆盖**）；② 新增 `Config/app_assign.tsv`（58 条 APP→档位）与更新 `Config/game_assign.tsv` （王者/金铲铲→performance）作为**新装种子**，并在 `customize.sh` 补了 app 分配的种子逻辑（仍只在文件缺失时落地）。⚠ 同时纠正一处我自己的固化错误：**`gpu_lock` 曾被我固化成 `1`，但它在 O3 上根本没有执行体**（反汇编实证：Scene 只把它拼成 `export` 前缀交给 `powercfg.sh`，而本模块的 `powercfg.sh` 自 v10 起不读它）→ `customize.sh` 本就有 awk 强制改写为 `0`，现方案包也回退为 `0`。另：Scene 侧 9 个方案配置文件经二进制比对**与仓库完全一致**，说明日常刷模块并不会丢配置；你的 WebUI 分配存在 `STATE_DIR=/data/adb/SceneO3Tuner`（独立于模块目录，`uninstall.sh` 也不删） |
+| **v16.8** | ★ **把设备当前运行态反向固化成模块基线，并顺手纠正一处固化错误** —— 按用户要求抓取设备上的 调度App 配置与模块数据对比后固化：① **`fas_engine=feas|fas|fas_lite` → `fas`** 与 **`refresh_rate.conf enable=1 → 0`**（这两项是你通过 调度App UI 改的，此前只存在于设备 调度App 侧，**刷模块会被方案包覆盖**）；② 新增 `Config/app_assign.tsv`（58 条 APP→档位）与更新 `Config/game_assign.tsv` （王者/金铲铲→performance）作为**新装种子**，并在 `customize.sh` 补了 app 分配的种子逻辑（仍只在文件缺失时落地）。⚠ 同时纠正一处我自己的固化错误：**`gpu_lock` 曾被我固化成 `1`，但它在 O3 上根本没有执行体**（反汇编实证：调度App 只把它拼成 `export` 前缀交给 `powercfg.sh`，而本模块的 `powercfg.sh` 自 v10 起不读它）→ `customize.sh` 本就有 awk 强制改写为 `0`，现方案包也回退为 `0`。另：调度App 侧 9 个方案配置文件经二进制比对**与仓库完全一致**，说明日常刷模块并不会丢配置；你的 WebUI 分配存在 `STATE_DIR=/data/adb/O3CPUSet`（独立于模块目录，`uninstall.sh` 也不删） |
 
 | **v16.6** | ★ **按用户要求移除「配置完整性」与「一键还原数据」** —— 概览页的「配置完整性」分组（注错文件清单 + 「检测配置」按钮）和「一键还原数据」按钮、前端 `ACTIONS.audit`/`fixall`、`Api.audit`/`fixall`、`parseAudit()`、开机自动审计 `loadAudit()`，以及后端的 `webui.sh: audit|fixall` 两个子命令与整个 `integrity.sh` 脚本全部删除；`test_webui.mjs` 里对应的 mock 换成**防回归断言**（断言这三样都不再出现）。⚠ 顺带修正一条此前的误判：`game_templates.tsv` 里 `heaviest_thread` 为空是**刻意设计**（主线程靠「tid == pid」自动识别后绑 `heaviest_cores`），不是配置缺口。产物体积：`index.html` 136239 → 131712 B，zip 内文件 79 → 78 |
 
-| **v16.5** | ★ **配置键审计：揪出 9 个「Scene 根本不读」的编造键** —— 起因是 `fas.conf` 里那两个"目标功耗窗口"（`adj_min_power=6.0` / `adj_max_power=9.0`）与实测游戏功耗（3.8W）严重不符，于是把 Scene 的 APK 拉下来逐键核对，结果它们**在 `classes.dex` 和 `resources.arsc` 里都不存在**。顺藤摸瓜审计了模块推送的全部 5 个 `features/*.conf`，**14 个键里 9 个是编的**：① `fas.conf` 的 6 个 `adj_*`（功耗窗口 / 电池温度窗口 / SoC 温度窗口）全删 —— Scene 的 FAS **没有"目标功耗窗口(W)"这个功能**，功耗是靠 `target_fps_offset`（帧率微调‰）+ `margin_offset`（余量 MHz）+ 温度感知 + `fast_down_always` 间接控制的；② `limiter.conf` 的 `limiters_in_apps` / `limiters_in_games` / `stat_method` 改名成真实键 `limiter_apps` / `limiter_games` / `limiter_jiffies` —— **此前"改它就能开关辅助调速器"的说法是无效操作**，辅助调速器一直由 Scene 自己的 UI 设置在控制；③ `cpuset.conf` 的 5 个键也全部查无此键，但真实键名未确认，按"不猜"原则只加警告不动值。另附**键名验证法**（grep 两处字节 + 区分配置键与图表字段名） |
+| **v16.5** | ★ **配置键审计：揪出 9 个「调度App 根本不读」的编造键** —— 起因是 `fas.conf` 里那两个"目标功耗窗口"（`adj_min_power=6.0` / `adj_max_power=9.0`）与实测游戏功耗（3.8W）严重不符，于是把 调度App 的 APK 拉下来逐键核对，结果它们**在 `classes.dex` 和 `resources.arsc` 里都不存在**。顺藤摸瓜审计了模块推送的全部 5 个 `features/*.conf`，**14 个键里 9 个是编的**：① `fas.conf` 的 6 个 `adj_*`（功耗窗口 / 电池温度窗口 / SoC 温度窗口）全删 —— 调度App 的 FAS **没有"目标功耗窗口(W)"这个功能**，功耗是靠 `target_fps_offset`（帧率微调‰）+ `margin_offset`（余量 MHz）+ 温度感知 + `fast_down_always` 间接控制的；② `limiter.conf` 的 `limiters_in_apps` / `limiters_in_games` / `stat_method` 改名成真实键 `limiter_apps` / `limiter_games` / `limiter_jiffies` —— **此前"改它就能开关辅助调速器"的说法是无效操作**，辅助调速器一直由 调度App 自己的 UI 设置在控制；③ `cpuset.conf` 的 5 个键也全部查无此键，但真实键名未确认，按"不猜"原则只加警告不动值。另附**键名验证法**（grep 两处字节 + 区分配置键与图表字段名） |
 
 | **v16.4** | ★ **用第二份实测校正 `sweet_hq`，并修掉一处「改了但没生效」的配置** —— 第二份报告（同款游戏，`767s`、电量从 `10%` 一路测到 `4%`）带来两个结论：① **中核上限 `1651200→1468800`**：这次先按 `cpu_loads` 把中核负载分桶、再在桶内比频率（排除「高频出现在团战」的选择偏差），控制变量后帧率全程 119~120 纹丝不动，功耗却从 3.58W 单调涨到 4.59W，能效 33.5→25.9 fps/W，`1550MHz` 以上纯浪费；② **补 v16.3 的漏**：v16.3 只改了 `_Games.json` 的 `@cpu_freq`，`profile.json` 里中核上限还留在 `3148800`（会被硬件 clamp 到 ≈1.8GHz）——**实测无法区分这两套配置谁在游戏态生效**，所以现在两处同步改成同一个值，中核上限才真正落地。另：查清了低电量（≤5%）掉帧的根因 —— 系统把 cpu8/cpu9 下线、负载全压回中核，省 `0.467W` 却损失 `21.2 fps`（不是热降频，当时才 54℃）；因属电池保护策略且本机为临时 root，本版**不强行对抗**，只在方案说明里写清 |
 
-| **v16.3** | ★ **新增 `sweet_hq`（满画质游戏）方案** —— 基于 Scene 实测报告（王者荣耀 v11.4.1.36 · 满画质 120fps · 453s）做的「砍过量供给」调优：报告显示帧率全程贴 120 上限（avg 119.63 / 5% Low 118），而功耗 2.86W→4.86W 帧率纹丝不动 ⇒ SoC 在过供给。改动（仅性能模式 · 游戏态）：大核下限 `1497600→1113600`（大核只承担 1.7% 计算量、90.3% 采样负载 <5%）、大核 boost `2371200/2044800→1651200/1497600`、中核 boost `1651200→1296000`、三簇上限收到实测峰值（L 1939200 / M 1651200 / P 2044800）。**中核下限 835200 与 target_loads 刻意不动**（UnityMain 主线程 84.6%，835MHz 是维持 120fps 的临界）。非游戏部分与 `sweet_bal` 逐字节相同 → 音量键菜单一点即可 A/B。⚠ 前提：游戏在 Scene 里要设为「性能模式」 |
+| **v16.3** | ★ **新增 `sweet_hq`（满画质游戏）方案** —— 基于 调度App 实测报告（王者荣耀 v11.4.1.36 · 满画质 120fps · 453s）做的「砍过量供给」调优：报告显示帧率全程贴 120 上限（avg 119.63 / 5% Low 118），而功耗 2.86W→4.86W 帧率纹丝不动 ⇒ SoC 在过供给。改动（仅性能模式 · 游戏态）：大核下限 `1497600→1113600`（大核只承担 1.7% 计算量、90.3% 采样负载 <5%）、大核 boost `2371200/2044800→1651200/1497600`、中核 boost `1651200→1296000`、三簇上限收到实测峰值（L 1939200 / M 1651200 / P 2044800）。**中核下限 835200 与 target_loads 刻意不动**（UnityMain 主线程 84.6%，835MHz 是维持 120fps 的临界）。非游戏部分与 `sweet_bal` 逐字节相同 → 音量键菜单一点即可 A/B。⚠ 前提：游戏在 调度App 里要设为「性能模式」 |
 | **v16.2.2** | ★ **「待重启生效」加第三路自愈 + 检测配置不再只会说「缺失」**：① `update` 待更新态此前只靠安装脚本的后台进程兜底，真机上会被系统回收 → 新增 **「访问即自愈」**：`webui.sh` / `action.sh` **顶部**都调同一个 `selfheal_pending_update`（`lib/util.sh`），**打开一次 WebUI 或按一次音量键就会顺手把待更新态合并掉**，不再依赖后台进程活着；② 自愈加 **版本守门**（`versionCode` 更高才合并，绝不把旧版本回盖），`ksufix` 从「只删标记」升级为**真合并**；③ **「检测配置」加了目录级前置检查**：11 项全报「缺失」时，现在会直接写明成因 —— `★目录不存在 ← 路径/挂载问题` / `★目录不可读 ← 权限或 SELinux` / `目录可读但确实无此文件 ← 被删除或从未写入`，并输出 `DIR_SCENE` / `DIR_WEBUI` 路径自检行，一眼分清是**检测/路径问题**还是**文件真不在**；④ 回归测试：`test_selfheal.py` 22 断言 + `test_pending_selfheal.py` 扩到 4 场景 28 断言（新增「暂存版本 ≤ 当前 → 只清孤儿标记、不回盖」） ⚠️ 其中「检测配置」功能已于 **v16.6 按用户要求移除**（脚本 `integrity.sh` 一并删除） |
 | **v16.2.1** | ★ **修「刷入后 Web UI 还显示旧版本号」**：v16.2 只改了 `module.prop` 的版本号、**漏跑了 `gen_webui.py`**，打包脚本也不调它，导致打进 zip 的 `webroot/index.html` 是上一次遗留的 16.1 构建（版本角标 + 前端代码都是旧的）。v16.2.1 把 `gen_webui.py` 调进 `pack_module.py` 的打包流程，成为硬步骤（重建失败即中止打包），从此版本号与前端必定同步。功能代码与 v16.2 一致 |
 | **v16.2** | ★ **修「开关是灰的 + 没有执行 / 打开按钮」**：读 KernelSU 源码定位到这是 **`update` 待更新标记**（不是 v16.1 的 `disable`）—— 安装器在 `. customize.sh` 返回**之后**才写 `update`，脚本里删它必失败；且 `update` 存在时 active 目录可能只剩 `module.prop`（缺 `webroot/`/`action.sh`），导致按钮**根本不渲染**。修正：安装脚本就地合并 + 清 `disable`/`remove`，再落一个独立自愈脚本 `setsid` 后台拉起，等 `update` 出现后合并进 active、删标记、`rm -rf modules_update`、重拉 `ksud services`（不重启）。新增 `test_pending_selfheal.py`（22 断言）覆盖该路径 |
@@ -971,32 +971,32 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 | v15.0 | ★ **升级即覆盖**：升级时直接覆盖 `profile.json`/`powercfg.sh`/`features/*.conf` 等，只保留 `threads*.json`（应用/游戏线程表），覆盖前自动备份 + 覆盖后重启 daemon + 收掉旧版遗留的 GPU 温控 bind-mount；游戏页新增「FAS 调速器 → 设为 xres」按钮 |
 | v14.0 | ★ FAS 调速器统一为 **xres**（`governor_*`，与「CPU 控制」页和 preset 三处一致）；反汇编证实 **FAS 候选是硬编码的**（本机只有 `auto/performance/conservative`）；**辅助调速器默认开启**（相机经 `_Camera.json` 的 `@limiter NONE` 豁免） |
 | v13.0 | 修应用页「线程档位」点不动（`data-act` 处理函数引用了已删函数）；`pickSheet` 取消哨兵改 `__cancel__`（NUL 会被 HTML 换成 U+FFFD） |
-| v12.0 | ★ **落核改 cgroup 分组**（新线程自动继承）；删「不接管」伪卡、极速档改名「系统接管」；相机频率偏低定位到「Scene 日用 app 辅助调速器」 |
+| v12.0 | ★ **落核改 cgroup 分组**（新线程自动继承）；删「不接管」伪卡、极速档改名「系统接管」；相机频率偏低定位到「调度App 日用 app 辅助调速器」 |
 | v11.0 | 清空所有内置默认线程分配；**相机固定「系统接管」且 UI 禁改**；给 `*_inactive` preset 补 `pl_max_freq` |
-| v10.0 | ★ **档位与模式同名**、一次性从 Scene 导入、彻底去 GPU（`gpu_lock=0`）；删 `mode_sync` 那一整套实时推导 |
-| v9.0 | 线程改回模块自己落核（Scene 核心分配的组级预算会把各档位压平） |
+| v10.0 | ★ **档位与模式同名**、一次性从 调度App 导入、彻底去 GPU（`gpu_lock=0`）；删 `mode_sync` 那一整套实时推导 |
+| v9.0 | 线程改回模块自己落核（调度App 核心分配的组级预算会把各档位压平） |
 | v8.0 | 「零守护」尝试（失败，详见 §3.2 的预算压平结论） |
 | **v7.0** | ★ 相机守护功耗治理：QoS 只清一次、看护并入 `guard.sh`、兜底守护 **0-fork 稳态**、档位现读现用；新增离线自检 |
 | v6.4 | 修正三个方案包的 `_Camera.json`（4 参数签名 + 裸 sysfs + 先 min 后 max）；新增 `camera_freq_guard.sh` |
 | v6.3 | 相机频率取证；模板卡 ⓘ 紧跟名称、说明面板不再被裁 |
 | v6.2 | 概览页瘦身；模板区交互统一（标题行 = ⓘ + 右侧小按钮） |
-| v6.1 | **CPU 调频交回 Scene**；新增配置完整性审计 + 一键还原 |
+| v6.1 | **CPU 调频交回 调度App**；新增配置完整性审计 + 一键还原 |
 | v6.0 | 修掉「极速把包从线程管理里删掉」+ 频率下限策略；模板改名；WebUI 文案精简 |
-| v4.6 | ★ 定位 Scene「无法启用」的真机制（`global.xml` 两个键） |
+| v4.6 | ★ 定位 调度App「无法启用」的真机制（`global.xml` 两个键） |
 | v4.2 | 调度配置 传递 / 备份 / 恢复 |
 | v3.x | WebUI 迭代；`threads.json` 生成；`enforce_threads.sh` 性能重写（上万 fork → 固定 5 次） |
-| v1~v2 | 线程绑核 MVP；早期用 `qos/*_freq` 限频（v6.1 已交回 Scene） |
+| v1~v2 | 线程绑核 MVP；早期用 `qos/*_freq` 限频（v6.1 已交回 调度App） |
 
 ### 从 v7.0 到 v16.0 期间修正的几条**关键认知**（都推翻了当时的写法）
 
-1. **「模块不写频率 + 相机守护」→ 相机守护整套删除**。真根因是 Scene 的
+1. **「模块不写频率 + 相机守护」→ 相机守护整套删除**。真根因是 调度App 的
    「日用 app 辅助调速器」每秒多次写 `scaling_max_freq`（strace 8 次/秒），把前台压到 417~912MHz；
    正解是在 `_Camera.json` 里对相机用 `["@limiter","NONE"]` 豁免。
 2. **逐线程 `taskset` → cgroup 分组**。关键收益不是快，而是**新线程自动继承创建者的 cgroup**。
-3. **「实时跟随 Scene 模式」→ 一次性导入**。实时推导会被 Scene 的任何一次改动冲掉。
+3. **「实时跟随 调度App 模式」→ 一次性导入**。实时推导会被 调度App 的任何一次改动冲掉。
 4. **FAS 调速器候选读不到内核**（硬编码），写 `fas.conf` 反而有效。
 5. **升级不能「继承」，要直接覆盖**：否则模块改了什么永远送不到设备上
-   （实测：Scene 侧 `powercfg.sh` 停在旧版好几天没人发现）。
+   （实测：调度App 侧 `powercfg.sh` 停在旧版好几天没人发现）。
 
 ---
 
@@ -1008,13 +1008,13 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
   历史上从 6+2 第三方配置包整包移植过来的 `_Camera.json` 就出过问题：
   值虽然合法，但它们是 `min`，会把 L 簇顶到 `2390400`，而该簇「80% 能效上限」才 `1353600`
   → 4 个小核全程满速空烧。
-- **依赖 Scene**。Scene 的配置结构变化（`global.xml` 键名、`profile.json` 格式）
-  会让模块失效。模块自己带的方案包是**跟随特定 Scene 9 版本**做的。
+- **依赖 调度App**。调度App 的配置结构变化（`global.xml` 键名、`profile.json` 格式）
+  会让模块失效。模块自己带的方案包是**跟随特定 调度App 9 版本**做的。
 - **守护需要 root 常驻上下文**，KernelSU / SukiSU 之外的环境（纯 Magisk 未验证）。
 
 ### 未验证项（诚实标注）
 
-- ⚠️ **Scene 的 `call` 数组是否接受裸 sysfs 路径** —— 只在 `_Games.json` 里见过
+- ⚠️ **调度App 的 `call` 数组是否接受裸 sysfs 路径** —— 只在 `_Games.json` 里见过
   `target_loads` 的裸路径先例，`_Camera.json` 里这么用**尚未在设备上证实生效**。
   如果无效，兜底守护仍能盖住（看到值不对就写回）。
 - ⚠️ **守护 2s 间隔 + 连写 3 遍是否足够压住回写** —— 此前实测写 `min` 后约 2s 会被打回。
@@ -1033,9 +1033,9 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 
 ### 致谢
 
-- [**Scene**](https://github.com/omarea/Scene)（`com.omarea.vtools`）——
-  本模块的设计完全围绕 Scene 展开，`profile.json` / `threads.json` / `features/*.conf`
-  的结构与语义都源自它。没有 Scene 就没有这个模块。
+- [**调度App**](https://github.com/omarea/调度App)（`com.omarea.vtools`）——
+  本模块的设计完全围绕 调度App 展开，`profile.json` / `threads.json` / `features/*.conf`
+  的结构与语义都源自它。没有 调度App 就没有这个模块。
 - [**KernelSU**](https://github.com/tiann/KernelSU) / SukiSU ——
   模块框架与 WebUI 桥接。
 - [**ponytail**](https://github.com/dietrichgebert/ponytail) ——
@@ -1044,7 +1044,7 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 
 ### 免责声明
 
-改 CPU 频率、绑核、动 Scene 的配置，**都属于会影响设备稳定性与散热的行为**。
+改 CPU 频率、绑核、动 调度App 的配置，**都属于会影响设备稳定性与散热的行为**。
 本模块按「如实标注、不猜、不覆盖别人的写入」设计，但**请自行评估风险**。
 
 特别地：**不要**为了解锁频率去写 `cpu_nolimit_temp` —— 那会解除温度保护。
@@ -1053,6 +1053,6 @@ python tools/build_module.py --check # 打包前先跑一遍离线自检套件�
 
 <div align="center">
 
-**XRingO3SceneLP** · 为玄戒 O3 补上 Scene 缺失的那两块
+**XRingO3SceneLP** · 为玄戒 O3 补上 调度App 缺失的那两块
 
 </div>

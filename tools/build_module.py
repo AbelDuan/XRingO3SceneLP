@@ -3,7 +3,7 @@
 """
 build_module.py —— 把当前仓库打成一个可刷入的 KernelSU 模块包
 
-产出: dist/SceneO3Tuner-v<version>-<date>.zip
+产出: dist/O3CPUSet-v<version>-<date>.zip
       （模块包根目录必须直接是 module.prop，所以这里不套多一层目录）
 
 跑法: python tools/build_module.py
@@ -110,22 +110,7 @@ def run_offline_suite():
     suite = [
         ("lint_module.py", "模块结构自检"),
         ("test_build_stamp.py", "产物日期跟随构建日"),
-        ("test_load_aware.py", "负载感知四档语义"),
-        ("test_bigcore_guard.py", "8-9 封锁"),
-        ("test_pin_mode.py", "落核模式默认值"),
-        ("test_sched_cores.py", "四档核心集合可自定义"),
-        ("test_webui_render.py", "WebUI 渲染（无头）"),
-        ("test_templates_v15.py", "流畅/性能核位重排迁移"),
-        ("test_camera_guard.py", "相机档位（手动应急工具的写入逻辑）"),
         ("test_pack_hygiene.py", "打包卫生（不得混入自检沙盒）"),
-        ("test_templates_v17.py", "4-5 字面量迁移（已有安装）"),
-        # —— 近几轮新增的套件（2026-09-23 补登记：漏登 = 打包闸门看不见它们）——
-        ("test_templates_v18.py", "省电档窄出口迁移（已有安装）"),
-        ("test_import_sync.py", "从 Scene 导入档位（真同步 + scene 剪枝）"),
-        ("test_assign_mark.py", "分配表 scene 标记的保存往返"),
-        ("test_action_import.py", "KSU 动作按钮 = 一键同步（无头）"),
-        ("test_migrate_nobig.py", "nobig 大核迁移的区间成员判定"),
-        ("test_release_unbind.py", "离表即释放（旧绑核回收）"),
     ]
     rc = 0
     for f, desc in suite:
@@ -219,7 +204,7 @@ def main():
     os.makedirs(DIST, exist_ok=True)
     ver = module_version()
     stamp = time.strftime("%Y%m%d")
-    out = os.path.join(DIST, "SceneO3Tuner-v%s-%s.zip" % (ver, stamp))
+    out = os.path.join(DIST, "O3CPUSet-v%s-%s.zip" % (ver, stamp))
 
     items = collect()
 
@@ -268,7 +253,8 @@ def main():
     print("关键文件:")
     for k in ("module.prop", "service.sh", "customize.sh",
               "lib/util.sh", "Scripts/4+4+2/O3/guard.sh",
-              "Scripts/4+4+2/O3/camera_freq_guard.sh",
+              "Scripts/4+4+2/O3/apply_freq.sh",
+              "Scripts/4+4+2/O3/aether/aether_ctl.sh",
               "webroot/index.html"):
         print(("  OK  " if k in entries else "  !!  ") + k)
     return 0

@@ -80,7 +80,11 @@ def check_frontend(sh_text):
         notes.append("前端源：webroot/index.html（已构建产物）")
 
     tabs = re.findall(r'data-tab="([a-z]+)"', tpl)
-    m = re.search(r"const fn = \{(.*?)\}\[S\.tab\]", js, re.S)
+    # 视图映射表：现行写法是 `const TABS = { freq: viewFreq, ... }` + `TABS[S.tab]`。
+    # （旧写法 `const fn = {...}[S.tab]` 已废弃，正则两种都兼容。）
+    m = re.search(r"const TABS\s*=\s*\{(.*?)\}", js, re.S)
+    if not m:
+        m = re.search(r"const fn = \{(.*?)\}\[S\.tab\]", js, re.S)
     views = dict(re.findall(r"([a-z]+):\s*(view[A-Za-z]+)", m.group(1))) if m else {}
     for t in tabs:
         if t not in views:

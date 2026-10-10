@@ -12,7 +12,7 @@
 #    二进制缺失或内核不支持 eBPF 时，aether-optext 自身会静默退出，
 #    不影响模块其余功能；WebUI 据此如实上报。
 # ============================================================
-MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+MODDIR="${MODDIR:-/data/adb/modules/O3CPUSet}"
 # 二进制 / 模板 / 名单一律按脚本自身所在目录定位（安装期 $MODDIR 可能还不是最终路径）
 SCRIPT_DIR="$(cd "$(dirname "$0")" 2>/dev/null && pwd)"
 AETHER_DIR="${SCRIPT_DIR:-$MODDIR/Scripts/4+4+2/O3/aether}"
@@ -21,7 +21,7 @@ TPL="$AETHER_DIR/threads.json"
 GAME="$AETHER_DIR/gamelist"
 TARGET="/sdcard/Android/Aether"
 CFG="$TARGET/threads.json"
-STATE_DIR="${STATE_DIR:-/data/adb/SceneO3Tuner}"
+STATE_DIR="${STATE_DIR:-/data/adb/O3CPUSet}"
 ONF="$STATE_DIR/aether.on"
 LOG="$STATE_DIR/aether.log"
 TMPD="${TMPD:-/data/local/tmp/_wui}"

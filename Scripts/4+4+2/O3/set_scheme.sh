@@ -4,9 +4,9 @@
 #  用法: set_scheme.sh <sweet_eco|sweet_bal|sweet_hq|sweet_perf> [quiet]
 #  可选: set_scheme.sh repair | restore
 #  v18：方案切换 = 选默认全局模式 + 频率下发 + 线程重建，
-#       不再与 Scene 做任何交互。
+#       不再与 调度App 做任何交互。
 # ============================================================
-MODDIR="${MODDIR:-/data/adb/modules/SceneO3Tuner}"
+MODDIR="${MODDIR:-/data/adb/modules/O3CPUSet}"
 . "$MODDIR/lib/util.sh"
 
 ACTION="$1"
@@ -14,7 +14,7 @@ QUIET="$2"
 
 # ---------- 修复：重建线程分配 + 重新下发频率 ----------
 if [ "$ACTION" = "repair" ]; then
-    out=$(gen_threads 2>&1)
+    out=$(sh "$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh" deploy 2>&1)
     log "🔧 修复：线程重建 $out"
     current_mode_read 2>/dev/null
     sh "$MODDIR/Scripts/4+4+2/O3/apply_freq.sh" --mode "${CUR_MODE:-balance}" >/dev/null 2>&1
@@ -63,7 +63,7 @@ if [ -f "$PC" ]; then
 fi
 
 # 4) 按模块模板/分配重建线程（写到 Aether 配置）
-out=$(gen_threads 2>&1)
+out=$(sh "$MODDIR/Scripts/4+4+2/O3/aether/aether_ctl.sh" deploy 2>&1)
 log "  · $out"
 
 log "✅ 方案 ${SCHEME} 已生效"

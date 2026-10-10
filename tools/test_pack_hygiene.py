@@ -16,7 +16,7 @@ test_pack_hygiene.py —— 打出来的模块包不得混入「自检沙盒」�
   「先跑自检、再打包」——于是**用 --check 打出来的包必然把沙盒一起装进去**。
 
   实测（本机）：交接包 84 条目，本机 --check 打出 139 条目，多出的 55 个全是沙盒文件
-  （`.test_sync_skip/scene/**` 15 个 + `_t_lw_*/ _t_v16_*/ _t_schedcores_*/ ...` 40 个）。
+  （`.test_sync_skip/调度App/**` 15 个 + `_t_lw_*/ _t_v16_*/ _t_schedcores_*/ ...` 40 个）。
   刷进设备后它们会落在 `/data/adb/modules/<id>/` 下，属于污染，必须挡住。
 
 跑法: python tools/test_pack_hygiene.py

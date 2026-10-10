@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # ============================================================================
 #  Abel · 玄戒 O3 适配版 powercfg.sh
-#  蓝本：Xiaomi 17 Ultra (canoe / SM8850) Scene lp 分支 powercfg.sh
+#  蓝本：Xiaomi 17 Ultra (canoe / SM8850) 调度App lp 分支 powercfg.sh
 #  目标：XRing O3 (xring_o3_asic) 10 核 3 簇 / governor xres / scheduler walt(xring)
 #
 #  适配要点（与蓝本的差异，逐条）：
@@ -22,7 +22,7 @@
 #  USE_HIDE=1 时用 bind-mount 隐藏易被系统改回的节点；设为 0 可完全不用挂载。
 # ============================================================================
 USE_HIDE=1
-LOG=/data/local/tmp/scene_lp_o3.log
+LOG=/data/local/tmp/app_lp_o3.log
 
 log() { echo "[$(date +%H:%M:%S)] $*" >> $LOG; }
 echo "===== Abel/O3 powercfg.sh @ $(date) =====" >> $LOG
@@ -53,7 +53,7 @@ lock_value() {
 #   旧写法 `dev_mount=/dev/$(cat /dev/urandom | ...)` 每跑一次脚本就在 /dev 里
 #   新建一个随机目录（实测一天下来攒了 67 个，且不会被清理，只能等重启）。
 #   hide_value 每次都是「先 umount 再 cp 再 mount」，复用同一个目录是安全的。
-dev_mount=/dev/.scene_o3_hide
+dev_mount=/dev/.app_o3_hide
 hide_value() {
   [ "$USE_HIDE" = "1" ] || { set_value "$2" "$1"; return; }
   if [ -e "$1" ]; then
@@ -134,7 +134,7 @@ set_value 0 /proc/sys/walt/input_boost/sched_boost_on_volkey
 # 不解除温控 GPU 限频，profile.json 里也没有 gpu_* preset / alias。
 # 原因：O3 的 GPU 由 devfreq + 厂商 power HAL 自治（实证：手写 core_ctl 会被
 # vendor.xring.ha 在数秒内回写），模块插手既抢不过也有反效果。
-# Scene 侧同步改为 features/env.conf 的 gpu_lock=0（= 不禁止系统 GPU Boost）。
+# 调度App 侧同步改为 features/env.conf 的 gpu_lock=0（= 不禁止系统 GPU Boost）。
 
 # ─────────────────────── 8. 小米侧：停掉游戏加速服务 ───────────────────────
 # 蓝本强停 joyose（替代其 migt/metis 参数锁）

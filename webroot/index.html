@@ -396,14 +396,14 @@ textarea.f { resize: vertical; line-height: 1.5; }
 <script>
 /* ============================================================
    玄戒O3 · Abel 调度工具箱 —— WebUI 前端（两大块：CPU频率 / 线程分配）
-     ① CPU频率：选方案 + 选全局模式 → 同步到 Scene（含启用，不再是自定义模式）
+     ① CPU频率：选方案 + 选全局模式 → 同步到 调度App（含启用，不再是自定义模式）
      ② 线程分配：完全使用艇长的 Aether 引擎；按「本机有界面应用」展示
         艇长已定义的线程、允许对未分配应用自定义、其余由艇长自动分配
    ============================================================ */
 'use strict';
 
-const MOD_ID = 'SceneO3Tuner';
-const STATE_DIR = '/data/adb/SceneO3Tuner';
+const MOD_ID = 'O3CPUSet';
+const STATE_DIR = '/data/adb/O3CPUSet';
 const MODDIR = '/data/adb/modules/' + MOD_ID;
 const SCRIPT = MODDIR + '/Scripts/4+4+2/O3/webui.sh';
 
@@ -657,7 +657,7 @@ const Demo = {
       ].join('\n'));
       case 'aetherset': return ok('OK 已设置（演示模式，未写入）');
       case 'aetherdel': return ok('OK 已恢复（演示模式，未写入）');
-      case 'profilepush': return ok('OK 已传递到 Scene 并启用（演示模式）');
+      case 'profilepush': return ok('OK 已传递到 调度App 并启用（演示模式）');
       case 'live': return ok('OK 频率已生效（演示模式）');
       default: return ok('OK 演示模式');
     }
@@ -711,14 +711,14 @@ function parseApps(text) {
 }
 
 /* ============================================================
-   5) 视图：CPU 频率（定义频率 + 同步到 Scene 启用）
+   5) 视图：CPU 频率（定义频率 + 同步到 调度App 启用）
    ============================================================ */
 async function viewFreq() {
   const v = document.getElementById('view');
   v.innerHTML =
     '<div class="group">' +
-      '<div class="g-title rowhead">调度来源（模块自有） <span class="pill ok" id="scene-pill">模块自有</span></div>' +
-      '<div class="card" id="scene-card"><div class="kv-row"><span class="k">加载中…</span></div></div>' +
+      '<div class="g-title rowhead">调度来源（模块自有） <span class="pill ok" id="调度App-pill">模块自有</span></div>' +
+      '<div class="card" id="调度App-card"><div class="kv-row"><span class="k">加载中…</span></div></div>' +
     '</div>' +
     '<div class="group">' +
       '<div class="g-title rowhead">频率方案 <button class="btn btn-xs" data-act="scheme">更换</button></div>' +
@@ -743,11 +743,11 @@ async function viewFreq() {
 }
 
 function renderSceneCard(st) {
-  const card = document.getElementById('scene-card'); if (!card) return;
+  const card = document.getElementById('调度App-card'); if (!card) return;
   const mode = st.MODE_CN || '—';
   const daemon = st.DAEMON === '1';
   const aether = st.AETHER_RUNNING === '1';
-  const pill = document.getElementById('scene-pill');
+  const pill = document.getElementById('调度App-pill');
   if (pill) { pill.textContent = '模块自有'; pill.className = 'pill ok'; }
   card.innerHTML =
     '<div class="kv-row"><span class="k">调度来源</span><span class="v mono">模块 QoS</span></div>' +

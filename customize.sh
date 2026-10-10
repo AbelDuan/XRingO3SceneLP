@@ -3,8 +3,8 @@
 #  安装脚本（KernelSU / Magisk 通用）  v3
 # ------------------------------------------------------------
 #  设计原则（2026-09-17 起）：**首次全灌，升级按清单覆盖，只保留「应用 / 游戏」配置**。
-#    · 首次安装（Scene 里没有 profile.json）→ 内置完整调度配置全量灌进 Scene，
-#      按 Scene 的 uid 修属主/权限，并逐个校验关键文件是否真的落盘。
+#    · 首次安装（调度App 里没有 profile.json）→ 内置完整调度配置全量灌进 调度App，
+#      按 调度App 的 uid 修属主/权限，并逐个校验关键文件是否真的落盘。
 #    · 非首次安装 → **直接覆盖** profile.json / manifest.json / description.txt /
 #      powercfg.sh / _Camera.json / _Apps.json / _Games.json / _ELP.json / features/*.conf；
 #      **保留** threads.json / threads_games.json —— 应用 / 游戏的线程档位表
@@ -13,17 +13,17 @@
 #      清单 = `lib/util.sh` 的 SYNC_SKIP，改一处即可。
 #      覆盖前自动备份到 $STATE_DIR/backup/upgrade-<时间戳>/，可回滚。
 #      ⚠ 早先是「继承、绝不覆盖」，代价是**模块改了什么都送不到设备上** ——
-#        实测：Scene 侧 powercfg.sh 停在 v9 版（还在写 GPU 节点）好几天没人发现。
-#    · 不再 chattr 加锁（实测会让 Scene 自己存不下配置）。
-#    · 想**连被保留的那几个也重灌**（比如 Scene 重置/丢配置后），用 WebUI 概览页的
+#        实测：调度App 侧 powercfg.sh 停在 v9 版（还在写 GPU 节点）好几天没人发现。
+#    · 不再 chattr 加锁（实测会让 调度App 自己存不下配置）。
+#    · 想**连被保留的那几个也重灌**（比如 调度App 重置/丢配置后），用 WebUI 概览页的
 #      「传递调度」—— 它刻意不设 SYNC_SKIP，属显式全量修复动作；
 #      「备份调度」「恢复备份」用于存档与回滚。
 # ============================================================
 SKIPUNZIP=0
 
-MODID=SceneO3Tuner
+MODID=O3CPUSet
 FINAL_PATH="/data/adb/modules/${MODID}"
-STATE_DIR="/data/adb/SceneO3Tuner"
+STATE_DIR="/data/adb/O3CPUSet"
 
 . "$MODPATH/lib/util.sh"
 MODDIR="$MODPATH"
@@ -128,7 +128,7 @@ else
     ui_print "- ⚠ 艇长线程配置部署失败（见上方原因）"
 fi
 
-# ---------- v18：模块自有初始化（不再与 Scene 交互）----------
+# ---------- v18：模块自有初始化（不再与 调度App 交互）----------
 #  频率 / 调度器 / 线程全部由本模块定义。安装时只做几件模块自己的事：
 #    · 选默认全局模式（由当前方案推导，写 active_mode）并下发 QoS 频率；
 #    · 把方案包内的 powercfg.sh 落地执行（平台 sysfs 调优）；
@@ -247,7 +247,7 @@ cat > "$SELFHEAL" <<'SHEOF'
 # 用途：本机禁止重启，靠这一步跳过 KernelSU 的「待重启生效」——
 #   把 /data/adb/modules_update/<id> 合并进 /data/adb/modules/<id>，
 #   删掉 active 目录里的 update 标记，再让 ksud 重拉一次模块服务。
-# 日志：/data/adb/SceneO3Tuner/fix_pending.log
+# 日志：/data/adb/O3CPUSet/fix_pending.log
 #
 # 触发：installer.sh 在本脚本返回之后才 mktouch update 标记，所以这里轮询等
 #   update 标记出现；同时只要 modules_update/<id> 带 module.prop 也视为可合并
@@ -256,10 +256,10 @@ cat > "$SELFHEAL" <<'SHEOF'
 #
 # ⚠ 即便这一步因后台进程被回收而没兜住，还有 webui.sh / action.sh 顶部的
 #   「访问即自愈」（用户一开 WebUI 或按一次音量键即触发合并）作为兜底。
-ID=SceneO3Tuner
+ID=O3CPUSet
 UPD="/data/adb/modules_update/$ID"
 FIN="/data/adb/modules/$ID"
-LOG="/data/adb/SceneO3Tuner/fix_pending.log"
+LOG="/data/adb/O3CPUSet/fix_pending.log"
 
 now() { date '+%F %T' 2>/dev/null || echo '?'; }
 
@@ -325,11 +325,11 @@ else
     ui_print "- 已启动安装后自愈（后台，免重启生效）"
 fi
 ui_print "- 约 10 秒后下拉刷新管理器：开关不再灰，出现「执行 / 打开」"
-ui_print "  （日志：/data/adb/SceneO3Tuner/fix_pending.log）"
+ui_print "  （日志：/data/adb/O3CPUSet/fix_pending.log）"
 
 ui_print " "
 ui_print "✅ 安装完成"
-ui_print "ℹ 玄戒O3 调度工具箱（v18 · 模块自有，不依赖 Scene）= 三块"
+ui_print "ℹ 玄戒O3 调度工具箱（v18 · 模块自有，不依赖 调度App）= 三块"
 ui_print "   ① CPU 频率 —— 模块 PM QoS 接管（全局 + 按 app 模式）"
 ui_print "   ② 线程分配 —— 艇长(Aether)引擎，WebUI 可开关与自定义"
 ui_print "   ③ 调度器   —— 方案 powercfg.sh（平台 sysfs 调优）"
@@ -337,4 +337,4 @@ ui_print "👉 模块 WebUI = 频率 / 线程 / 调度 三大块"
 ui_print "👉 线程引擎默认开启（艇长的方案）；如需关闭在 WebUI「线程」页翻开关"
 ui_print "👉 全局模式在 WebUI「模式」页切换；应用/游戏档位在「应用/游戏」页设置"
 ui_print " "
-ui_print "ℹ 频率完全由本模块下发（Scene 在玄戒O3 上不适配，已不再依赖）"
+ui_print "ℹ 频率完全由本模块下发（调度App 在玄戒O3 上不适配，已不再依赖）"
