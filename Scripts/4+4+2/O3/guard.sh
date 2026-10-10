@@ -239,9 +239,38 @@ while :; do
             log_quiet "🔁 threads.json 缺失 → 已让舰长重新部署配置"
         fi
 
+        # ---- 4) 超大核 8-9 锁：常态锁掉，仅游戏/不接管放行 ----
+        #   v18.3.2：引擎会把普通应用的渲染线程「保护性提升」到 8-9（实测小红书 95 次、
+        #   小爱 57 次…），且该行为是二进制硬编码、无法用 features 关闭。
+        #   v18.3.4：实测证明「迁进程进锁核组」拦不住引擎 —— 引擎的落核是**逐线程**
+        #   cgroup 迁移（写 OptExt/<g>/tasks），进程在 locked 组里它的线程照样被
+        #   单独拎去 8-9。也试过收窄 OptExt 子组 cpus（被引擎重建）、收窄根组
+        #   （子组占 8-9 → EINVAL）、bind-mount 冻结（引擎另建怪名组绕过）。
+        #   因此 v18.3.4 起主链路改为下面的 ⑤ 组级清扫；这里仍保留进程迁移作为
+        #   「第一道」与放行判定（游戏/不接管要迁回系统组才能拿全核）。
+        if [ -x "$MODDIR/Scripts/4+4+2/O3/bigcore_lock.sh" ]; then
+            sh "$MODDIR/Scripts/4+4+2/O3/bigcore_lock.sh" "$FG" >/dev/null 2>&1
+        fi
+
+
         # （相机档位看护、超大核 8-9 cpuset 限制、camera_freq_guard 拉起 —— 均已移除。
         #   前者根因在 v12 从源头修掉；后两者随老落核链路（bigcore_guard.sh）一并删除，
         #   线程与 cpuset 现在完全由舰长引擎自行管理。）
+    fi
+
+    # ---- 5) 组级清扫：把引擎提升到 8-9 的非白名单线程扫回来 ----
+    #   v18.3.4 新增，**每 tick 都跑**（刻意不放进上面的 WORK 块）：
+    #   WORK 块只在「前台变化 / 每 24 轮(120s)」成立，而引擎提升线程是**秒级**的 ——
+    #   放进 WORK 块意味着最多 120 秒才纠正一次，用户早就在用卡顿的 8-9 了。
+    #   v18.3.5：一个 tick 内**做两次**清扫（间隔由 SWEEP_SPLIT 控制）。
+    #   实测引擎的重写周期约 2~3s，而 tick=5s → 单次清扫的平均暴露窗口约 3~5s
+    #   （高频采样看到 0~31 个线程在两次 sweep 之间被重新写回 8-9）。
+    #   两次把平均窗口压到 ~1.5~2.5s，代价是稳态多一次 fork（零写入不变）。
+    #   关闭：touch $STATE_DIR/allow_bigcore
+    if [ -x "$MODDIR/Scripts/4+4+2/O3/bigcore_lock.sh" ] && [ ! -f "$STATE_DIR/allow_bigcore" ]; then
+        sh "$MODDIR/Scripts/4+4+2/O3/bigcore_lock.sh" sweep >/dev/null 2>&1
+        sleep "${SWEEP_SPLIT:-2}"
+        sh "$MODDIR/Scripts/4+4+2/O3/bigcore_lock.sh" sweep >/dev/null 2>&1
     fi
 
     # ---- 引擎看护（每轮，不限于 WORK）----
@@ -249,10 +278,14 @@ while :; do
     #   此前守护只查「threads.json 在不在」，引擎崩了/没起来一律无人察觉 ——
     #   实测强杀引擎后守护连等 3 轮都不会自愈，线程分配静默失效。
     #   这里每轮用一次 pgrep（≈30ms）比对，掉了就用 aether_ctl start 拉起（幂等）。
-    if [ -f "$ONF" ] && [ -x "$AETHER_CTL" ]; then
-        if ! pgrep -f "$AETHER_BIN_RE" >/dev/null 2>&1; then
-            sh "$AETHER_CTL" start >/dev/null 2>&1
-            log_quiet "🔄 舰长引擎未运行 → 已自动拉起（守护看护）"
+    # ★ 落核引擎改为 AppOpt（JZzz v14 二进制，aether 已停用）；掉线即拉起，保证配置=现场。
+    #   注意：AppOpt 运行期 cmdline 只含 basename（"AppOpt -c ..."），用完整路径 pgrep 永远匹配不到，
+    #   会导致每轮重复拉起、进程堆积。故用 "AppOpt -c" 片段匹配。
+    APPOPT="$MODDIR/Scripts/4+4+2/O3/AppOpt"
+    if [ -x "$APPOPT" ]; then
+        if ! pgrep -f 'AppOpt -c' >/dev/null 2>&1; then
+            nohup "$APPOPT" -c "$STATE_DIR/o3lim.conf" -s 2 </dev/null >> "$LOG_FILE" 2>&1 &
+            log_quiet "🔄 AppOpt 落核引擎未运行 → 已自动拉起（守护看护）"
         fi
     fi
 

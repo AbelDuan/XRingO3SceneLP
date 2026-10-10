@@ -1394,11 +1394,11 @@
       "cpuset": {
         "other": "{e_core},{p_core}",
         "comm": {
-          "{p_core}": [
+          "{e_core},{p_core}": [
             "com.miui.home",
             "binder*"
           ],
-          "{p_core}": [
+          "{e_core},{p_core}": [
             "RenderThread"
           ]
         }

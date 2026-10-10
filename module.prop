@@ -1,7 +1,7 @@
-id=O3CPUSet
+﻿id=O3CPUSet
 name=O3 CPU Set
-version=18.3.2 (2026-10-10)
-versionCode=2026101015
+version=18.3.7 (2026-10-11)
+versionCode=2026101101
 author=Abel Duan
-description=玄戒O3 调度工具箱（模块自有）· ①CPU频率：模块PM QoS接管（全局+按app模式）②线程分配：Aether 线程引擎③调度器：方案 powercfg
+description=功能状态｜频率 模块QoS(balance) · 线程 AppOpt · 调度器 powercfg · 守护 运行中 · 日志 开
 action=action.sh
